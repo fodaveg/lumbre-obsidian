@@ -20,6 +20,7 @@ import { MarkdownRenderChild, MarkdownRenderer, Platform, setIcon, type App } fr
 
 import { BRL_TODAY, parseBrlQuery } from '../brl/brl-ops';
 import type { Logger } from '../diagnostics/logger';
+import { staleNote } from './block-footer';
 import { logInvalidBlock } from './block-log';
 import type { BrlCache, BrlSnapshot } from './brl-cache';
 
@@ -150,7 +151,7 @@ export class LumbreBrlBlock extends MarkdownRenderChild {
 		setIcon(icon, 'refresh-cw');
 		button.createSpan({ text: 'Actualizar' });
 		button.disabled = this.date === null || this.snapshot?.loading === true;
-		button.addEventListener('click', () => {
+		this.registerDomEvent(button, 'click', () => {
 			void this.refresh();
 		});
 	}
@@ -189,11 +190,10 @@ export class LumbreBrlBlock extends MarkdownRenderChild {
 		if (snapshot.fetchedAt !== null) {
 			footer.createSpan({ text: `Datos de ${clockText(snapshot.fetchedAt)}` });
 		}
+		// El motivo REAL: «Sin conexión» para todo escondía el token caducado y el
+		// add-on del BRL desactivado, que no se arreglan igual.
 		if (snapshot.error !== null && snapshot.fetchedAt !== null) {
-			footer.createSpan({
-				cls: 'lumbre-brl__stale',
-				text: 'Sin conexión, mostrando la última lectura',
-			});
+			footer.createSpan({ cls: 'lumbre-brl__stale', text: staleNote(snapshot.error) });
 		}
 	}
 }

@@ -25,6 +25,23 @@ import { queryKey, queryParams, type ResolvedQuery } from './query-parser';
 /** Treinta segundos: lo que dice el lote, y lo que cabe en el límite de la API. */
 export const DEFAULT_QUERY_TTL_MS = 30_000;
 
+/**
+ * Ventana en la que varias materializaciones seguidas comparten UNA ronda de
+ * refresco. Materializar un lote de diez operaciones llamaba diez veces a
+ * `refreshAll`, o sea diez lecturas por cada consulta montada, contra un límite
+ * de 120 peticiones por minuto.
+ */
+export const REFRESH_COALESCE_MS = 250;
+
+/**
+ * Cuánto sobrevive una entrada SIN bloques montados. Las entradas huérfanas se
+ * conservan a propósito (en modo lectura un bloque se desmonta y se remonta con
+ * cada edición, y conservarla evita la petición y el parpadeo), pero ese ir y
+ * venir dura segundos: pasados diez minutos ya nadie va a volver, y la entrada
+ * solo ocupa memoria.
+ */
+export const IDLE_ENTRY_TTL_MS = 10 * 60_000;
+
 /** Lo que ve un bloque de su consulta. */
 export interface QuerySnapshot {
 	/** Última lectura confirmada. Vacía solo si nunca hubo ninguna. */
@@ -44,6 +61,8 @@ export interface QueryCacheOptions {
 	ttlMs?: number;
 	/** Reloj, inyectable para los tests. */
 	now?: () => number;
+	/** La espera de la ventana de coalescencia. Inyectable para los tests. */
+	wait?: (ms: number) => Promise<void>;
 	/**
 	 * Se llama tras cada lectura BUENA. Es por donde la API pública emite su
 	 * `tasks-changed`: cualquier refresco cuenta, no solo las materializaciones.
@@ -68,6 +87,8 @@ interface CacheEntry {
 	loading: boolean;
 	/** Invalidada a mano: la próxima lectura va al servidor aunque no haya vencido el TTL. */
 	stale: boolean;
+	/** Última vez que alguien la pidió o se suscribió. Es lo que mide el desalojo. */
+	touchedAt: number;
 	listeners: Set<QuerySubscriber>;
 	inFlight: Promise<QuerySnapshot> | null;
 }
@@ -77,35 +98,55 @@ export class QueryCache {
 	 * Una entrada por consulta distinta. Las entradas sin suscriptores se quedan
 	 * a propósito: en modo lectura un bloque se desmonta y se vuelve a montar con
 	 * cada edición, y conservarla es lo que evita la petición (y el parpadeo) en
-	 * ese ir y venir. El conjunto de consultas distintas de un vault es pequeño y
-	 * lo escribe el usuario, así que no crece solo.
+	 * ese ir y venir. Ese ir y venir dura segundos, así que pasados
+	 * `IDLE_ENTRY_TTL_MS` sin nadie que las pida se desalojan (`evictIdle`).
 	 */
 	private readonly entries = new Map<string, CacheEntry>();
 	private readonly ttlMs: number;
 	private readonly now: () => number;
+	private readonly wait: (ms: number) => Promise<void>;
 	private readonly log: Logger | null;
+
+	/** La ronda de refresco ya programada, si la hay. Es el pestillo de `refreshSoon`. */
+	private scheduledRefresh: Promise<void> | null = null;
 
 	constructor(private readonly options: QueryCacheOptions) {
 		this.ttlMs = options.ttlMs ?? DEFAULT_QUERY_TTL_MS;
 		this.now = options.now ?? ((): number => Date.now());
+		this.wait =
+			options.wait ??
+			((ms: number): Promise<void> =>
+				new Promise<void>((done) => {
+					// `window.setTimeout` y no `setTimeout` a secas: en una ventana emergente
+					// de Obsidian el temporizador tiene que ser el de ESA ventana.
+					window.setTimeout(done, ms);
+				}));
 		this.log = options.logger ?? null;
 	}
 
 	/**
 	 * Apunta a un bloque a los cambios de una consulta. Devuelve cómo darse de
-	 * baja, que es lo que llama el bloque al desmontarse.
+	 * baja, que es lo que llama el bloque al desmontarse. Al irse el ÚLTIMO
+	 * bloque se pasa el desalojo: la entrada solo cae si además lleva tiempo sin
+	 * que nadie la pida (ver `IDLE_ENTRY_TTL_MS`).
 	 */
 	subscribe(query: ResolvedQuery, listener: QuerySubscriber): () => void {
 		const entry = this.entryFor(query);
 		entry.listeners.add(listener);
 		return (): void => {
 			entry.listeners.delete(listener);
+			if (entry.listeners.size === 0) this.evictIdle();
 		};
 	}
 
-	/** Lo que hay guardado, sin pedir nada. */
+	/**
+	 * Lo que hay guardado, sin pedir nada y sin CREAR nada: preguntar por una
+	 * consulta no es usarla, y crear la entrada aquí dejaba en el mapa una fila
+	 * vacía por cada bloque que se pintaba antes de su primera lectura.
+	 */
 	peek(query: ResolvedQuery): QuerySnapshot {
-		return snapshot(this.entryFor(query));
+		const entry = this.entries.get(queryKey(query));
+		return entry === undefined ? emptySnapshot() : snapshot(entry);
 	}
 
 	/**
@@ -148,6 +189,7 @@ export class QueryCache {
 	 * bloques que enseñen esa tarea.
 	 */
 	async refreshAll(reason = 'la cola ha materializado algo'): Promise<void> {
+		this.evictIdle();
 		this.invalidate(reason);
 		const live = [...this.entries.values()].filter((entry) => entry.listeners.size > 0);
 		this.log?.info('Refresco de las consultas con bloques montados', {
@@ -158,6 +200,34 @@ export class QueryCache {
 		await Promise.all(live.map((entry) => this.load(entry)));
 	}
 
+	/**
+	 * Un `refreshAll` COALESCIDO. Mientras hay uno programado, las llamadas que
+	 * lleguen se enganchan a ese en vez de abrir otra ronda.
+	 *
+	 * Es lo que llama la cola al materializar, y por eso importa: la cola avisa
+	 * UNA VEZ POR OPERACIÓN, así que un lote de diez operaciones eran diez rondas
+	 * de lecturas, una por consulta montada, contra el límite de 120 peticiones
+	 * por minuto de la API.
+	 */
+	refreshSoon(reason = 'la cola ha materializado algo'): Promise<void> {
+		const already = this.scheduledRefresh;
+		if (already !== null) {
+			this.log?.debug('Refresco ya programado, no se abre otro', { reason });
+			return already;
+		}
+
+		const scheduled = (async (): Promise<void> => {
+			await this.wait(REFRESH_COALESCE_MS);
+			// El pestillo se suelta ANTES de leer: lo que materialice DURANTE la ronda
+			// merece su propia ronda detrás, o su cambio no se vería hasta el TTL.
+			this.scheduledRefresh = null;
+			await this.refreshAll(reason);
+		})();
+
+		this.scheduledRefresh = scheduled;
+		return scheduled;
+	}
+
 	/** Cuántas consultas distintas hay guardadas. Para los tests y la depuración. */
 	size(): number {
 		return this.entries.size;
@@ -166,7 +236,10 @@ export class QueryCache {
 	private entryFor(query: ResolvedQuery): CacheEntry {
 		const key = queryKey(query);
 		const existing = this.entries.get(key);
-		if (existing !== undefined) return existing;
+		if (existing !== undefined) {
+			existing.touchedAt = this.now();
+			return existing;
+		}
 
 		const created: CacheEntry = {
 			query,
@@ -175,11 +248,31 @@ export class QueryCache {
 			error: null,
 			loading: false,
 			stale: true,
+			touchedAt: this.now(),
 			listeners: new Set(),
 			inFlight: null,
 		};
 		this.entries.set(key, created);
 		return created;
+	}
+
+	/**
+	 * Tira las entradas que no tienen bloques montados y llevan más de
+	 * `IDLE_ENTRY_TTL_MS` sin que nadie las pida. Nunca toca una con suscriptores
+	 * ni una con petición en vuelo.
+	 */
+	private evictIdle(): void {
+		const cutoff = this.now() - IDLE_ENTRY_TTL_MS;
+		let dropped = 0;
+		for (const [key, entry] of this.entries) {
+			if (entry.listeners.size > 0 || entry.inFlight !== null) continue;
+			if (entry.touchedAt > cutoff) continue;
+			this.entries.delete(key);
+			dropped += 1;
+		}
+		if (dropped > 0) {
+			this.log?.debug('Consultas desalojadas de la caché', { dropped, entries: this.entries.size });
+		}
 	}
 
 	private isFresh(entry: CacheEntry): boolean {
@@ -247,6 +340,11 @@ export class QueryCache {
 		const current = snapshot(entry);
 		for (const listener of entry.listeners) listener(current);
 	}
+}
+
+/** Lo que ve quien pregunta por una consulta de la que no hay nada guardado. */
+function emptySnapshot(): QuerySnapshot {
+	return { tasks: [], fetchedAt: null, error: null, loading: false };
 }
 
 function snapshot(entry: CacheEntry): QuerySnapshot {

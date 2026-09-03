@@ -2,7 +2,12 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type { LumbreResult } from '../lumbre/client';
 import type { LumbreTask } from '../lumbre/types';
-import { QueryCache, type QuerySnapshot } from './query-cache';
+import {
+	IDLE_ENTRY_TTL_MS,
+	QueryCache,
+	REFRESH_COALESCE_MS,
+	type QuerySnapshot,
+} from './query-cache';
 import { parseQuery, resolveQuery, type ResolvedQuery } from './query-parser';
 
 function task(id: string, content = 'Comprar pan'): LumbreTask {
@@ -202,6 +207,86 @@ describe('QueryCache', () => {
 
 		expect(cache.peek(query('')).fetchedAt).toBeNull();
 		expect(client.listTasks).not.toHaveBeenCalled();
+	});
+
+	it('peek de una consulta desconocida NO crea la entrada', () => {
+		const cache = new QueryCache({ client: okClient(), now: () => 0 });
+
+		cache.peek(query(''));
+		expect(cache.size()).toBe(0);
+	});
+
+	it('una entrada vieja y sin bloques montados se desaloja en el siguiente refresco', async () => {
+		let clock = 0;
+		const cache = new QueryCache({ client: okClient(), now: () => clock });
+
+		await cache.get(query(''));
+		expect(cache.size()).toBe(1);
+
+		clock = IDLE_ENTRY_TTL_MS + 1;
+		await cache.refreshAll();
+		expect(cache.size()).toBe(0);
+	});
+
+	it('una entrada sin bloques montados pero RECIENTE se conserva', async () => {
+		let clock = 0;
+		const cache = new QueryCache({ client: okClient(), now: () => clock });
+
+		await cache.get(query(''));
+		clock = IDLE_ENTRY_TTL_MS - 1;
+		await cache.refreshAll();
+		expect(cache.size()).toBe(1);
+	});
+
+	it('una entrada CON bloques montados no se desaloja por vieja', async () => {
+		let clock = 0;
+		const cache = new QueryCache({ client: okClient(), now: () => clock });
+		cache.subscribe(query(''), () => undefined);
+
+		await cache.get(query(''));
+		clock = IDLE_ENTRY_TTL_MS * 10;
+		await cache.refreshAll();
+		expect(cache.size()).toBe(1);
+	});
+
+	it('refreshSoon coalesce: diez materializaciones seguidas son UNA ronda', async () => {
+		const client = okClient();
+		const cache = new QueryCache({ client, now: () => 0, wait: async () => undefined });
+		cache.subscribe(query(''), () => undefined);
+		await cache.get(query(''));
+		expect(client.listTasks).toHaveBeenCalledTimes(1);
+
+		// Esto es lo que hace `onMaterialized` con un lote de diez operaciones.
+		const rounds = Array.from({ length: 10 }, () => cache.refreshSoon());
+		await Promise.all(rounds);
+
+		expect(client.listTasks).toHaveBeenCalledTimes(2);
+	});
+
+	it('refreshSoon espera la ventana de coalescencia antes de pedir nada', async () => {
+		const client = okClient();
+		const waits: number[] = [];
+		const cache = new QueryCache({
+			client,
+			now: () => 0,
+			wait: async (ms: number) => {
+				waits.push(ms);
+			},
+		});
+		cache.subscribe(query(''), () => undefined);
+
+		await cache.refreshSoon();
+		expect(waits).toEqual([REFRESH_COALESCE_MS]);
+	});
+
+	it('una materialización posterior a la ronda sí abre otra', async () => {
+		const client = okClient();
+		const cache = new QueryCache({ client, now: () => 0, wait: async () => undefined });
+		cache.subscribe(query(''), () => undefined);
+
+		await cache.refreshSoon();
+		await cache.refreshSoon();
+		expect(client.listTasks).toHaveBeenCalledTimes(2);
 	});
 
 	it('onRefresh solo salta con una lectura buena', async () => {

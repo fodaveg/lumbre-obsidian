@@ -20,7 +20,7 @@
 import { isLogLevel, type Logger } from '../diagnostics/logger';
 import type { LumbreTaskLink } from '../links/link-store';
 import type { QueuedOperation } from '../lumbre/queue';
-import { DEFAULT_SETTINGS, type LumbreSettings } from '../settings';
+import { DEFAULT_SETTINGS, normalizeOrigin, type LumbreSettings } from '../settings';
 
 /**
  * Versión del formato de `data.json`. Sube cuando la forma cambie.
@@ -303,8 +303,11 @@ export function migrate(raw: unknown): PluginData {
 
 	const settings = asRecord(row['settings']);
 	// Sin `version` es el formato viejo: los ajustes estaban en la raíz.
+	const writtenOrigin = asString(settings?.['apiOrigin']) ?? asString(row['apiOrigin']);
 	const apiOrigin =
-		asString(settings?.['apiOrigin']) ?? asString(row['apiOrigin']) ?? DEFAULT_SETTINGS.apiOrigin;
+		writtenOrigin === null
+			? DEFAULT_SETTINGS.apiOrigin
+			: (normalizeOrigin(writtenOrigin) ?? DEFAULT_SETTINGS.apiOrigin);
 
 	// Los ajustes de diagnóstico entraron en la versión 2. Un `data.json` de la 1
 	// no los trae y estrena los valores por defecto, que es todo lo que hay que
@@ -314,7 +317,18 @@ export function migrate(raw: unknown): PluginData {
 
 	return {
 		version: PLUGIN_DATA_VERSION,
-		settings: { ...DEFAULT_SETTINGS, apiOrigin, logLevel, liveLog: settings?.['liveLog'] === true },
+		// Los ajustes se COPIAN enteros sobre los de fábrica y solo se corrigen los
+		// dos que pueden venir mal escritos. Reconstruirlos campo a campo hacía que
+		// un ajuste que este plugin todavía no conoce (porque lo escribió una
+		// versión más nueva desde otro dispositivo, por Sync) se perdiera en cada
+		// carga, y la primera escritura lo borraba también del fichero.
+		settings: {
+			...DEFAULT_SETTINGS,
+			...(settings ?? {}),
+			apiOrigin,
+			logLevel,
+			liveLog: settings?.['liveLog'] === true,
+		},
 		token: asString(row['token']),
 		queue: asArray<QueuedOperation>(row['queue']),
 		links: asArray<LumbreTaskLink>(row['links']),

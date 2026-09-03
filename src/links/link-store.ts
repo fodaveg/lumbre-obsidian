@@ -58,6 +58,13 @@ export interface LinkStoreOptions {
 	storage: LinkStorage;
 	/** Reloj, inyectable para los tests. */
 	now?: () => Date;
+	/**
+	 * `true` si esa ruta SIGUE en el vault. Lo cablea `main.ts` con
+	 * `vault.getAbstractFileByPath`. Sin él, el mapa no puede comprobar si una
+	 * nota que se dio por desaparecida ha vuelto, y `orphanedAt` se queda puesto
+	 * para siempre.
+	 */
+	exists?: (path: string) => boolean;
 	/** Registro de diagnóstico. Sin él, el mapa no apunta nada. */
 	logger?: Logger;
 }
@@ -199,6 +206,10 @@ export class LinkStore {
 			return mine;
 		}
 
+		// Si la nota está donde dice el vínculo, ya no es huérfana: un borrado que
+		// vino de otro dispositivo por Sync puede haberse deshecho sin que este
+		// Obsidian viera el `create`, y «La nota ya no existe» se quedaba puesto.
+		const backAgain = this.options.exists?.(path) === true;
 		const byId = new Map(read.value.map((task) => [task.id, task]));
 		let missing = 0;
 		for (const link of mine) {
@@ -212,6 +223,7 @@ export class LinkStore {
 				link.syncState = 'materialized';
 				link.error = null;
 			}
+			if (backAgain) link.orphanedAt = null;
 			link.updatedAt = stamp;
 		}
 		await this.options.storage.writeLinks(links);
@@ -274,6 +286,35 @@ export class LinkStore {
 			this.log?.warn('Vínculos huérfanos: su nota ha desaparecido', { path, marked });
 		}
 		return marked;
+	}
+
+	/**
+	 * Quita el huérfano de los vínculos de una nota (o de una carpeta entera) que
+	 * ha VUELTO a aparecer. Lo engancha `main.ts` a `vault.on('create')`.
+	 *
+	 * Hace falta porque un borrado seguido de una creación en la misma ruta es lo
+	 * NORMAL, no una rareza: es lo que hace Obsidian Sync cuando la nota vuelve
+	 * desde otro dispositivo. Sin esto, la única forma de quitar «La nota ya no
+	 * existe» era volver a vincular la misma tarea a mano.
+	 */
+	async markCreated(path: string): Promise<number> {
+		const links = this.all();
+		const stamp = this.stamp();
+		let cleared = 0;
+
+		for (const link of links) {
+			if (link.orphanedAt === null) continue;
+			if (link.notePath !== path && !link.notePath.startsWith(`${path}/`)) continue;
+			link.orphanedAt = null;
+			link.updatedAt = stamp;
+			cleared += 1;
+		}
+
+		if (cleared > 0) {
+			await this.options.storage.writeLinks(links);
+			this.log?.info('Vínculos recuperados: su nota ha vuelto', { path, cleared });
+		}
+		return cleared;
 	}
 
 	private stamp(): string {

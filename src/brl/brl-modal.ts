@@ -9,7 +9,7 @@
  * llamador, que es quien encola por la cola durable.
  */
 
-import { Modal, Notice, setIcon, type App } from 'obsidian';
+import { Component, Modal, Notice, setIcon, type App } from 'obsidian';
 
 import { MAX_BRL_ENTRY_LENGTH, type BrlKind } from './brl-ops';
 
@@ -23,6 +23,13 @@ export interface BrlModalOptions {
 export class BrlEntryModal extends Modal {
 	private text: string;
 
+	/**
+	 * Los listeners del DOM. `Modal` NO es un `Component` y no tiene
+	 * `registerDomEvent`, así que el modal lleva el suyo: se carga al abrir y se
+	 * descarga al cerrar, y con él se sueltan todos de una vez.
+	 */
+	private readonly events = new Component();
+
 	constructor(
 		app: App,
 		private readonly options: BrlModalOptions,
@@ -32,6 +39,7 @@ export class BrlEntryModal extends Modal {
 	}
 
 	onOpen(): void {
+		this.events.load();
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.addClass('lumbre-brl-modal');
@@ -43,7 +51,7 @@ export class BrlEntryModal extends Modal {
 		area.placeholder = 'Qué ha pasado, o qué estás pensando';
 		area.value = this.text;
 		area.setAttribute('aria-label', 'Texto de la entrada del registro');
-		area.addEventListener('input', () => {
+		this.events.registerDomEvent(area, 'input', () => {
 			this.text = area.value;
 		});
 
@@ -59,7 +67,7 @@ export class BrlEntryModal extends Modal {
 		// Enter dentro del textarea es un salto de línea, que es lo que uno espera
 		// de un apunte de varias líneas. Ctrl/Cmd+Enter lo manda como nota, que es
 		// el caso frecuente.
-		area.addEventListener('keydown', (event: KeyboardEvent) => {
+		this.events.registerDomEvent(area, 'keydown', (event: KeyboardEvent) => {
 			if (event.key !== 'Enter' || event.isComposing) return;
 			if (!event.metaKey && !event.ctrlKey) return;
 			event.preventDefault();
@@ -73,6 +81,8 @@ export class BrlEntryModal extends Modal {
 	}
 
 	onClose(): void {
+		// Con el Component se van todos los listeners que registró el modal.
+		this.events.unload();
 		this.contentEl.empty();
 	}
 
@@ -82,7 +92,7 @@ export class BrlEntryModal extends Modal {
 		setIcon(holder, icon);
 		button.createSpan({ text });
 		button.setAttribute('aria-label', `Anotar como ${text.toLowerCase()}`);
-		button.addEventListener('click', () => {
+		this.events.registerDomEvent(button, 'click', () => {
 			this.submit(kind);
 		});
 	}

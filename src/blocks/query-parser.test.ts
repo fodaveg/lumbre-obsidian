@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import { MAX_TASKS_LIMIT } from '../lumbre/client';
 import type { LumbreTask } from '../lumbre/types';
 import {
 	applyClientFilters,
@@ -72,6 +73,7 @@ describe('parseQuery', () => {
 				'tag: #compras',
 				'includeDone: true',
 				'limit: 20',
+				'notes: full',
 				'title: Lo que viene',
 			].join('\n'),
 		);
@@ -85,6 +87,7 @@ describe('parseQuery', () => {
 			tag: 'compras',
 			includeDone: true,
 			limit: 20,
+			notes: 'full',
 			title: 'Lo que viene',
 		});
 	});
@@ -200,16 +203,30 @@ describe('resolveQuery', () => {
 });
 
 describe('queryParams', () => {
-	it('nunca pide las notas de las tareas', () => {
+	it('no pide las notas de las tareas salvo que la consulta lo diga', () => {
 		expect(queryParams(resolveQuery(parsed(''), BARE)).notes).toBe('none');
+	});
+
+	it('con «notes: full» sí las pide', () => {
+		expect(queryParams(resolveQuery(parsed('notes: full'), BARE)).notes).toBe('full');
 	});
 
 	it('manda limit al servidor cuando no hay filtro por etiqueta', () => {
 		expect(queryParams(resolveQuery(parsed('limit: 5'), BARE)).limit).toBe(5);
 	});
 
-	it('NO manda limit cuando hay etiqueta: el servidor recortaría antes de filtrar', () => {
-		expect(queryParams(resolveQuery(parsed('limit: 5\ntag: casa'), BARE)).limit).toBeUndefined();
+	it('con etiqueta manda el TOPE del servidor: el filtro es en cliente', () => {
+		expect(queryParams(resolveQuery(parsed('limit: 5\ntag: casa'), BARE)).limit).toBe(
+			MAX_TASKS_LIMIT,
+		);
+	});
+
+	it('sin limit escrito pide el tope, no el default de 200 del servidor', () => {
+		expect(queryParams(resolveQuery(parsed(''), BARE)).limit).toBe(MAX_TASKS_LIMIT);
+	});
+
+	it('un limit por encima del tope se recorta al tope', () => {
+		expect(queryParams(resolveQuery(parsed('limit: 9000'), BARE)).limit).toBe(MAX_TASKS_LIMIT);
 	});
 });
 
@@ -223,6 +240,12 @@ describe('queryKey', () => {
 	it('consultas distintas tienen claves distintas', () => {
 		expect(queryKey(resolveQuery(parsed('scope: week'), BARE))).not.toBe(
 			queryKey(resolveQuery(parsed('scope: today'), BARE)),
+		);
+	});
+
+	it('pedir las notas es OTRA consulta: no comparte entrada de caché', () => {
+		expect(queryKey(resolveQuery(parsed('notes: full'), BARE))).not.toBe(
+			queryKey(resolveQuery(parsed(''), BARE)),
 		);
 	});
 });

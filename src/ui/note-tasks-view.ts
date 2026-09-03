@@ -16,17 +16,19 @@
 
 import { ItemView, Notice, Platform, setIcon, type TFile, type WorkspaceLeaf } from 'obsidian';
 
+import { partialNote } from '../blocks/block-footer';
 import type { Logger } from '../diagnostics/logger';
 import type { LinkStore, LumbreTaskLink } from '../links/link-store';
-import { describeFailure, type LumbreClient } from '../lumbre/client';
+import { describeFailure, MAX_TASKS_LIMIT, type LumbreClient } from '../lumbre/client';
 import type { ListCache } from '../lumbre/list-cache';
 import type { OperationQueue, QueuedOperation } from '../lumbre/queue';
 import { taskDeepLinks, type LumbreTask } from '../lumbre/types';
 import { linkChipState, pendingOperationFor, type ChipState } from './link-chip-state';
 import { openTaskInLumbre } from './open-in-lumbre';
 import { operationActions } from './operation-actions';
-import { filterTasks } from './search-filter';
 import { groupBySection } from './task-sections';
+import { searchTasks } from './task-search';
+import { taskStateLabels } from './task-state-labels';
 
 export const NOTE_TASKS_VIEW_TYPE = 'lumbre-note-tasks';
 
@@ -76,6 +78,8 @@ export class NoteTasksView extends ItemView {
 	private hasToken = true;
 	private searchQuery = '';
 	private searchResults: LumbreTask[] | null = null;
+	/** La última búsqueda llegó al tope del servidor: puede faltar lo que no cupo. */
+	private searchPartial = false;
 	private searching = false;
 	private confirmingUnlink: string | null = null;
 	private project: ProjectState | null = null;
@@ -359,7 +363,7 @@ export class NoteTasksView extends ItemView {
 				'aria-label',
 				task.done ? `Reabrir ${task.content}` : `Completar ${task.content}`,
 			);
-			box.addEventListener('change', () => {
+			this.registerDomEvent(box, 'change', () => {
 				void this.toggleDone(task, box.checked);
 			});
 		}
@@ -376,7 +380,9 @@ export class NoteTasksView extends ItemView {
 		}
 
 		const meta = row.createDiv({ cls: 'lumbre-task__meta' });
-		if (cancelled) meta.createSpan({ cls: 'lumbre-task__meta-item', text: 'Cancelada' });
+		for (const label of taskStateLabels(task)) {
+			meta.createSpan({ cls: 'lumbre-task__meta-item', text: label });
+		}
 		if (task.list !== null) {
 			meta.createSpan({ cls: 'lumbre-task__meta-item', text: task.list.name });
 		}
@@ -409,10 +415,10 @@ export class NoteTasksView extends ItemView {
 		input.value = this.searchQuery;
 		input.disabled = this.file === null;
 		input.setAttribute('aria-label', 'Texto para buscar tareas en Lumbre');
-		input.addEventListener('input', () => {
+		this.registerDomEvent(input, 'input', () => {
 			this.searchQuery = input.value;
 		});
-		input.addEventListener('keydown', (event: KeyboardEvent) => {
+		this.registerDomEvent(input, 'keydown', (event: KeyboardEvent) => {
 			if (event.key !== 'Enter') return;
 			event.preventDefault();
 			void this.search();
@@ -429,6 +435,13 @@ export class NoteTasksView extends ItemView {
 
 		const results = this.searchResults;
 		if (results === null) return;
+		// El aviso va ANTES de los resultados y también cuando no hay ninguno: sin
+		// él, «Ninguna tarea con ese texto» sería mentira si la tarea está entre las
+		// que no cupieron en la lectura.
+		const partial = this.searchPartial ? partialNote(MAX_TASKS_LIMIT) : null;
+		if (partial !== null) {
+			section.createDiv({ cls: 'lumbre-panel__stale', text: partial });
+		}
 		if (results.length === 0) {
 			section.createDiv({ cls: 'lumbre-empty', text: 'Ninguna tarea con ese texto.' });
 			return;
@@ -564,12 +577,9 @@ export class NoteTasksView extends ItemView {
 		this.render();
 
 		// Una sola petición y el filtro en cliente: la API no busca por texto y
-		// `notes=none` evita traer el cuerpo de cada tarea para nada.
-		const read = await this.host.client.listTasks({
-			scope: 'all',
-			includeDone: false,
-			notes: 'none',
-		});
+		// `notes=none` evita traer el cuerpo de cada tarea para nada. Ver
+		// `searchTasks`: se pide el TOPE del servidor, no su default de 200.
+		const read = await searchTasks(this.host.client, this.searchQuery, MAX_SEARCH_RESULTS);
 		this.searching = false;
 
 		if (!read.ok) {
@@ -579,16 +589,19 @@ export class NoteTasksView extends ItemView {
 			});
 			new Notice(`No se pudo buscar en Lumbre. ${describeFailure(read.reason, read.status)}`);
 			this.searchResults = [];
+			this.searchPartial = false;
 			this.render();
 			return;
 		}
 
-		this.searchResults = filterTasks(read.value, this.searchQuery).slice(0, MAX_SEARCH_RESULTS);
+		this.searchResults = read.value.tasks;
+		this.searchPartial = read.value.partial;
 		// El TEXTO buscado no se apunta: lo escribe el usuario y puede ser cualquier
 		// cosa. Cuántas tareas se miraron y cuántas casaron sí.
 		this.host.logger.info('Acción del usuario', {
 			action: 'buscar tareas',
-			scanned: read.value.length,
+			scanned: read.value.scanned,
+			partial: read.value.partial,
 			matched: this.searchResults.length,
 		});
 		this.render();
@@ -686,7 +699,7 @@ export class NoteTasksView extends ItemView {
 			setIcon(icon, options.icon);
 		}
 		button.createSpan({ text: options.text });
-		button.addEventListener('click', options.onClick);
+		this.registerDomEvent(button, 'click', options.onClick);
 		return button;
 	}
 }

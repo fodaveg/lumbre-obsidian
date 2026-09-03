@@ -10,7 +10,7 @@
  * hechas, igual que el resto de los modales del plugin.
  */
 
-import { Modal, Notice, setIcon, type App } from 'obsidian';
+import { Component, Modal, Notice, setIcon, type App } from 'obsidian';
 
 import { formatEvent, type LogEvent } from './logger';
 
@@ -29,6 +29,12 @@ export interface DiagnosticsModalOptions {
 }
 
 export class DiagnosticsModal extends Modal {
+	/**
+	 * Los listeners del DOM. `Modal` NO es un `Component` y no tiene
+	 * `registerDomEvent`, así que el modal lleva el suyo: se carga al abrir y se
+	 * descarga al cerrar, y con él se sueltan todos de una vez.
+	 */
+	private readonly events = new Component();
 	constructor(
 		app: App,
 		private readonly options: DiagnosticsModalOptions,
@@ -37,6 +43,7 @@ export class DiagnosticsModal extends Modal {
 	}
 
 	onOpen(): void {
+		this.events.load();
 		this.modalEl.addClass('lumbre-diagnostics');
 		this.setTitle('Diagnóstico de Lumbre');
 
@@ -81,6 +88,8 @@ export class DiagnosticsModal extends Modal {
 	}
 
 	onClose(): void {
+		// Con el Component se van todos los listeners que registró el modal.
+		this.events.unload();
 		this.contentEl.empty();
 	}
 
@@ -94,7 +103,7 @@ export class DiagnosticsModal extends Modal {
 		const holder = button.createSpan({ cls: 'lumbre-button__icon' });
 		setIcon(holder, icon);
 		button.createSpan({ text });
-		button.addEventListener('click', () => {
+		this.events.registerDomEvent(button, 'click', () => {
 			void onClick();
 		});
 	}

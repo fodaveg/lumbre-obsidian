@@ -57,6 +57,16 @@ export default defineConfig(
 		},
 	},
 	{
+		// Los tests de `src/` corren en Node bajo Vitest y NO entran en `main.js`
+		// (el bundle sale solo de `src/main.ts`), así que la prohibición de los
+		// módulos de Node no les aplica: un test de forma que lee los ficheros del
+		// plugin necesita `node:fs` por definición.
+		files: ['src/**/*.test.ts'],
+		rules: {
+			'obsidianmd/no-nodejs-modules': 'off',
+		},
+	},
+	{
 		files: ['src/**/*.ts'],
 		rules: {
 			// La regla minusculiza "Lumbre", que es un nombre propio.

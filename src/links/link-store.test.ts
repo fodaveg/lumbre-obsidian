@@ -164,6 +164,40 @@ describe('LinkStore: renombrados y borrados del vault', () => {
 		expect(await store.markDeleted('Proyectos')).toBe(2);
 		expect(storage.links.every((link) => link.orphanedAt !== null)).toBe(true);
 	});
+
+	it('una nota que VUELVE deja de ser huérfana (Sync borra y vuelve a crear)', async () => {
+		const storage = memoryStorage();
+		const store = storeWith(storage);
+		await store.link('Cocina.md', task(), TARGET);
+		await store.markDeleted('Cocina.md');
+
+		const cleared = await store.markCreated('Cocina.md');
+
+		expect(cleared).toBe(1);
+		expect(storage.links[0]?.orphanedAt).toBeNull();
+	});
+
+	it('crear una nota que nunca fue huérfana no escribe nada', async () => {
+		const storage = memoryStorage();
+		const write = vi.spyOn(storage, 'writeLinks');
+		const store = storeWith(storage);
+		await store.link('Cocina.md', task(), TARGET);
+		write.mockClear();
+
+		expect(await store.markCreated('Cocina.md')).toBe(0);
+		expect(write).not.toHaveBeenCalled();
+	});
+
+	it('una carpeta que vuelve limpia todo lo que colgaba de ella', async () => {
+		const storage = memoryStorage();
+		const store = storeWith(storage);
+		await store.link('Proyectos/Cocina.md', task(), TARGET);
+		await store.link('Proyectos/Obra.md', task({ id: 'task-2' }), TARGET);
+		await store.markDeleted('Proyectos');
+
+		expect(await store.markCreated('Proyectos')).toBe(2);
+		expect(storage.links.every((link) => link.orphanedAt === null)).toBe(true);
+	});
 });
 
 describe('LinkStore.refresh', () => {
@@ -226,6 +260,58 @@ describe('LinkStore.refresh', () => {
 
 		expect(await store.refresh('Vacía.md', { getTasksByIds })).toEqual([]);
 		expect(getTasksByIds).not.toHaveBeenCalled();
+	});
+
+	it('una tarea ARCHIVADA en Lumbre se relee sin error: archivar no es borrar', async () => {
+		const storage = memoryStorage();
+		const store = storeWith(storage);
+		await store.link('Cocina.md', task(), TARGET);
+		const getTasksByIds = vi.fn(
+			async (_ids: string[]): Promise<LumbreResult<LumbreTask[]>> => ({
+				ok: true,
+				value: [task({ archivedAt: '2026-09-01T10:00:00.000Z' })],
+			}),
+		);
+
+		await store.refresh('Cocina.md', { getTasksByIds });
+
+		expect(storage.links[0]?.syncState).toBe('materialized');
+		expect(storage.links[0]?.error).toBeNull();
+		expect(storage.links[0]?.task.archivedAt).not.toBeNull();
+	});
+
+	it('si la nota SIGUE en el vault, la relectura le quita el huérfano', async () => {
+		const storage = memoryStorage();
+		const store = new LinkStore({ storage, exists: (path: string) => path === 'Cocina.md' });
+		await store.link('Cocina.md', task(), TARGET);
+		await store.markDeleted('Cocina.md');
+		const getTasksByIds = vi.fn(
+			async (_ids: string[]): Promise<LumbreResult<LumbreTask[]>> => ({
+				ok: true,
+				value: [task()],
+			}),
+		);
+
+		await store.refresh('Cocina.md', { getTasksByIds });
+
+		expect(storage.links[0]?.orphanedAt).toBeNull();
+	});
+
+	it('si la nota NO está en el vault, la relectura respeta el huérfano', async () => {
+		const storage = memoryStorage();
+		const store = new LinkStore({ storage, exists: () => false });
+		await store.link('Cocina.md', task(), TARGET);
+		await store.markDeleted('Cocina.md');
+		const getTasksByIds = vi.fn(
+			async (_ids: string[]): Promise<LumbreResult<LumbreTask[]>> => ({
+				ok: true,
+				value: [task()],
+			}),
+		);
+
+		await store.refresh('Cocina.md', { getTasksByIds });
+
+		expect(storage.links[0]?.orphanedAt).not.toBeNull();
 	});
 });
 

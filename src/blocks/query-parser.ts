@@ -11,9 +11,19 @@
  * misma consulta y, por tanto, la misma entrada de caché.
  */
 
-import type { ListTasksParams } from '../lumbre/client';
+import { MAX_TASKS_LIMIT, type ListTasksParams } from '../lumbre/client';
 import type { LumbreTask } from '../lumbre/types';
 import { normalizeForSearch } from '../ui/search-filter';
+
+/**
+ * Cuánto cuerpo de las tareas se pide. `none` por defecto: el bloque pinta
+ * títulos y traer las notas de 500 tareas es peso que nadie mira. `full` existe
+ * para quien lee la consulta desde un script (`api.listTasks`), que sí puede
+ * necesitar `task.notes`.
+ */
+export type QueryNotes = 'none' | 'full';
+
+const QUERY_NOTES: readonly QueryNotes[] = ['none', 'full'];
 
 /** Los `scope` que acepta `GET /api/tasks`. */
 export type LumbreScope = 'today' | 'week' | 'upcoming' | 'inbox' | 'someday' | 'overdue' | 'all';
@@ -45,6 +55,8 @@ export interface ParsedQuery {
 	tag: string | null;
 	includeDone: boolean;
 	limit: number | null;
+	/** Cuánto cuerpo de la tarea se pide. Entra en la clave de caché. */
+	notes: QueryNotes;
 	/** Texto de la cabecera. Sin él se describe la consulta. */
 	title: string | null;
 }
@@ -73,6 +85,7 @@ export interface ResolvedQuery {
 	tag: string | null;
 	includeDone: boolean;
 	limit: number | null;
+	notes: QueryNotes;
 	title: string | null;
 }
 
@@ -87,6 +100,7 @@ export function emptyQuery(): ParsedQuery {
 		tag: null,
 		includeDone: false,
 		limit: null,
+		notes: 'none',
 		title: null,
 	};
 }
@@ -164,11 +178,17 @@ function applyKey(query: ParsedQuery, key: string, written: string, value: strin
 			query.limit = limit;
 			return null;
 		}
+		case 'notes': {
+			const notes = QUERY_NOTES.find((candidate) => candidate === value.toLowerCase());
+			if (notes === undefined) return `«notes» pide none o full, no «${value}».`;
+			query.notes = notes;
+			return null;
+		}
 		case 'title':
 			query.title = value;
 			return null;
 		default:
-			return `No conozco la clave «${written}». Las que hay: scope, list, section, days, tag, includeDone, limit, title.`;
+			return `No conozco la clave «${written}». Las que hay: scope, list, section, days, tag, includeDone, limit, notes, title.`;
 	}
 }
 
@@ -189,6 +209,7 @@ export function resolveQuery(parsed: ParsedQuery, context: QueryContext): Resolv
 		tag: parsed.tag,
 		includeDone: parsed.includeDone,
 		limit: parsed.limit,
+		notes: parsed.notes,
 		title: parsed.title,
 	};
 
@@ -214,20 +235,26 @@ export function resolveQuery(parsed: ParsedQuery, context: QueryContext): Resolv
 /**
  * Los parámetros que se mandan a `GET /api/tasks`.
  *
- * `limit` NO viaja cuando hay `tag`: el servidor recortaría ANTES del filtro por
- * etiqueta y devolvería menos tareas de las que el bloque pide. Con `tag` se
- * trae la consulta entera y se recorta en `applyClientFilters`.
+ * `limit` viaja SIEMPRE, y por defecto es el tope del servidor. El default de
+ * `GET /api/tasks` es 200: sin mandar nada, una consulta de 400 tareas devolvía
+ * la mitad y nadie lo decía. Con `tag`, además, el `limit` escrito NO puede
+ * viajar (el servidor recortaría ANTES del filtro por etiqueta, que es de
+ * cliente): se pide el tope y se recorta en `applyClientFilters`.
  *
- * `notes: 'none'` siempre: el bloque pinta títulos, y traer el cuerpo de cada
- * tarea es peso que nadie mira.
+ * `notes` sale de la consulta y por defecto es `none`: el bloque pinta títulos,
+ * y traer el cuerpo de 500 tareas es peso que nadie mira.
  */
 export function queryParams(query: ResolvedQuery): ListTasksParams {
-	const params: ListTasksParams = { scope: query.scope, notes: 'none' };
+	const asked = query.tag !== null ? MAX_TASKS_LIMIT : (query.limit ?? MAX_TASKS_LIMIT);
+	const params: ListTasksParams = {
+		scope: query.scope,
+		notes: query.notes,
+		limit: Math.min(asked, MAX_TASKS_LIMIT),
+	};
 	if (query.list !== null) params.list = query.list;
 	if (query.section !== null) params.section = query.section;
 	if (query.days !== null) params.days = query.days;
 	if (query.includeDone) params.includeDone = true;
-	if (query.limit !== null && query.tag === null) params.limit = query.limit;
 	return params;
 }
 
@@ -245,6 +272,7 @@ export function queryKey(query: ResolvedQuery): string {
 		params.days ?? null,
 		params.includeDone === true,
 		params.limit ?? null,
+		params.notes ?? null,
 	]);
 }
 

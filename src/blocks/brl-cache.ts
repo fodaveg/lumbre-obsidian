@@ -20,7 +20,7 @@
 
 import type { Logger } from '../diagnostics/logger';
 import { describeFailure, type LumbreClient } from '../lumbre/client';
-import { DEFAULT_QUERY_TTL_MS, type CacheSnapshotStats } from './query-cache';
+import { DEFAULT_QUERY_TTL_MS, IDLE_ENTRY_TTL_MS, type CacheSnapshotStats } from './query-cache';
 
 /** Lo que ve un bloque de su día. */
 export interface BrlSnapshot {
@@ -52,6 +52,8 @@ interface BrlEntry {
 	error: string | null;
 	loading: boolean;
 	stale: boolean;
+	/** Última vez que alguien lo pidió o se suscribió. Es lo que mide el desalojo. */
+	touchedAt: number;
 	listeners: Set<BrlSubscriber>;
 	inFlight: Promise<BrlSnapshot> | null;
 }
@@ -74,12 +76,17 @@ export class BrlCache {
 		entry.listeners.add(listener);
 		return (): void => {
 			entry.listeners.delete(listener);
+			if (entry.listeners.size === 0) this.evictIdle();
 		};
 	}
 
-	/** Lo que hay guardado, sin pedir nada. */
+	/**
+	 * Lo que hay guardado, sin pedir nada y sin CREAR nada: igual que en
+	 * `QueryCache`, preguntar por un día no es usarlo.
+	 */
 	peek(date: string): BrlSnapshot {
-		return snapshot(this.entryFor(date));
+		const entry = this.entries.get(date);
+		return entry === undefined ? emptySnapshot() : snapshot(entry);
 	}
 
 	/** El día. Va al servidor solo si venció el TTL, si se invalidó o si `force`. */
@@ -100,6 +107,7 @@ export class BrlCache {
 
 	/** Invalida y refresca los días con algún bloque montado, una petición por día. */
 	async refreshAll(reason = 'una entrada nueva del registro'): Promise<void> {
+		this.evictIdle();
 		this.invalidate(reason);
 		const live = [...this.entries.values()].filter((entry) => entry.listeners.size > 0);
 		this.log?.info('Refresco del registro del día', { reason, days: live.length });
@@ -118,7 +126,10 @@ export class BrlCache {
 
 	private entryFor(date: string): BrlEntry {
 		const existing = this.entries.get(date);
-		if (existing !== undefined) return existing;
+		if (existing !== undefined) {
+			existing.touchedAt = this.now();
+			return existing;
+		}
 
 		const created: BrlEntry = {
 			date,
@@ -127,11 +138,34 @@ export class BrlCache {
 			error: null,
 			loading: false,
 			stale: true,
+			touchedAt: this.now(),
 			listeners: new Set(),
 			inFlight: null,
 		};
 		this.entries.set(date, created);
 		return created;
+	}
+
+	/**
+	 * Tira los días sin bloques montados que llevan más de `IDLE_ENTRY_TTL_MS`
+	 * sin que nadie los pida. Un vault abierto un mes acumulaba un día por cada
+	 * fecha mirada, con su Markdown entero dentro.
+	 */
+	private evictIdle(): void {
+		const cutoff = this.now() - IDLE_ENTRY_TTL_MS;
+		let dropped = 0;
+		for (const [date, entry] of this.entries) {
+			if (entry.listeners.size > 0 || entry.inFlight !== null) continue;
+			if (entry.touchedAt > cutoff) continue;
+			this.entries.delete(date);
+			dropped += 1;
+		}
+		if (dropped > 0) {
+			this.log?.debug('Días del registro desalojados de la caché', {
+				dropped,
+				entries: this.entries.size,
+			});
+		}
 	}
 
 	private isFresh(entry: BrlEntry): boolean {
@@ -192,6 +226,11 @@ export class BrlCache {
 		const current = snapshot(entry);
 		for (const listener of entry.listeners) listener(current);
 	}
+}
+
+/** Lo que ve quien pregunta por un día del que no hay nada guardado. */
+function emptySnapshot(): BrlSnapshot {
+	return { markdown: '', fetchedAt: null, error: null, loading: false };
 }
 
 function snapshot(entry: BrlEntry): BrlSnapshot {

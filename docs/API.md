@@ -24,7 +24,7 @@ Dos reglas que explican por qué la API hace lo que hace:
 | --- | --- |
 | `version: string` | Versión del plugin, la del `manifest.json`. Sube cuando esta superficie cambia. |
 | `isConnected(): Promise<boolean>` | Pregunta a Lumbre si el origen y el token valen. |
-| `listTasks(query?): Promise<LumbreTask[]>` | Las tareas de una consulta. Ver «La consulta». |
+| `listTasks(query?): Promise<LumbreTask[]>` | Las tareas de una consulta, 500 como mucho. Ver «La consulta»; `task.notes` viene `null` salvo que pidas `notes: 'full'`. |
 | `getTask(id): Promise<LumbreTask \| null>` | Una tarea por id, o `null` si no existe o no es de tu token. |
 | `listLists(): Promise<LumbreList[]>` | Las listas de Lumbre. |
 | `createTask(draft, target?): Promise<string>` | Encola una tarea nueva y devuelve su `clientTaskId`, que es el id que tendrá en Lumbre. |
@@ -103,9 +103,37 @@ await lumbre.listTasks({ scope: 'upcoming', days: 7 });
 | `days` | Días de la ventana. **Solo** con `scope: upcoming`. | los del servidor |
 | `tag` | Etiqueta dentro del título, con o sin `#`. Una etiqueta padre casa con sus hijas. | ninguna |
 | `includeDone` | `true` o `false`. | `false` |
-| `limit` | Tope de tareas. | sin tope |
+| `limit` | Tope de tareas. | el tope del servidor (500) |
+| `notes` | `none` o `full`. Con `none`, `task.notes` sale SIEMPRE `null`. | `none` |
 
 Una consulta que no se entiende lanza un `Error` con el problema en una línea.
+
+### `notes`: por qué `task.notes` suele venir vacío
+
+El bloque pinta títulos, así que la consulta pide `notes=none` y Lumbre devuelve `notes: null` en
+todas las tareas. Un script que necesite el cuerpo tiene que pedirlo:
+
+```js
+const tasks = await lumbre.listTasks({ scope: 'today', notes: 'full' });
+```
+
+`notes` entra en la clave de caché: `{ scope: 'today' }` y `{ scope: 'today', notes: 'full' }` son
+dos consultas distintas y NO comparten la lectura. Pedir `full` trae el texto entero de cada tarea,
+así que úsalo solo cuando lo vayas a leer.
+
+### El tope de 500 y las lecturas parciales
+
+`GET /api/tasks` sirve **200 tareas por defecto y 500 como mucho**. El plugin manda siempre un
+`limit`, y por defecto es ese tope: sin él, una consulta de 400 tareas devolvía la mitad sin decirlo.
+Un `limit` mayor que 500 se recorta a 500.
+
+Con `tag`, el `limit` que escribas **no viaja al servidor** (recortaría antes del filtro por
+etiqueta, que es de cliente): se piden 500 y se recorta aquí.
+
+Cuando una lectura llega justo a 500, el pie del bloque y el buscador del panel dicen «Resultados
+parciales (500 tareas leídas)»: no hay forma de distinguir «hay exactamente 500» de «hay más y se
+cortó», así que se avisa en los dos casos. Desde un script, la señal es
+`tasks.length === 500` sobre una consulta sin `limit` propio.
 
 Las consultas van por la **misma caché** que los bloques: TTL de 30 segundos, peticiones en vuelo
 deduplicadas y una sola llamada por consulta distinta, aunque la pidan a la vez cinco bloques y un

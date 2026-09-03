@@ -82,6 +82,13 @@
 	color: var(--text-muted);
 }
 
+/* El aviso de que una lectura llegó al tope del servidor (500 tareas). */
+.lumbre-panel__stale {
+	padding-bottom: var(--size-4-1);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
 .lumbre-notice {
 	display: flex;
 	flex-wrap: wrap;

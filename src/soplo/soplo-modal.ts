@@ -25,7 +25,7 @@
  * aplica, las dos inyectadas por `main.ts`.
  */
 
-import { Modal, setIcon, type App } from 'obsidian';
+import { Component, Modal, setIcon, type App } from 'obsidian';
 
 import type { AgentConsentState, AgentPlan, LumbreResult } from '../lumbre/client';
 import { runApply } from './apply-flow';
@@ -70,6 +70,13 @@ export class SoploModal extends Modal {
 	private retryApplies = false;
 	private closed = false;
 
+	/**
+	 * Los listeners del DOM. `Modal` NO es un `Component` y no tiene
+	 * `registerDomEvent`, así que el modal lleva el suyo: se carga al abrir y se
+	 * descarga al cerrar, y con él se sueltan todos de una vez.
+	 */
+	private readonly events = new Component();
+
 	constructor(
 		app: App,
 		private readonly options: SoploModalOptions,
@@ -78,12 +85,13 @@ export class SoploModal extends Modal {
 	}
 
 	onOpen(): void {
+		this.events.load();
 		this.modalEl.addClass('lumbre-soplo');
 		this.setTitle('Soplo');
 
 		// Enter aplica lo marcado; el Esc que cierra lo pone Obsidian. Dentro de una
 		// casilla NO, que ahí Enter es "marcar" y aplicaría sin querer.
-		this.contentEl.addEventListener('keydown', (event: KeyboardEvent) => {
+		this.events.registerDomEvent(this.contentEl, 'keydown', (event: KeyboardEvent) => {
 			if (event.key !== 'Enter' || event.isComposing) return;
 			if (event.target instanceof HTMLInputElement) return;
 			if (this.state !== 'ready') return;
@@ -97,6 +105,8 @@ export class SoploModal extends Modal {
 
 	onClose(): void {
 		this.closed = true;
+		// Con el Component se van todos los listeners que registró el modal.
+		this.events.unload();
 		this.contentEl.empty();
 	}
 
@@ -242,7 +252,7 @@ export class SoploModal extends Modal {
 			box.checked = this.checked[index] === true;
 			box.disabled = applying;
 			box.setAttribute('aria-label', `Aplicar: ${item.text}`);
-			box.addEventListener('change', () => {
+			this.events.registerDomEvent(box, 'change', () => {
 				this.checked[index] = box.checked;
 				this.updateApplyButton();
 			});
@@ -324,7 +334,7 @@ export class SoploModal extends Modal {
 			setIcon(icon, options.icon);
 		}
 		button.createSpan({ text: options.text });
-		button.addEventListener('click', options.onClick);
+		this.events.registerDomEvent(button, 'click', options.onClick);
 		return button;
 	}
 }

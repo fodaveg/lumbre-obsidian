@@ -50,14 +50,19 @@ import {
 	type LumbreResult,
 } from './lumbre/client';
 import { ListCache } from './lumbre/list-cache';
-import { describeFailedItems, OperationQueue, type LinkTarget } from './lumbre/queue';
+import {
+	describeFailedItems,
+	OperationQueue,
+	type BatchQueuedOperation,
+	type LinkTarget,
+} from './lumbre/queue';
 import { startQueueDrain } from './lumbre/queue-drain';
 import {
 	collectWeeklySnapshot,
 	type WeeklySnapshotDeps,
 	type WeeklySnapshotOptions,
 } from './review/weekly-snapshot';
-import { planToOps } from './soplo/plan-to-ops';
+import { planToBatches, type PlanBatch } from './soplo/plan-to-ops';
 import { SoploModal } from './soplo/soplo-modal';
 import { taskFromDraft, type LumbreTask, type TaskDraft } from './lumbre/types';
 import {
@@ -189,7 +194,13 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			},
 			logger: this.logger.child('queue'),
 		});
-		this.links = new LinkStore({ storage: this.store, logger: this.logger.child('links') });
+		this.links = new LinkStore({
+			storage: this.store,
+			// Para poder QUITAR el huérfano de una nota que ha vuelto: el vínculo
+			// guarda la ruta, y esto es lo único que sabe si esa ruta sigue viva.
+			exists: (path: string) => this.app.vault.getAbstractFileByPath(path) !== null,
+			logger: this.logger.child('links'),
+		});
 		this.lists = new ListCache({ client: this.client });
 		this.queries = new QueryCache({
 			client: this.client,
@@ -277,6 +288,20 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 				}),
 			),
 		);
+		// Y el gemelo del borrado: una nota que VUELVE deja de ser huérfana. Un
+		// delete seguido de un create en la misma ruta es lo que hace Obsidian Sync
+		// cuando la nota llega de otro dispositivo, así que sin esto «La nota ya no
+		// existe» se quedaba puesto para siempre.
+		this.registerEvent(
+			this.app.vault.on(
+				'create',
+				guarded(this.logger.child('vault'), 'creación', (file: TAbstractFile) => {
+					void this.links.markCreated(file.path).then((cleared) => {
+						if (cleared > 0) this.notifyDataChange();
+					});
+				}),
+			),
+		);
 		this.registerEvent(
 			this.app.workspace.on(
 				'editor-menu',
@@ -338,8 +363,15 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		void this.flushIfConnected();
 	}
 
+	/**
+	 * Obsidian llama a `onunload` AUNQUE `onload` haya fallado, así que aquí no se
+	 * puede dar por hecho que el registro y la cola existan: un `data.json` que no
+	 * se puede leer deja el plugin a medio construir, y una excepción en la
+	 * descarga se lleva por delante la limpieza del registro en fichero. Por eso
+	 * todo va con `?.`, incluidos los campos declarados con `!`.
+	 */
 	onunload(): void {
-		this.log.info('Plugin descargado', { pending: this.queue.pending().length });
+		this.log?.info('Plugin descargado', { pending: this.queue?.pending().length ?? 0 });
 		this.stopLiveLog?.();
 		this.stopLiveLog = null;
 		void this.liveLog?.flush();
@@ -830,16 +862,19 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		checked: boolean[],
 		file: TFile | null,
 	): Promise<void> {
-		const { ops, createdTaskIds, skipped } = planToOps(plan.plan, checked);
+		// TROCEADO al tope de `POST /api/batch`: un plan de más de 200 acciones se
+		// rechazaba entero, y los vínculos de sus altas ya estaban creados.
+		const { batches, total, skipped } = planToBatches(plan.plan, checked);
 		this.logger.child('modal').info('Plan de Soplo aplicado', {
 			notePath: file?.path ?? null,
 			proposed: plan.plan.length,
 			checked: checked.filter((flag) => flag).length,
-			ops: ops.length,
-			creates: createdTaskIds.length,
+			ops: total,
+			batches: batches.length,
+			creates: batches.reduce((count, batch) => count + batch.createdTaskIds.length, 0),
 			skipped,
 		});
-		if (ops.length === 0) {
+		if (total === 0) {
 			new Notice(
 				skipped > 0
 					? 'Nada que aplicar: lo marcado no son tareas.'
@@ -853,48 +888,76 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			label: file?.basename ?? 'Sin nota',
 			excerpt: null,
 		};
-		const operation = await this.queue.enqueueBatch(ops, createdTaskIds, target);
+		// Los lotes se encolan EN ORDEN, y en ese orden se envían: un alta sigue
+		// yendo delante de la mutación que la toque.
+		const queued: BatchQueuedOperation[] = [];
+		for (const batch of batches) {
+			queued.push(await this.queue.enqueueBatch(batch.ops, batch.createdTaskIds, target));
+		}
 
 		if (file !== null) {
-			for (const op of ops) {
-				if (op.type !== 'create') continue;
-				await this.links.link(
-					file.path,
-					taskFromDraft(op.draft, op.clientTaskId, this.lists.refFor(op.draft.listId ?? null)),
-					{ label: target.label, excerpt: null },
-					'pending_local',
-				);
+			for (const batch of batches) {
+				for (const op of batch.ops) {
+					if (op.type !== 'create') continue;
+					await this.links.link(
+						file.path,
+						taskFromDraft(op.draft, op.clientTaskId, this.lists.refFor(op.draft.listId ?? null)),
+						{ label: target.label, excerpt: null },
+						'pending_local',
+					);
+				}
 			}
 		}
 
 		new Notice(
 			skipped > 0
-				? `${ops.length} acciones enviadas a Lumbre; ${skipped} no eran tareas y se han saltado.`
-				: `${ops.length} ${ops.length === 1 ? 'acción enviada' : 'acciones enviadas'} a Lumbre`,
+				? `${total} acciones enviadas a Lumbre; ${skipped} no eran tareas y se han saltado.`
+				: `${total} ${total === 1 ? 'acción enviada' : 'acciones enviadas'} a Lumbre`,
 		);
 		this.notifyDataChange();
 
 		await this.queue.flush();
-		const after = this.queue.snapshot().find((candidate) => candidate.id === operation.id);
-		if (after?.state === 'rejected') {
-			this.log.error('Lumbre rechazó el plan entero', { id: operation.id, error: after.error });
-			new Notice(after.error ?? 'Lumbre rechazó parte del plan.');
-		}
-		// Éxito PARCIAL: el lote se aceptó y las demás acciones YA están aplicadas.
-		// Lo que se dice es cuáles no entraron, por su posición y con el motivo del
-		// servidor; el reintento no vale aquí, reenviar duplicaría lo que sí entró.
-		const failed = after?.kind === 'batch' ? (after.failedItems ?? []) : [];
-		if (failed.length > 0) {
-			this.log.warn('Lumbre no aplicó parte del plan', {
-				id: operation.id,
-				failed: describeFailedItems(failed),
-			});
-			new Notice(
-				`Lumbre no aplicó ${failed.length} de ${ops.length} acciones: ${describeFailedItems(failed)}`,
-			);
-		}
+		this.reportSoploOutcome(queued, batches, total);
 		if (file !== null && navigator.onLine) await this.links.refresh(file.path, this.client);
 		this.notifyDataChange();
+	}
+
+	/**
+	 * Qué ha pasado con los lotes del plan, ya drenados. Las posiciones que se le
+	 * dicen al usuario son las del PLAN entero, no las de dentro de su lote: quien
+	 * mira el preview no sabe por dónde se troceó.
+	 */
+	private reportSoploOutcome(
+		queued: readonly BatchQueuedOperation[],
+		batches: readonly PlanBatch[],
+		total: number,
+	): void {
+		const after = this.queue.snapshot();
+		const failed: { index: number; error: string | null }[] = [];
+		let offset = 0;
+
+		for (const [position, operation] of queued.entries()) {
+			const current = after.find((candidate) => candidate.id === operation.id);
+			if (current?.state === 'rejected') {
+				this.log.error('Lumbre rechazó un lote del plan', {
+					id: operation.id,
+					error: current.error,
+				});
+				new Notice(current.error ?? 'Lumbre rechazó parte del plan.');
+			}
+			// Éxito PARCIAL: el lote se aceptó y las demás acciones YA están
+			// aplicadas. Se dice cuáles no entraron, con el motivo del servidor; el
+			// reintento no vale, reenviar duplicaría lo que sí entró.
+			const items = current?.kind === 'batch' ? (current.failedItems ?? []) : [];
+			for (const item of items) failed.push({ index: offset + item.index, error: item.error });
+			offset += batches[position]?.ops.length ?? 0;
+		}
+
+		if (failed.length === 0) return;
+		this.log.warn('Lumbre no aplicó parte del plan', { failed: describeFailedItems(failed) });
+		new Notice(
+			`Lumbre no aplicó ${failed.length} de ${total} acciones: ${describeFailedItems(failed)}`,
+		);
 	}
 
 	// ── Adjuntos ─────────────────────────────────────────────────────────────
@@ -962,7 +1025,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		if (result.reason !== 'network' && result.reason !== 'server') return;
 		const retry = notice.messageEl.createEl('button', { cls: 'lumbre-button' });
 		retry.setText('Reintentar');
-		retry.addEventListener('click', () => {
+		this.registerDomEvent(retry, 'click', () => {
 			notice.hide();
 			void this.uploadAttachment(task, file);
 		});
@@ -1141,9 +1204,15 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		this.notifyDataChange();
 	}
 
-	/** Caduca las consultas y refresca de golpe los bloques que estén montados. */
+	/**
+	 * Caduca las consultas y refresca los bloques montados, COALESCIENDO: la cola
+	 * llama a esto una vez por operación materializada, así que un lote de diez
+	 * eran diez rondas de lecturas (una por consulta montada) contra un límite de
+	 * 120 peticiones por minuto. El repintado del panel sí va ya, que no gasta red.
+	 */
 	private async refreshBlocks(): Promise<void> {
-		await this.queries.refreshAll();
+		this.notifyDataChange();
+		await this.queries.refreshSoon();
 		this.notifyDataChange();
 	}
 

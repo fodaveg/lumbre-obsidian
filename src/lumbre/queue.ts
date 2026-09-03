@@ -833,7 +833,20 @@ export function describeFailedItems(items: readonly BatchFailedItem[]): string {
 		.join('; ');
 }
 
-/** `true` si la tarea leída ya refleja lo que pedía la operación. */
+/**
+ * `true` si la tarea leída ya refleja lo que pedía la operación.
+ *
+ * LÍMITE CONOCIDO, y no se puede cerrar desde aquí: un `status` se confirma solo
+ * por `done`, así que reabrir una tarea que en Lumbre YA estaba abierta (o
+ * completar una que ya estaba hecha) se da por materializado al instante,
+ * aunque la mutación no se haya aplicado. Lo que lo distinguiría es una marca de
+ * última escritura de la tarea posterior al `sentAt` de la operación, y
+ * `GET /api/tasks` no la sirve: `serializeTask` (repo de Lumbre) devuelve
+ * `createdAt` y `notesUpdatedAt`, y ninguno de los dos se mueve al completar o
+ * reabrir. En cuanto la API exponga un `updatedAt` de la fila, la condición pasa
+ * a ser `done` coincidente Y `updatedAt >= sentAt` (test en `queue.test.ts`,
+ * hoy `it.todo`).
+ */
 function matchesOperation(operation: CreateOperation | StatusOperation, task: LumbreTask): boolean {
 	// Para un `create` basta con que la tarea EXISTA: el id lo fijamos nosotros.
 	if (operation.kind === 'create') return true;

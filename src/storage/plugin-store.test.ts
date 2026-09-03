@@ -65,6 +65,58 @@ describe('PluginStore: migración desde el data.json viejo', () => {
 		expect(store.deviceId).toBe('device-guardado');
 	});
 
+	it('un ajuste que esta versión no conoce SOBREVIVE a la migración', async () => {
+		// El caso real: un dispositivo con el plugin nuevo guarda un ajuste que este
+		// otro todavía no conoce. Reconstruir los ajustes campo a campo lo borraba en
+		// cada carga, y el `save()` siguiente lo tiraba también del `data.json`.
+		const host = memoryHost({
+			version: PLUGIN_DATA_VERSION,
+			settings: { apiOrigin: 'https://lumbre.casa', ajusteDelFuturo: 'sí' },
+			token: null,
+			queue: [],
+			links: [],
+			deviceId: null,
+		});
+		const store = new PluginStore(host);
+
+		const data = await store.load();
+
+		expect((data.settings as unknown as Record<string, unknown>)['ajusteDelFuturo']).toBe('sí');
+		expect(data.settings.apiOrigin).toBe('https://lumbre.casa');
+	});
+
+	it('un apiOrigin que no es una URL cae al de fábrica, no se guarda tal cual', async () => {
+		const host = memoryHost({
+			version: PLUGIN_DATA_VERSION,
+			settings: { apiOrigin: 'no es una url' },
+		});
+		const store = new PluginStore(host);
+
+		const data = await store.load();
+
+		expect(data.settings.apiOrigin).toBe(DEFAULT_SETTINGS.apiOrigin);
+	});
+
+	it('un apiOrigin con ruta se guarda NORMALIZADO a su origen', async () => {
+		const host = memoryHost({
+			version: PLUGIN_DATA_VERSION,
+			settings: { apiOrigin: 'https://lumbre.casa/app/tareas?x=1' },
+		});
+		const store = new PluginStore(host);
+
+		expect((await store.load()).settings.apiOrigin).toBe('https://lumbre.casa');
+	});
+
+	it('un nivel de registro que no existe cae al de fábrica', async () => {
+		const host = memoryHost({
+			version: PLUGIN_DATA_VERSION,
+			settings: { logLevel: 'gritando' },
+		});
+		const store = new PluginStore(host);
+
+		expect((await store.load()).settings.logLevel).toBe(DEFAULT_SETTINGS.logLevel);
+	});
+
 	it('el token que ya estaba sigue llegando al TokenStore tras migrar', async () => {
 		const store = new PluginStore(memoryHost({ apiOrigin: 'https://lumbre.casa', token: 'tok-viejo' }));
 		await store.load();

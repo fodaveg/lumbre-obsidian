@@ -20,7 +20,7 @@
  *   campos que el plugin todavía no modela, o sea aplicaría algo distinto.
  */
 
-import type { AgentPlanOp, BatchOperation } from '../lumbre/client';
+import { MAX_BATCH_OPS, type AgentPlanOp, type BatchOperation } from '../lumbre/client';
 import type { TaskDraft } from '../lumbre/types';
 
 /** Lo que sale de traducir un plan: las ops y qué tareas van a nacer. */
@@ -64,6 +64,54 @@ export function planToOps(plan: readonly AgentPlanOp[], checked: readonly boolea
 	}
 
 	return { ops, createdTaskIds, skipped };
+}
+
+/** Un trozo del plan que cabe en UNA llamada a `POST /api/batch`. */
+export interface PlanBatch {
+	ops: BatchOperation[];
+	/** Los ids que CREA este trozo, no los del plan entero. */
+	createdTaskIds: string[];
+}
+
+/** El plan repartido en lotes, más lo que no se ha podido traducir. */
+export interface PlanBatches {
+	batches: PlanBatch[];
+	/** Cuántas ops hay en total, sumando los lotes. */
+	total: number;
+	skipped: number;
+}
+
+/**
+ * Lo mismo que `planToOps`, pero TROCEADO al tope de `POST /api/batch`.
+ *
+ * El servidor rechaza con `bad_request` un lote de más de `MAX_BATCH_OPS`
+ * operaciones, y ese rechazo es del lote ENTERO: un plan largo se quedaba
+ * `rejected` sin aplicar nada, con los vínculos de sus altas ya creados en la
+ * nota apuntando a tareas que no existían.
+ *
+ * Trocear no rompe nada que la vía de un solo lote garantizara: `/api/batch` NO
+ * es atómico (responde 200 con el informe por operación, y de ahí sale
+ * `failedItems`), y los trozos se encolan y se envían EN ORDEN, así que un alta
+ * sigue yendo delante de la mutación que la toque.
+ */
+export function planToBatches(
+	plan: readonly AgentPlanOp[],
+	checked: readonly boolean[],
+): PlanBatches {
+	const { ops, skipped } = planToOps(plan, checked);
+	const batches: PlanBatch[] = [];
+
+	for (let start = 0; start < ops.length; start += MAX_BATCH_OPS) {
+		const chunk = ops.slice(start, start + MAX_BATCH_OPS);
+		batches.push({
+			ops: chunk,
+			createdTaskIds: chunk
+				.filter((op) => op.type === 'create')
+				.map((op) => op.clientTaskId),
+		});
+	}
+
+	return { batches, total: ops.length, skipped };
 }
 
 /** Una acción del plan a su op de batch, o `null` si no se puede traducir. */

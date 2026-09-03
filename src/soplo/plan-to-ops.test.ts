@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
-import type { AgentPlanOp } from '../lumbre/client';
-import { planToOps } from './plan-to-ops';
+import { MAX_BATCH_OPS, type AgentPlanOp } from '../lumbre/client';
+import { planToBatches, planToOps } from './plan-to-ops';
 
 const ADD: AgentPlanOp = {
 	op: 'add',
@@ -150,5 +150,48 @@ describe('planToOps: lo que no es una tarea', () => {
 
 	it('un plan vacío no produce nada', () => {
 		expect(planToOps([], [])).toEqual({ ops: [], createdTaskIds: [], skipped: 0 });
+	});
+});
+
+describe('planToBatches: el tope de POST /api/batch', () => {
+	/** Un plan de N altas, todas marcadas. */
+	function bigPlan(count: number): { plan: AgentPlanOp[]; checked: boolean[] } {
+		const plan = Array.from({ length: count }, (_unused, index) => ({
+			...ADD,
+			id: `nueva-${index}`,
+		}));
+		return { plan, checked: plan.map(() => true) };
+	}
+
+	it('un plan de 250 acciones sale en DOS lotes, ninguno por encima del tope', () => {
+		const { plan, checked } = bigPlan(250);
+
+		const result = planToBatches(plan, checked);
+
+		expect(result.batches).toHaveLength(2);
+		expect(result.batches.map((batch) => batch.ops.length)).toEqual([MAX_BATCH_OPS, 50]);
+		expect(result.total).toBe(250);
+		expect(result.skipped).toBe(0);
+	});
+
+	it('cada lote lleva los ids de LAS SUYAS, no los del plan entero', () => {
+		const { plan, checked } = bigPlan(250);
+
+		const [first, second] = planToBatches(plan, checked).batches;
+
+		expect(first?.createdTaskIds).toHaveLength(MAX_BATCH_OPS);
+		expect(second?.createdTaskIds).toEqual(['nueva-200', ...Array.from({ length: 49 }, (_u, i) => `nueva-${201 + i}`)]);
+	});
+
+	it('un plan que cabe entero sigue siendo UN lote', () => {
+		const { plan, checked } = bigPlan(MAX_BATCH_OPS);
+
+		expect(planToBatches(plan, checked).batches).toHaveLength(1);
+	});
+
+	it('sin nada marcado no hay ningún lote', () => {
+		const { plan } = bigPlan(10);
+
+		expect(planToBatches(plan, plan.map(() => false)).batches).toEqual([]);
 	});
 });

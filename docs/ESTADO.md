@@ -207,6 +207,61 @@
     `POST /api/sync/flush`. Ese drenaje solo se gasta por las operaciones que ya venían aceptadas de
     un flush anterior, y va uno para todas.
   - Un 429 no cuenta como intento fallido: no ha fallado la operación, ha fallado el momento.
+- **Lote H: segunda tanda de la revisión fría** (cupo de peticiones, desajuste con la API y calidad;
+  cada arreglo con su test):
+  - **H1** `QueryCache.refreshSoon()` COALESCE las rondas de refresco (ventana de 250 ms,
+    `REFRESH_COALESCE_MS`): la cola avisa una vez por operación, así que materializar un lote de diez
+    eran diez rondas de lecturas, una por consulta montada, contra el límite de 120 peticiones/min.
+  - **H2** Las consultas mandan SIEMPRE `limit`, y por defecto el tope del servidor (500,
+    `MAX_TASKS_LIMIT`): el default de `GET /api/tasks` es 200 y se estaba dejando fuera media lista
+    sin decirlo. Con `tag` viaja el tope, no el `limit` escrito. Si la lectura llega a 500, el pie del
+    bloque y el buscador del panel dicen «Resultados parciales (500 tareas leídas)»; el buscador
+    (`src/ui/task-search.ts`) apunta además `partial` en el registro.
+  - **H3** `notes` es una clave de la consulta (`none` por defecto, admite `full`) y entra en la clave
+    de caché. Antes iba fijo a `none`, así que `task.notes` era `null` siempre, también en
+    `api.listTasks()`, y `docs/API.md` no lo decía.
+  - **H4** El pie del bloque pinta el MOTIVO real (`src/blocks/block-footer.ts`), no «Sin conexión»
+    para todo: un token caducado y un corte de red no se arreglan en el mismo sitio. Vale para los dos
+    bloques.
+  - **H5** La laguna de `includeArchived` ya la cerró G7 en `getTasksByIds` (comprobado contra
+    `+server.ts` de Lumbre: `?ids=` respeta el parámetro), así que un vínculo a una tarea archivada ya
+    se releía sin error; el test se queda como guardia. Lo que faltaba era ENSEÑARLO: chip «Archivada»
+    en el panel y en el bloque (`src/ui/task-state-labels.ts`).
+  - **H6** `LinkStore.markCreated()` colgado de `vault.on('create')`, y la relectura de vínculos quita
+    el huérfano si `vault.getAbstractFileByPath` dice que la nota está. Un delete + create en la misma
+    ruta (lo que hace Obsidian Sync cuando la nota vuelve de otro dispositivo) dejaba «La nota ya no
+    existe» para siempre.
+  - **H7** NO se arregla, y se documenta por qué: un `status` se confirma solo por `done`, así que
+    reabrir lo que ya estaba abierto se da por materializado al instante. La señal que lo distinguiría
+    es un `updatedAt` de la fila posterior al `sentAt`, y `GET /api/tasks` no lo sirve (`serializeTask`
+    da `createdAt` y `notesUpdatedAt`, y ninguno se mueve al completar). Comentado en
+    `matchesOperation` y con el test en `it.todo`.
+  - **H8** `migrate` copia los ajustes enteros (`{ ...DEFAULT_SETTINGS, ...settings }`) y solo corrige
+    los dos que pueden venir mal escritos (origen normalizado con `normalizeOrigin`, nivel de log
+    dentro del enum). Antes los reconstruía campo a campo y un ajuste escrito por una versión más
+    nueva se perdía en cada carga.
+  - **H9** `peek()` ya no CREA la entrada, en las dos cachés, y las entradas sin bloques montados que
+    llevan más de 10 minutos (`IDLE_ENTRY_TTL_MS`) se desalojan en el siguiente `refreshAll` o al irse
+    su último suscriptor.
+  - **H10** `onunload` aguanta un `onload` que falló antes de construir el registro y la cola.
+  - **H11** Ningún `addEventListener` a pelo en `src/`: todo por `registerDomEvent`, con un test de
+    FORMA que lee los ficheros (`src/dom-events.test.ts`). Los modales llevan un `Component` propio
+    (`Modal` NO es un `Component`), que se carga al abrir y se descarga al cerrar.
+  - **H12** El plan de Soplo se trocea al tope de `POST /api/batch` (`planToBatches`), un `batch` de
+    la cola por trozo. Un plan de más de 200 acciones se rechazaba entero con los vínculos de sus
+    altas ya creados.
+- **Decisiones del lote H**:
+  - El `limit` por defecto pasa a 500 para TODA consulta, no solo para las que filtran en cliente: sin
+    `limit` el servidor aplicaba su 200 y el recorte era igual de silencioso. El precio es una
+    respuesta más grande en un vault con muchas tareas, y `notes=none` es lo que la mantiene barata.
+  - «Parcial» se declara cuando la lectura trae exactamente 500. No se puede distinguir de un vault
+    con 500 justas, y decir de menos es lo único que el usuario no puede corregir mirando.
+  - `refreshSoon` suelta el pestillo ANTES de leer: lo que materialice durante la ronda merece la
+    suya detrás, o su cambio no se vería hasta que venciera el TTL de 30 s.
+  - `registerDomEvent` en una vista que se repinta (el panel, el bloque) acumula un registro por
+    pintado hasta que se cierra, porque Obsidian solo los suelta al descargar el `Component`. Se acepta
+    a cambio de que no quede ni un listener sin dueño; los modales no lo pagan porque descargan su
+    `Component` al cerrarse.
 - **Qué falta**: la decisión de dónde vive el token; las tareas están en la lista `lumbre-obsidian`
   de Lumbre, no aquí.
 - **Decisiones del lote B**: las listas se cachean en memoria cinco minutos (`ListCache`), no en

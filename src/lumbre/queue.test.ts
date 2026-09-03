@@ -235,6 +235,16 @@ describe('OperationQueue: completar una tarea', () => {
 		expect(storage.operations[0]?.state).toBe('sent');
 		expect(storage.operations[0]?.attempts).toBe(1);
 	});
+
+	// Reabrir una tarea que en Lumbre YA estaba abierta se confirma al instante:
+	// la relectura ve `done: false`, que es lo que pedía la operación, y no hay
+	// forma de saber si la mutación llegó a aplicarse. La única señal que lo
+	// distinguiría es una marca de ÚLTIMA ESCRITURA de la tarea posterior al
+	// `sentAt`, y `GET /api/tasks` no la sirve: `serializeTask` (repo de Lumbre)
+	// devuelve `createdAt` y `notesUpdatedAt`, y ninguno se mueve al completar o
+	// reabrir. Queda pendiente de que la API exponga un `updatedAt` de la fila.
+	// Ver `matchesOperation` en `queue.ts`.
+	it.todo('una relectura con `done` igual pero anterior al envío NO confirma');
 });
 
 describe('OperationQueue: fallos', () => {

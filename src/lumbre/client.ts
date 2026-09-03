@@ -294,6 +294,25 @@ const MAX_IDS_PER_REQUEST = 200;
 export const MAX_BATCH_OPS = 200;
 
 /**
+ * Tope de `?limit=` de `GET /api/tasks` (`MAX_LIMIT` en el repo de Lumbre). Su
+ * DEFAULT es 200, así que una consulta que no manda `limit` no trae "todo": trae
+ * las 200 primeras y no lo dice. Por eso el plugin manda siempre un `limit`, y
+ * cuando la respuesta llega justa a este número avisa de que la lectura puede
+ * estar recortada (ver `isPartialRead`).
+ */
+export const MAX_TASKS_LIMIT = 500;
+
+/**
+ * `true` si una lectura pudo quedarse corta por el tope del servidor. No hay
+ * forma de distinguir "hay exactamente 500" de "hay más y se cortó", así que se
+ * avisa en los dos casos: decir de menos aquí es lo único que no se puede
+ * arreglar mirando.
+ */
+export function isPartialRead(count: number): boolean {
+	return count >= MAX_TASKS_LIMIT;
+}
+
+/**
  * Tope por fichero de `POST /api/attachments` (`MAX_ATTACHMENT_BYTES` en el
  * repo de Lumbre). El servidor es el autoritativo; aquí se comprueba antes para
  * no subir 30 MB y que los rechace al final.

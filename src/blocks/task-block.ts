@@ -22,6 +22,8 @@ import type { OperationQueue, QueuedOperation } from '../lumbre/queue';
 import type { LumbreTask } from '../lumbre/types';
 import { linkChipState, pendingOperationFor } from '../ui/link-chip-state';
 import { groupBySection } from '../ui/task-sections';
+import { taskStateLabels } from '../ui/task-state-labels';
+import { partialNote, staleNote } from './block-footer';
 import { logInvalidBlock } from './block-log';
 import type { QueryCache, QuerySnapshot } from './query-cache';
 import {
@@ -206,7 +208,7 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		setIcon(icon, 'refresh-cw');
 		button.createSpan({ text: 'Actualizar' });
 		button.disabled = query === null || this.snapshot?.loading === true;
-		button.addEventListener('click', () => {
+		this.registerDomEvent(button, 'click', () => {
 			void this.refresh();
 		});
 	}
@@ -291,7 +293,7 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 				'aria-label',
 				task.done ? `Reabrir ${task.content}` : `Completar ${task.content}`,
 			);
-			box.addEventListener('change', () => {
+			this.registerDomEvent(box, 'change', () => {
 				void this.toggleDone(task, box.checked);
 			});
 		}
@@ -316,12 +318,14 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 			if (chip.reason !== null) label.setAttribute('title', chip.reason);
 		}
 
-		this.renderMeta(row, task, cancelled);
+		this.renderMeta(row, task);
 	}
 
-	private renderMeta(row: HTMLElement, task: LumbreTask, cancelled: boolean): void {
+	private renderMeta(row: HTMLElement, task: LumbreTask): void {
 		const meta = row.createDiv({ cls: 'lumbre-task__meta' });
-		if (cancelled) meta.createSpan({ cls: 'lumbre-task__meta-item', text: 'Cancelada' });
+		for (const label of taskStateLabels(task)) {
+			meta.createSpan({ cls: 'lumbre-task__meta-item', text: label });
+		}
 		if (task.list !== null) {
 			meta.createSpan({ cls: 'lumbre-task__meta-item', text: task.list.name });
 		}
@@ -347,11 +351,16 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		if (snapshot.fetchedAt !== null) {
 			footer.createSpan({ text: `Datos de ${clockText(snapshot.fetchedAt)}` });
 		}
+		// El motivo REAL, no «Sin conexión» para todo: un token caducado y un corte
+		// de red se arreglan en sitios distintos.
 		if (snapshot.error !== null) {
-			footer.createSpan({
-				cls: 'lumbre-block__stale',
-				text: 'Sin conexión, mostrando la última lectura',
-			});
+			footer.createSpan({ cls: 'lumbre-block__stale', text: staleNote(snapshot.error) });
+		}
+		// Y si la lectura llegó al tope del servidor, que se sepa que puede faltar
+		// media lista: el filtro por etiqueta y el recorte son de cliente.
+		const partial = partialNote(snapshot.tasks.length);
+		if (partial !== null) {
+			footer.createSpan({ cls: 'lumbre-block__stale', text: partial });
 		}
 	}
 

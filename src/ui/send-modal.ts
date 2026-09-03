@@ -9,7 +9,7 @@
  * copiar la nota dentro de la tarea, y entonces habría dos textos que mantener.
  */
 
-import { Modal, Notice, Setting, type App } from 'obsidian';
+import { Component, Modal, Notice, Setting, type App } from 'obsidian';
 
 import type { LumbreList, LumbrePriority, TaskDraft } from '../lumbre/types';
 import { MAX_TITLE_LENGTH } from './draft-from-editor';
@@ -54,6 +54,13 @@ export class SendTaskModal extends Modal {
 	private dateSetting: Setting | null = null;
 	private timeSetting: Setting | null = null;
 
+	/**
+	 * Los listeners del DOM. `Modal` NO es un `Component` y no tiene
+	 * `registerDomEvent`, así que el modal lleva el suyo: se carga al abrir y se
+	 * descarga al cerrar, y con él se sueltan todos de una vez.
+	 */
+	private readonly events = new Component();
+
 	constructor(
 		app: App,
 		private readonly options: SendModalOptions,
@@ -64,6 +71,7 @@ export class SendTaskModal extends Modal {
 	}
 
 	onOpen(): void {
+		this.events.load();
 		const { contentEl } = this;
 		contentEl.empty();
 		contentEl.addClass('lumbre-send-modal');
@@ -181,7 +189,7 @@ export class SendTaskModal extends Modal {
 			);
 
 		// Enter envía, salvo dentro de un textarea, donde Enter es un salto de línea.
-		contentEl.addEventListener('keydown', (event: KeyboardEvent) => {
+		this.events.registerDomEvent(contentEl, 'keydown', (event: KeyboardEvent) => {
 			if (event.key !== 'Enter' || event.isComposing) return;
 			if (event.target instanceof HTMLTextAreaElement) return;
 			event.preventDefault();
@@ -192,6 +200,8 @@ export class SendTaskModal extends Modal {
 	}
 
 	onClose(): void {
+		// Con el Component se van todos los listeners que registró el modal.
+		this.events.unload();
 		this.contentEl.empty();
 	}
 
