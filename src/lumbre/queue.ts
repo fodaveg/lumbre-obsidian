@@ -98,6 +98,13 @@ export interface OperationQueueOptions {
 	sleep?: (ms: number) => Promise<void>;
 	/** Reloj, inyectable para los tests. */
 	now?: () => Date;
+	/**
+	 * Se llama cuando una operación pasa a `materialized`, o sea cuando la
+	 * relectura confirma que Lumbre ya la tiene. Es el único momento en que un
+	 * cambio deja de ser una promesa: de ahí cuelga la invalidación de la caché de
+	 * los bloques, para que la casilla se asiente en todos a la vez.
+	 */
+	onMaterialized?: (operation: QueuedOperation) => void;
 }
 
 /** Intentos fallidos tras los cuales la operación solo se reintenta a mano. */
@@ -290,6 +297,7 @@ export class OperationQueue {
 				operation.error = null;
 				operation.updatedAt = this.stamp();
 				await this.persist(operation);
+				this.options.onMaterialized?.(operation);
 				return 'materialized';
 			}
 		}

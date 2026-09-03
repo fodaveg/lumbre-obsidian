@@ -60,4 +60,19 @@ describe('ListCache', () => {
 		expect(cache.refFor('otra')).toBeNull();
 		expect(cache.refFor(null)).toBeNull();
 	});
+
+	it('resuelve el nombre de una lista por su id o por su propio nombre', async () => {
+		const cache = new ListCache({
+			client: {
+				listLists: async (): Promise<LumbreResult<LumbreList[]>> => ({
+					ok: true,
+					value: [list('l1', 'Casa y jardín')],
+				}),
+			},
+		});
+		await cache.get();
+		expect(cache.nameFor('l1')).toBe('Casa y jardín');
+		expect(cache.nameFor('casa y jardin')).toBe('Casa y jardín');
+		expect(cache.nameFor('Trabajo')).toBeNull();
+	});
 });

@@ -12,6 +12,7 @@
  * barato, y así no hay listas fantasma de hace semanas.
  */
 
+import { normalizeForSearch } from '../ui/search-filter';
 import type { LumbreClient } from './client';
 import type { LumbreList, LumbreRef } from './types';
 
@@ -48,6 +49,20 @@ export class ListCache {
 		if (listId === null) return null;
 		const found = this.lists.find((list) => list.id === listId);
 		return found === undefined ? null : { id: found.id, name: found.name };
+	}
+
+	/**
+	 * El NOMBRE de una lista a partir de su id O de su nombre, o `null` si no
+	 * está en la caché. Lo necesitan las consultas de los bloques: `?list=` filtra
+	 * por nombre, pero `lumbre-list` guarda un id y el usuario escribe cualquiera
+	 * de los dos. El nombre se compara sin tildes ni mayúsculas.
+	 */
+	nameFor(raw: string): string | null {
+		const byId = this.lists.find((list) => list.id === raw);
+		if (byId !== undefined) return byId.name;
+		const needle = normalizeForSearch(raw);
+		const byName = this.lists.find((list) => normalizeForSearch(list.name) === needle);
+		return byName?.name ?? null;
 	}
 
 	/**

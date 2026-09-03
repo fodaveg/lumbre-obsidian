@@ -30,10 +30,51 @@ hasta que Lumbre la confirma al releerla. Sin conexión, la cabecera lo dice y s
 `lumbre-list` es **lo único** que el plugin escribe dentro de una nota, y solo cuando lo pides con
 ese comando.
 
+## El bloque `lumbre`
+
+Un bloque de código con el lenguaje `lumbre` se convierte, al renderizar la nota, en la lista de
+tareas que pide su consulta. **No toca el Markdown**: el fichero se queda exactamente como lo
+escribiste, y lo que se ve es lo que hay en Lumbre en ese momento.
+
+````markdown
+```lumbre
+scope: upcoming
+days: 7
+tag: casa
+title: Lo de casa esta semana
+```
+````
+
+El cuerpo son líneas `clave: valor`, y un bloque vacío son las tareas de hoy:
+
+| Clave | Valores | Por defecto |
+| --- | --- | --- |
+| `scope` | `today`, `week`, `upcoming`, `inbox`, `someday`, `overdue`, `all` | `today` |
+| `list` | Nombre o id de lista. Nombrarla sin `scope` significa la lista entera, agrupada por sección. | ninguna |
+| `section` | Nombre de una sección dentro de `list`. | ninguna |
+| `days` | Días de la ventana. **Solo** con `scope: upcoming`. | los del servidor |
+| `tag` | Etiqueta dentro del título, con o sin `#`. Una etiqueta padre casa con sus hijas. | ninguna |
+| `includeDone` | `true` o `false`. | `false` |
+| `limit` | Tope de tareas. | sin tope |
+| `title` | Texto de la cabecera. | una descripción de la consulta |
+
+Si la nota tiene `lumbre-list` y el bloque no dice ni `list` ni `scope`, se enseña esa lista entera.
+Una consulta que no se entiende pinta el problema en una línea y no rompe nada más de la nota.
+
+La casilla de cada tarea la completa o la reabre, y va por la misma cola durable que el resto: dice
+«Enviando…» hasta que Lumbre la confirma al releer. El pie dice de qué hora son los datos y, si la
+última lectura falló, que eso es lo que estás viendo. Los bloques comparten una caché de 30 segundos,
+así que tener varios en una nota no multiplica las llamadas a Lumbre.
+
+## API para Dataview y js-engine
+
+`app.plugins.plugins['lumbre'].api` expone una superficie pequeña y estable para leer tareas y
+crearlas desde un script. Está documentada, con ejemplos, en **[`docs/API.md`](docs/API.md)**.
+
 ## Estado
 
-Lo que falta (la API pública para Dataview y js-engine, y dónde se guarda el token) está en la lista
-`lumbre-obsidian` de Lumbre. El detalle de lo construido, en `docs/ESTADO.md`.
+Lo que falta (dónde se guarda el token) está en la lista `lumbre-obsidian` de Lumbre. El detalle de
+lo construido, en `docs/ESTADO.md`.
 
 ## Instalación por BRAT
 

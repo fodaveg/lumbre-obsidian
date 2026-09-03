@@ -27,6 +27,13 @@ guiones largos como inciso: coma, punto o paréntesis.
 - `src/lumbre/client.ts`: cliente HTTP. NO importa `obsidian`, recibe `request` por inyección.
 - `src/lumbre/queue.ts`: cola durable de escrituras. Envía, hace flush y RELEE antes de dar nada por
   materializado, porque un 200 de la API solo significa "encolado".
+- `src/blocks/query-parser.ts`: la consulta del bloque ```` ```lumbre ````. Parseo, resolución contra
+  la nota y el catálogo de listas, clave de caché y filtro en cliente. Sin red.
+- `src/blocks/query-cache.ts`: UNA entrada por consulta, TTL de 30 s y peticiones deduplicadas. Los
+  bloques se suscriben; la cola la invalida al materializar.
+- `src/blocks/task-block.ts`: el `MarkdownRenderChild` que pinta el bloque. No escribe en la nota.
+- `src/api/lumbre-api.ts`: la API PÚBLICA (`app.plugins.plugins.lumbre.api`), documentada en
+  `docs/API.md`. Superficie pequeña y estable; todo lo que muta pasa por la cola.
 - `src/links/link-store.ts`: mapa nota ↔ tarea. La nota se identifica por RUTA, nunca por un id
   escrito en el frontmatter.
 - `src/storage/plugin-store.ts`: el único objeto de `data.json`, con las escrituras coalescidas.

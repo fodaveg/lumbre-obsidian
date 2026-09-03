@@ -260,6 +260,125 @@
 	flex-wrap: wrap;
 }
 
+/* ── Bloque ```lumbre``` dentro de una nota ───────────────────────────────── */
+
+/*
+ * El bloque vive dentro del ancho de la nota, así que se apoya en el contenedor
+ * y no en la ventana, igual que el panel. Ni una tabla ni un ancho fijo: todo
+ * envuelve, que es lo que hace que quepa en un móvil.
+ */
+.lumbre-block {
+	container-type: inline-size;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	margin: var(--size-4-2) 0;
+	padding: var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	font-size: var(--font-ui-small);
+}
+
+.lumbre-block__header {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--size-4-2);
+}
+
+.lumbre-block__title {
+	flex: 1 1 auto;
+	min-width: 0;
+	color: var(--text-normal);
+	font-weight: var(--font-semibold);
+	overflow-wrap: anywhere;
+}
+
+.lumbre-block__body {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+}
+
+.lumbre-block__group + .lumbre-block__group {
+	margin-top: var(--size-4-2);
+}
+
+.lumbre-block__task {
+	background-color: transparent;
+	padding: var(--size-4-1) var(--size-4-2);
+}
+
+/* Punto de prioridad. p4 no pinta nada: "sin prioridad" no es un color. */
+.lumbre-block__priority {
+	flex: 0 0 auto;
+	width: 0.5em;
+	height: 0.5em;
+	margin-top: 0.45em;
+	border-radius: 50%;
+	background-color: var(--text-muted);
+}
+
+.lumbre-block__priority--p1 {
+	background-color: var(--color-red);
+}
+
+.lumbre-block__priority--p2 {
+	background-color: var(--color-orange);
+}
+
+.lumbre-block__priority--p3 {
+	background-color: var(--color-blue);
+}
+
+.lumbre-block__icon {
+	display: inline-flex;
+	align-items: center;
+	margin-right: var(--size-4-1);
+}
+
+.lumbre-block__icon .svg-icon {
+	width: var(--icon-xs);
+	height: var(--icon-xs);
+}
+
+.lumbre-block__footer {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.lumbre-block__stale {
+	color: var(--text-muted);
+}
+
+.lumbre-block__error {
+	color: var(--text-error);
+	overflow-wrap: anywhere;
+}
+
+/* Por debajo de unos 340 px, el botón de actualizar baja a su propia línea. */
+@container (max-width: 340px) {
+	.lumbre-block__header {
+		flex-direction: column;
+		align-items: stretch;
+	}
+}
+
+.lumbre-block--mobile .lumbre-button {
+	min-height: 44px;
+	padding: var(--size-4-2) var(--size-4-3);
+	font-size: var(--font-ui-small);
+}
+
+.lumbre-block--mobile .lumbre-task__check {
+	width: 22px;
+	height: 22px;
+}
+
 /* ── Estrecho y móvil ─────────────────────────────────────────────────────── */
 
 /*

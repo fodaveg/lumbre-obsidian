@@ -1,9 +1,11 @@
 import {
 	Notice,
+	Platform,
 	Plugin,
 	requestUrl,
 	type Editor,
 	type MarkdownFileInfo,
+	type MarkdownPostProcessorContext,
 	type MarkdownView,
 	type Menu,
 	type TAbstractFile,
@@ -11,12 +13,15 @@ import {
 	type WorkspaceLeaf,
 } from 'obsidian';
 
+import { LumbreApi } from './api/lumbre-api';
+import { QueryCache } from './blocks/query-cache';
+import { LUMBRE_BLOCK_LANGUAGE, LumbreTaskBlock, type TaskBlockHost } from './blocks/task-block';
 import { LinkStore } from './links/link-store';
 import { NOTE_LIST_PROPERTY, readNoteListId, writeNoteListId } from './links/note-list';
 import { LumbreClient } from './lumbre/client';
 import { ListCache } from './lumbre/list-cache';
 import { OperationQueue, type LinkTarget } from './lumbre/queue';
-import { taskDeepLinks, taskFromDraft, type TaskDraft } from './lumbre/types';
+import { taskFromDraft, type LumbreTask, type TaskDraft } from './lumbre/types';
 import {
 	DEFAULT_SETTINGS,
 	LumbreSettingTab,
@@ -48,18 +53,6 @@ interface SettingsOpener {
 	setting?: { open(): void; openTabById(id: string): void };
 }
 
-/**
- * Superficie que el plugin expone a otras piezas del vault. **Todavía no es la
- * API pública**: la superficie que verán Dataview y js-engine se fija en el lote
- * de la API, y hasta entonces esto puede cambiar de forma sin aviso.
- */
-export interface LumbreApi {
-	client: LumbreClient;
-	queue: OperationQueue;
-	links: LinkStore;
-	taskDeepLinks: typeof taskDeepLinks;
-}
-
 export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	/** Ver el comentario de `LumbreSettingsHost.config`: el nombre evita `Plugin.settings` de 1.13. */
 	config: LumbreSettings = { ...DEFAULT_SETTINGS };
@@ -70,12 +63,12 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	queue!: OperationQueue;
 	links!: LinkStore;
 	lists!: ListCache;
+	queries!: QueryCache;
 
 	/**
-	 * API del plugin, alcanzable como `app.plugins.plugins.lumbre.api`. La
-	 * superficie PÚBLICA (la que se promete a Dataview y js-engine, y que ya no se
-	 * puede romper) se fija en el lote de la API: hasta entonces esto es lo que
-	 * hay montado, no un contrato.
+	 * API PÚBLICA del plugin, alcanzable como `app.plugins.plugins.lumbre.api` y
+	 * documentada en `docs/API.md`. Es lo que se promete a Dataview y a js-engine:
+	 * la superficie no se rompe sin subir `version`.
 	 */
 	api!: LumbreApi;
 
@@ -100,17 +93,47 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			getToken: () => this.tokenStore.get(),
 			request: (init) => requestUrl(init),
 		});
-		this.queue = new OperationQueue({ client: this.client, storage: this.store });
+		this.queue = new OperationQueue({
+			client: this.client,
+			storage: this.store,
+			// Materializar es el único momento en que un cambio deja de ser una
+			// promesa: ahí caducan los bloques y se asientan sus casillas.
+			onMaterialized: () => {
+				void this.refreshBlocks();
+			},
+		});
 		this.links = new LinkStore({ storage: this.store });
 		this.lists = new ListCache({ client: this.client });
-		this.api = {
+		this.queries = new QueryCache({
+			client: this.client,
+			onRefresh: () => {
+				this.api.notifyTasksChanged();
+			},
+		});
+		this.api = new LumbreApi({
+			version: this.manifest.version,
 			client: this.client,
 			queue: this.queue,
 			links: this.links,
-			taskDeepLinks,
-		};
+			cache: this.queries,
+			lists: this.lists,
+			openUrl: (url: string) => {
+				window.open(url);
+			},
+			webOrigin: () => this.config.apiOrigin,
+			isDesktopApp: () => Platform.isDesktopApp,
+			triggerWorkspace: (event: string) => {
+				this.app.workspace.trigger(event);
+			},
+		});
 
 		this.addSettingTab(new LumbreSettingTab(this.app, this));
+		this.registerMarkdownCodeBlockProcessor(
+			LUMBRE_BLOCK_LANGUAGE,
+			(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) => {
+				ctx.addChild(new LumbreTaskBlock(el, source, ctx.sourcePath, this.taskBlockHost()));
+			},
+		);
 		this.registerView(
 			NOTE_TASKS_VIEW_TYPE,
 			(leaf: WorkspaceLeaf) => new NoteTasksView(leaf, this.noteTasksHost()),
@@ -155,7 +178,11 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 
 		// Al volver la red hay que drenar lo que se encoló sin conexión.
 		this.registerDomEvent(window, 'online', () => {
+			this.api.notifyConnectionChanged(true);
 			void this.flushIfConnected();
+		});
+		this.registerDomEvent(window, 'offline', () => {
+			this.api.notifyConnectionChanged(false);
 		});
 
 		void this.flushIfConnected();
@@ -308,6 +335,53 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	private async unlinkNoteFromList(file: TFile): Promise<void> {
 		await writeNoteListId(this.app, file, null);
 		new Notice(`Quitada la propiedad ${NOTE_LIST_PROPERTY} de la nota`);
+		this.notifyDataChange();
+	}
+
+	// ── Cableado de los bloques ──────────────────────────────────────────────
+
+	private taskBlockHost(): TaskBlockHost {
+		return {
+			cache: this.queries,
+			lists: this.lists,
+			queue: this.queue,
+			setTaskDone: (task: LumbreTask, done: boolean, notePath: string) =>
+				this.setTaskDone(task, done, notePath),
+			noteListId: (notePath: string) => {
+				const file = this.app.vault.getFileByPath(notePath);
+				return file === null ? null : readNoteListId(this.app, file);
+			},
+			onDataChange: (listener: () => void) => {
+				this.dataListeners.add(listener);
+				return () => this.dataListeners.delete(listener);
+			},
+		};
+	}
+
+	/**
+	 * Completa o reabre desde un bloque. Encola, drena y solo avisa con un Notice
+	 * si Lumbre RECHAZÓ la operación: un refresco normal no interrumpe a nadie.
+	 */
+	private async setTaskDone(task: LumbreTask, done: boolean, notePath: string): Promise<void> {
+		const file = notePath.length === 0 ? null : this.app.vault.getFileByPath(notePath);
+		const operation = await this.queue.enqueueStatus(task.id, done, {
+			notePath,
+			label: file?.basename ?? 'Sin nota',
+			excerpt: null,
+		});
+		this.notifyDataChange();
+
+		await this.queue.flush();
+		const after = this.queue.pending().find((candidate) => candidate.id === operation.id);
+		if (after?.state === 'rejected') {
+			new Notice(after.error ?? 'Lumbre rechazó la operación.');
+		}
+		this.notifyDataChange();
+	}
+
+	/** Caduca las consultas y refresca de golpe los bloques que estén montados. */
+	private async refreshBlocks(): Promise<void> {
+		await this.queries.refreshAll();
 		this.notifyDataChange();
 	}
 
