@@ -49,6 +49,12 @@ export interface LumbreFailure {
 	ok: false;
 	reason: FailureReason;
 	status?: number;
+	/**
+	 * Segundos que pide esperar el servidor (`Retry-After` de un 429), si los
+	 * dice. Lumbre no siempre los manda, así que quien reintente necesita su
+	 * propia espera por defecto.
+	 */
+	retryAfterSeconds?: number;
 }
 
 /** Resultado uniforme de cualquier método del cliente. */
@@ -86,6 +92,8 @@ export interface LumbreResponse {
 	 * `text/markdown` y no JSON.
 	 */
 	text?: string;
+	/** Cabeceras de la respuesta, en minúsculas. De aquí sale el `retry-after`. */
+	headers?: Record<string, string>;
 }
 
 export type LumbreRequestFn = (init: LumbreRequestInit) => Promise<LumbreResponse>;
@@ -376,13 +384,16 @@ export class LumbreClient {
 	 * `GET /api/tasks?ids=`: varias tareas de golpe. Trocea por encima del tope
 	 * del servidor. Un id sin coincidencia simplemente no sale en el resultado,
 	 * igual que en `getTask`.
+	 *
+	 * Va con `includeArchived=true` por el mismo motivo que `getTask`: aquí se
+	 * pregunta por ids CONCRETOS, y archivar en Lumbre es visibilidad, no borrar.
 	 */
 	async getTasksByIds(ids: string[]): Promise<LumbreResult<LumbreTask[]>> {
 		if (ids.length === 0) return { ok: true, value: [] };
 		const out: LumbreTask[] = [];
 		for (let i = 0; i < ids.length; i += MAX_IDS_PER_REQUEST) {
 			const chunk = ids.slice(i, i + MAX_IDS_PER_REQUEST);
-			const query = new URLSearchParams({ ids: chunk.join(',') });
+			const query = new URLSearchParams({ ids: chunk.join(','), includeArchived: 'true' });
 			const response = await this.send('GET', `/api/tasks?${query.toString()}`);
 			if (!response.ok) return response;
 			out.push(...tasksFromApi(response.value));
@@ -391,11 +402,16 @@ export class LumbreClient {
 	}
 
 	/**
-	 * `GET /api/tasks?id=`: UNA tarea por id, o `null` si no existe, no es del
-	 * usuario del token o está archivada. Encuentra también subtareas.
+	 * `GET /api/tasks?id=`: UNA tarea por id, o `null` si no existe o no es del
+	 * usuario del token. Encuentra también subtareas.
+	 *
+	 * Va SIEMPRE con `includeArchived=true`, que en `?id=` es la única excepción
+	 * a los filtros que ese parámetro ignora. Sin él, una tarea archivada
+	 * responde `200 []` y no hay forma de distinguirla de una que no existe: la
+	 * cola leería "todavía no está" y reintentaría la confirmación para siempre.
 	 */
 	async getTask(id: string): Promise<LumbreResult<LumbreTask | null>> {
-		const query = new URLSearchParams({ id });
+		const query = new URLSearchParams({ id, includeArchived: 'true' });
 		const response = await this.send('GET', `/api/tasks?${query.toString()}`);
 		if (!response.ok) return response;
 		const [first] = tasksFromApi(response.value);
@@ -634,7 +650,7 @@ export class LumbreClient {
 			return { ok: false, reason: 'network' };
 		}
 
-		const failure = failureForStatus(response.status);
+		const failure = failureForStatus(response.status, response.headers);
 		this.logRequest(method, path, startedAt, {
 			status: response.status,
 			bytes: bytesOf(response),
@@ -775,12 +791,34 @@ function batchOpBody(operation: BatchOperation): Record<string, unknown> {
  * conjunto de motivos es cerrado: cualquier otro status (un 404 de una ruta que
  * no existe, por ejemplo) cae en `server`, que es donde se ve el número.
  */
-function failureForStatus(status: number): LumbreFailure | null {
+function failureForStatus(
+	status: number,
+	headers?: Record<string, string>,
+): LumbreFailure | null {
 	if (status >= 200 && status < 300) return null;
 	if (status === 400) return { ok: false, reason: 'bad_request', status };
 	if (status === 401 || status === 403) return { ok: false, reason: 'unauthorized', status };
-	if (status === 429) return { ok: false, reason: 'rate_limited', status };
+	if (status === 429) {
+		const wait = retryAfterOf(headers);
+		return {
+			ok: false,
+			reason: 'rate_limited',
+			status,
+			...(wait === null ? {} : { retryAfterSeconds: wait }),
+		};
+	}
 	return { ok: false, reason: 'server', status };
+}
+
+/**
+ * Los segundos de `Retry-After`, o `null` si no viene o no es un número. La
+ * forma de fecha HTTP no se interpreta: Lumbre manda segundos cuando lo manda.
+ */
+function retryAfterOf(headers?: Record<string, string>): number | null {
+	const raw = headers?.['retry-after'] ?? headers?.['Retry-After'];
+	if (raw === undefined) return null;
+	const seconds = Number.parseInt(raw, 10);
+	return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 }
 
 /** La ruta sin sus parámetros: lo que se apunta en el registro por defecto. */

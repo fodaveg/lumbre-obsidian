@@ -16,7 +16,6 @@ function base(state: OperationState, error: string | null = null): Omit<CreateOp
 		clientTaskId: 'task-1',
 		draft: { title: 'Comprar pan' },
 		target: { notePath: 'Casa.md', label: 'Casa', excerpt: null },
-		task: null,
 	};
 }
 
@@ -38,6 +37,21 @@ describe('pendingOperationFor', () => {
 
 	it('un status se busca por su taskId', () => {
 		expect(pendingOperationFor([statusOp('sent')], 'task-2')?.kind).toBe('status');
+	});
+
+	it('con varias sobre la misma tarea gana la MÁS RECIENTE', () => {
+		// Si ganara la primera, una rechazada de hace días marcaría la tarea como
+		// «Rechazada» para siempre, tapando lo que se acaba de encolar encima.
+		const vieja: CreateOperation = { ...createOp('rejected'), id: 'op-vieja' };
+		const nueva: CreateOperation = {
+			...createOp('pending_local'),
+			id: 'op-nueva',
+			createdAt: '2026-09-03T12:00:00.000Z',
+			updatedAt: '2026-09-03T12:00:00.000Z',
+		};
+
+		expect(pendingOperationFor([vieja, nueva], 'task-1')?.id).toBe('op-nueva');
+		expect(pendingOperationFor([nueva, vieja], 'task-1')?.id).toBe('op-nueva');
 	});
 });
 

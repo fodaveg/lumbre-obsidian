@@ -33,6 +33,7 @@ import { describeFailure, type LumbreClient } from '../lumbre/client';
 import type { ListCache } from '../lumbre/list-cache';
 import type { LinkTarget, OperationQueue } from '../lumbre/queue';
 import type { WeeklySnapshotOptions } from '../review/weekly-snapshot';
+import type { TaskLinks } from '../ui/open-in-lumbre';
 import { taskDeepLinks, type LumbreList, type LumbreTask, type TaskDraft } from '../lumbre/types';
 
 /** El evento que se dispara en el workspace de Obsidian. Lo escucha Dataview. */
@@ -79,12 +80,13 @@ export interface LumbreApiDeps {
 	links: Pick<LinkStore, 'linksForNote'>;
 	cache: Pick<QueryCache, 'get'>;
 	lists: Pick<ListCache, 'get' | 'nameFor'>;
-	/** Abre una URL. En el plugin es `window.open`. */
-	openUrl(url: string): void;
+	/**
+	 * Abre la tarea en Lumbre. Lo cablea `main.ts` con `openTaskInLumbre`, que es
+	 * quien sabe de plataformas; aquí no se decide entre nativo y web.
+	 */
+	openTask(links: TaskLinks): void;
 	/** Origen web de Lumbre, para el enlace de la web. */
 	webOrigin(): string;
-	/** `true` en la app de escritorio, donde el esquema nativo tiene quien lo atienda. */
-	isDesktopApp(): boolean;
 	/** Dispara un evento del workspace de Obsidian. */
 	triggerWorkspace(event: string): void;
 	/** Registro de diagnóstico, ya etiquetado como `api`. */
@@ -237,13 +239,12 @@ export class LumbreApi {
 	}
 
 	/**
-	 * Abre una tarea en Lumbre: el esquema nativo en la app de escritorio, la web
-	 * en móvil, donde no hay nada que atienda `lumbre://`.
+	 * Abre una tarea en Lumbre: la app nativa en macOS, la web en el resto
+	 * (Windows, Linux y móvil no tienen nada que atienda `lumbre://`).
 	 */
 	openInLumbre(id: string): void {
 		this.called('openInLumbre', { id });
-		const links = taskDeepLinks({ id }, this.deps.webOrigin());
-		this.deps.openUrl(this.deps.isDesktopApp() ? links.native : links.web);
+		this.deps.openTask(taskDeepLinks({ id }, this.deps.webOrigin()));
 	}
 
 	/** Se apunta a un evento. Devuelve cómo darse de baja. */

@@ -31,7 +31,7 @@ Dos reglas que explican por qué la API hace lo que hace:
 | `completeTask(id): Promise<void>` | Encola completarla. |
 | `reopenTask(id): Promise<void>` | Encola reabrirla. |
 | `linksForNote(path): LumbreTaskLink[]` | Los vínculos nota ↔ tarea de una nota, por su ruta en el vault. |
-| `openInLumbre(id): void` | Abre la tarea: la app de escritorio si la hay, la web en móvil. |
+| `openInLumbre(id): void` | Abre la tarea: la app nativa en macOS (con repliegue a la web si no está instalada), y la web en Windows, Linux y móvil, donde nada atiende `lumbre://`. |
 | `weeklySnapshot(options?): Promise<string>` | El Markdown de la foto semanal de la revisión, para pegarlo desde una plantilla. Ver «La foto semanal». |
 | `on(evento, handler): () => void` | Se apunta a un evento. Devuelve cómo darse de baja. |
 | `diagnostics.report(): string` | El informe de diagnóstico en texto plano, el mismo que copia el botón de los ajustes. |

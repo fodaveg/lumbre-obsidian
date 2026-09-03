@@ -29,6 +29,7 @@ import { LUMBRE_BLOCK_LANGUAGE, LumbreTaskBlock, type TaskBlockHost } from './bl
 import { BrlEntryModal } from './brl/brl-modal';
 import { BRL_TODAY, brlCreateOp, type BrlKind } from './brl/brl-ops';
 import { DiagnosticsModal } from './diagnostics/diagnostics-modal';
+import { describeError } from './diagnostics/errors';
 import {
 	LiveLog,
 	logsFolder,
@@ -49,7 +50,8 @@ import {
 	type LumbreResult,
 } from './lumbre/client';
 import { ListCache } from './lumbre/list-cache';
-import { OperationQueue, type LinkTarget } from './lumbre/queue';
+import { describeFailedItems, OperationQueue, type LinkTarget } from './lumbre/queue';
+import { startQueueDrain } from './lumbre/queue-drain';
 import {
 	collectWeeklySnapshot,
 	type WeeklySnapshotDeps,
@@ -68,6 +70,7 @@ import { PluginStore, type DeviceIdStore } from './storage/plugin-store';
 import { PluginDataTokenStore, type TokenStore } from './token-store';
 import { draftFromEditor, type EditorContext } from './ui/draft-from-editor';
 import { ListSuggestModal } from './ui/list-suggest-modal';
+import { openTaskInLumbre } from './ui/open-in-lumbre';
 import {
 	NOTE_TASKS_ICON,
 	NOTE_TASKS_VIEW_TYPE,
@@ -149,7 +152,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			desktop: Platform.isDesktop,
 		});
 
-		this.store = new PluginStore(this, this.deviceIdStore());
+		this.store = new PluginStore(this, this.deviceIdStore(), this.logger.child('main'));
 		await this.store.load();
 		this.config = this.store.data.settings;
 		// El nivel guardado manda desde aquí: lo de arriba se apuntó con el de
@@ -203,11 +206,10 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			links: this.links,
 			cache: this.queries,
 			lists: this.lists,
-			openUrl: (url: string) => {
-				window.open(url);
+			openTask: (links) => {
+				openTaskInLumbre(links);
 			},
 			webOrigin: () => this.config.apiOrigin,
-			isDesktopApp: () => Platform.isDesktopApp,
 			triggerWorkspace: (event: string) => {
 				this.app.workspace.trigger(event);
 			},
@@ -314,6 +316,17 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		this.registerDomEvent(window, 'offline', () => {
 			this.log.warn('Sin conexión');
 			this.api.notifyConnectionChanged(false);
+		});
+		// Y un repaso periódico: entre un gesto del usuario y el siguiente puede
+		// quedarse una operación aceptada sin confirmar, o encolada sin conexión con
+		// el evento `online` perdido, y nadie la volvería a mirar hasta reiniciar.
+		startQueueDrain({
+			queue: this.queue,
+			isOnline: () => navigator.onLine,
+			register: (handler: () => void, ms: number) => {
+				this.registerInterval(window.setInterval(handler, ms));
+			},
+			logger: this.logger.child('queue'),
 		});
 		this.registerUnhandled();
 
@@ -797,6 +810,26 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		checked: boolean[],
 		file: TFile | null,
 	): Promise<void> {
+		try {
+			await this.applySoploPlanUnguarded(plan, checked, file);
+		} catch (error) {
+			// Se apunta aquí, con su contexto, y se RELANZA: el modal necesita saber
+			// que falló para salir de «Aplicando…». `guarded` no vale para esto, que
+			// se traga la excepción a propósito y el modal se cerraría como si todo
+			// hubiera ido bien.
+			this.log.error('Falló aplicar el plan de Soplo', {
+				notePath: file?.path ?? null,
+				...describeError(error),
+			});
+			throw error;
+		}
+	}
+
+	private async applySoploPlanUnguarded(
+		plan: AgentPlan,
+		checked: boolean[],
+		file: TFile | null,
+	): Promise<void> {
 		const { ops, createdTaskIds, skipped } = planToOps(plan.plan, checked);
 		this.logger.child('modal').info('Plan de Soplo aplicado', {
 			notePath: file?.path ?? null,
@@ -842,10 +875,23 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		this.notifyDataChange();
 
 		await this.queue.flush();
-		const after = this.queue.pending().find((candidate) => candidate.id === operation.id);
+		const after = this.queue.snapshot().find((candidate) => candidate.id === operation.id);
 		if (after?.state === 'rejected') {
-			this.log.error('Lumbre rechazó parte del plan', { id: operation.id, error: after.error });
+			this.log.error('Lumbre rechazó el plan entero', { id: operation.id, error: after.error });
 			new Notice(after.error ?? 'Lumbre rechazó parte del plan.');
+		}
+		// Éxito PARCIAL: el lote se aceptó y las demás acciones YA están aplicadas.
+		// Lo que se dice es cuáles no entraron, por su posición y con el motivo del
+		// servidor; el reintento no vale aquí, reenviar duplicaría lo que sí entró.
+		const failed = after?.kind === 'batch' ? (after.failedItems ?? []) : [];
+		if (failed.length > 0) {
+			this.log.warn('Lumbre no aplicó parte del plan', {
+				id: operation.id,
+				failed: describeFailedItems(failed),
+			});
+			new Notice(
+				`Lumbre no aplicó ${failed.length} de ${ops.length} acciones: ${describeFailedItems(failed)}`,
+			);
 		}
 		if (file !== null && navigator.onLine) await this.links.refresh(file.path, this.client);
 		this.notifyDataChange();

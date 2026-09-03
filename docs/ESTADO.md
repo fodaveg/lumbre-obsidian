@@ -172,6 +172,41 @@
     responde 401 a un token VÁLIDO porque ese endpoint solo aceptaba la cookie de sesión. Esto
     corrige la decisión del lote D, que daba el endpoint por inconsultable desde el plugin; el 403
     del `POST /api/agent` sigue detectándose igual, y es lo que cubre a ese Lumbre anterior.
+- **Lote G: arreglos de la revisión fría** (sobre `e1ac5d8`; cada uno con su test):
+  - **G1** `PluginStore.save()` RELEE `data.json` y lo UNE con la memoria (cola por `id` de
+    operación, vínculos por `id`, gana el `updatedAt` más reciente; los ajustes, la memoria). Antes,
+    un Obsidian abierto desde hacía horas pisaba lo que otro dispositivo había subido por Sync.
+  - **G2** El éxito PARCIAL de `POST /api/batch` deja el lote ENVIADO y guarda `failedItems` con el
+    índice y el motivo de cada op rechazada; reintentar un lote con `sentAt` ya no lo reenvía (un
+    `addSubtask` no es idempotente) y el Notice dice qué acciones no entraron.
+  - **G3** La cola se poda al escribirla: fuera las materializadas de más de 7 días, 50 como mucho, y
+    de lo releído solo se guarda `materializedAt` (la `LumbreTask` entera viajaba por Sync).
+  - **G4** El cuerpo de un bloque mal escrito ya no entra en el informe: en `info` va `sourceLength`
+    y el texto solo en `debug` (`src/blocks/block-log.ts`, para el bloque de tareas y el del BRL).
+  - **G5** `openTaskInLumbre` (`src/ui/open-in-lumbre.ts`) manda en los dos llamadores: la web
+    SIEMPRE salvo en macOS, donde se intenta `lumbre://` con repliegue a la web.
+  - **G6** «Descartar» junto a «Reintentar» para las operaciones paradas
+    (`src/ui/operation-actions.ts`), y `pendingOperationFor` devuelve la MÁS RECIENTE.
+  - **G7** `getTask`/`getTasksByIds` van con `includeArchived=true`, y una `sent` que nunca confirma
+    pasa a `recoverable_error` al agotar `MAX_ATTEMPTS` en vez de reintentarse para siempre.
+  - **G8** `flush()` encadena UN flush de seguimiento si ya hay otro en vuelo, y `main.ts` registra
+    un drenaje periódico de 60 s con `registerInterval` (`src/lumbre/queue-drain.ts`).
+  - **G9** El modal de Soplo sale de «Aplicando…» si `apply` lanza (`src/soplo/apply-flow.ts`), con
+    los botones habilitados y «Reintentar» volviendo a APLICAR; `applySoploPlan` apunta el fallo.
+  - **G10** UN `client.flush()` por `runFlush` (los endpoints de escritura ya drenan al responder) y
+    un 429 no gasta intento: aplaza con `Retry-After` o 30 s.
+  - **G11** README y `docs/API.md` dicen que el plugin es de escritorio Y móvil.
+- **Decisiones del lote G**:
+  - La unión de `save()` respeta lo que se quitó A PROPÓSITO: `PluginStore` recuerda en memoria los
+    ids que se han descartado o podado, y la unión no los resucita desde la foto de disco.
+  - `applySoploPlan` NO va envuelto en `guarded`: `guarded` se traga la excepción por diseño, y el
+    modal cerraría como si todo hubiera ido bien. Se apunta el error con su contexto y se RELANZA,
+    que es lo que hace visible el fallo donde el usuario está mirando.
+  - Los tres endpoints de escritura de Lumbre (`/api/ingest`, `/api/mutations`, `/api/batch`) llaman
+    a `runHeadlessDrain` antes de responder, así que tras un envío recién aceptado no hace falta
+    `POST /api/sync/flush`. Ese drenaje solo se gasta por las operaciones que ya venían aceptadas de
+    un flush anterior, y va uno para todas.
+  - Un 429 no cuenta como intento fallido: no ha fallado la operación, ha fallado el momento.
 - **Qué falta**: la decisión de dónde vive el token; las tareas están en la lista `lumbre-obsidian`
   de Lumbre, no aquí.
 - **Decisiones del lote B**: las listas se cachean en memoria cinco minutos (`ListCache`), no en

@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { Logger } from '../diagnostics/logger';
+import type { LumbreTaskLink } from '../links/link-store';
+import type { CreateOperation, QueuedOperation } from '../lumbre/queue';
 import { DEFAULT_SETTINGS } from '../settings';
 import { PluginDataTokenStore } from '../token-store';
 import { PLUGIN_DATA_VERSION, PluginStore, type PluginDataHost } from './plugin-store';
@@ -102,6 +105,143 @@ describe('PluginStore: escrituras', () => {
 			queue: [],
 			links: [],
 		});
+	});
+});
+
+describe('PluginStore: fusión con lo que hay en disco', () => {
+	/** Una operación de la cola, con lo justo para poder distinguirla. */
+	function operation(id: string, updatedAt: string, deviceId = 'device-a'): CreateOperation {
+		return {
+			id,
+			deviceId,
+			state: 'pending_local',
+			attempts: 0,
+			error: null,
+			createdAt: updatedAt,
+			updatedAt,
+			sentAt: null,
+			kind: 'create',
+			clientTaskId: `tarea-${id}`,
+			draft: { title: 'Comprar pan' },
+			target: { notePath: 'Nota.md', label: 'Comprar pan', excerpt: null },
+		};
+	}
+
+	function link(id: string, updatedAt: string, label = 'Comprar pan'): LumbreTaskLink {
+		return {
+			id,
+			taskId: `tarea-${id}`,
+			notePath: 'Nota.md',
+			label,
+			excerpt: null,
+			task: {
+				id: `tarea-${id}`,
+				content: label,
+				notes: null,
+				date: null,
+				someday: false,
+				deadline: null,
+				time: null,
+				priority: 'p4',
+				done: false,
+				cancelledAt: null,
+				archivedAt: null,
+				list: null,
+				section: null,
+				parentId: null,
+			},
+			syncState: 'materialized',
+			error: null,
+			updatedAt,
+			orphanedAt: null,
+		};
+	}
+
+	function savedQueue(host: { saved: unknown }): QueuedOperation[] {
+		return (host.saved as { queue: QueuedOperation[] }).queue;
+	}
+
+	it('no pisa la operación que otro dispositivo dejó en data.json mientras tanto', async () => {
+		// El caso real: el iPad encola sin conexión, Sync sube su `data.json`, y el
+		// Mac lleva horas abierto con una foto anterior en memoria.
+		const host = memoryHost(null);
+		const mac = new PluginStore(host);
+		const ipad = new PluginStore(host);
+		await mac.load();
+		await ipad.load();
+
+		await ipad.writeQueue([operation('del-ipad', '2026-09-03T10:00:00.000Z', 'device-b')]);
+		await mac.writeQueue([operation('del-mac', '2026-09-03T11:00:00.000Z')]);
+
+		expect(savedQueue(host).map((item) => item.id).sort()).toEqual(['del-ipad', 'del-mac']);
+	});
+
+	it('con el mismo id gana el updatedAt más reciente', async () => {
+		const host = memoryHost(null);
+		const store = new PluginStore(host);
+		await store.load();
+		await store.writeQueue([operation('uno', '2026-09-03T12:00:00.000Z')]);
+
+		// Otro dispositivo escribió una versión ANTERIOR de la misma operación.
+		host.saved = { ...(host.saved as object), queue: [operation('uno', '2026-09-03T09:00:00.000Z')] };
+		await store.writeLinks([]);
+
+		expect(savedQueue(host)[0]?.updatedAt).toBe('2026-09-03T12:00:00.000Z');
+	});
+
+	it('une los vínculos por id y deja ganar al más reciente', async () => {
+		const host = memoryHost(null);
+		const a = new PluginStore(host);
+		const b = new PluginStore(host);
+		await a.load();
+		await b.load();
+
+		await b.writeLinks([link('del-ipad', '2026-09-03T10:00:00.000Z')]);
+		await a.writeLinks([link('del-mac', '2026-09-03T11:00:00.000Z')]);
+
+		const saved = (host.saved as { links: LumbreTaskLink[] }).links;
+		expect(saved.map((item) => item.id).sort()).toEqual(['del-ipad', 'del-mac']);
+	});
+
+	it('lo que se quita a propósito NO vuelve de disco', async () => {
+		const host = memoryHost(null);
+		const store = new PluginStore(host);
+		await store.load();
+		await store.writeQueue([operation('uno', '2026-09-03T10:00:00.000Z')]);
+
+		// Descartar una operación es una decisión del usuario: la unión no puede
+		// resucitarla porque siga en la foto de disco.
+		await store.writeQueue([]);
+
+		expect(savedQueue(host)).toEqual([]);
+	});
+
+	it('borrar el token gana sobre lo que siga en el fichero', async () => {
+		const host = memoryHost({ version: 2, settings: {}, token: 'tok-1', queue: [], links: [] });
+		const store = new PluginStore(host);
+		await store.load();
+
+		await store.writeToken(null);
+
+		// Vaciarlo es una decisión del usuario: la unión no puede devolverle una
+		// credencial que acaba de borrar.
+		expect((host.saved as { token: string | null }).token).toBeNull();
+	});
+
+	it('con un data.json ilegible escribe la memoria y lo apunta como aviso', async () => {
+		const host = memoryHost(null);
+		const logger = Logger.create({ console: null, level: 'info' });
+		const store = new PluginStore(host, undefined, logger.child('main'));
+		await store.load();
+		host.loadData = (): Promise<unknown> => Promise.reject(new Error('fichero corrupto'));
+
+		await store.writeQueue([operation('uno', '2026-09-03T10:00:00.000Z')]);
+
+		expect(savedQueue(host).map((item) => item.id)).toEqual(['uno']);
+		const warning = logger
+			.recent()
+			.find((event) => event.message === 'No se ha podido releer data.json antes de guardar');
+		expect(warning?.level).toBe('warn');
 	});
 });
 

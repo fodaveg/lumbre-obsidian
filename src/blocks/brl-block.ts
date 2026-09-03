@@ -20,6 +20,7 @@ import { MarkdownRenderChild, MarkdownRenderer, Platform, setIcon, type App } fr
 
 import { BRL_TODAY, parseBrlQuery } from '../brl/brl-ops';
 import type { Logger } from '../diagnostics/logger';
+import { logInvalidBlock } from './block-log';
 import type { BrlCache, BrlSnapshot } from './brl-cache';
 
 /** El lenguaje del bloque: ```lumbre-brl```. */
@@ -66,9 +67,9 @@ export class LumbreBrlBlock extends MarkdownRenderChild {
 		const parsed = parseBrlQuery(this.source);
 		if (!parsed.ok) {
 			this.parseError = parsed.error;
-			// El texto del bloque es una instrucción al plugin, no contenido de la
-			// nota: sin él no se puede reproducir el error.
-			this.host.logger.warn('Consulta del bloque de BRL no válida', {
+			// Igual que en el bloque de tareas: el cuerpo de un bloque mal escrito
+			// solo sale en `debug`, ver `logInvalidBlock`.
+			logInvalidBlock(this.host.logger, 'Consulta del bloque de BRL no válida', {
 				notePath: this.notePath,
 				error: parsed.error,
 				source: this.source,

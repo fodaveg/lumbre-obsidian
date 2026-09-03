@@ -1,6 +1,7 @@
 # Lumbre para Obsidian
 
-Plugin de escritorio que conecta el vault de Obsidian con [Lumbre](https://lumbre.pro), el gestor de tareas.
+Plugin de escritorio y móvil que conecta el vault de Obsidian con [Lumbre](https://lumbre.pro), el
+gestor de tareas.
 
 ## Qué hace
 
@@ -27,12 +28,16 @@ tareas de esta nota**). Sigue a la nota abierta y enseña:
   su fecha, cuántos adjuntos tiene, botón para abrirlas en Lumbre y para desvincularlas.
 - **Adjuntar fichero…** en cada tarea: elige un fichero del vault que no sea una nota y lo sube a esa
   tarea de Lumbre. Tope de 25 MB, que se comprueba antes de subir nada.
+- **Reintentar** y **Descartar** en las escrituras que se han quedado paradas (un rechazo de Lumbre,
+  o un error que ha agotado los reintentos). Descartar solo saca la operación de la cola: lo que ya
+  llegó a Lumbre sigue en Lumbre.
 - Un buscador para vincular una tarea que ya existe, por título o por nombre de lista.
 - Si la nota tiene `lumbre-list`, todas las tareas de esa lista agrupadas por sección.
 
 Completar una tarea no es inmediato: la escritura va por una cola durable y el chip dice «Enviando…»
 hasta que Lumbre la confirma al releerla. Sin conexión, la cabecera lo dice y se sigue enseñando lo
-último confirmado, nunca una caché disfrazada de dato fresco.
+último confirmado, nunca una caché disfrazada de dato fresco. La cola se repasa sola cada minuto,
+así que lo que se encoló sin red sale en cuanto la haya, sin tener que tocar nada.
 
 `lumbre-list` es **lo único** que el plugin escribe dentro de una nota por su cuenta. Lo otro que
 puede acabar en un fichero es el BRL de hoy, y solo con el comando que lo pega a mano.

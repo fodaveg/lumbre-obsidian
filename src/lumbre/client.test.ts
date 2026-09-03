@@ -202,12 +202,16 @@ describe('LumbreClient.listTasks', () => {
 });
 
 describe('LumbreClient.getTask y getTasksByIds', () => {
-	it('getTask pide ?id= y devuelve la primera tarea', async () => {
+	it('getTask pide ?id= con includeArchived y devuelve la primera tarea', async () => {
 		const { client, calls } = recordingClient([apiTask()]);
 
 		const result = await client.getTask('task-1');
 
-		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/tasks?id=task-1');
+		// Sin `includeArchived`, una tarea archivada responde `200 []` y no se
+		// distingue de una que no existe: la cola la releería para siempre.
+		expect(calls[0]?.url).toBe(
+			'https://app.lumbre.pro/api/tasks?id=task-1&includeArchived=true',
+		);
 		expect(result.ok && result.value?.id).toBe('task-1');
 	});
 
@@ -224,7 +228,31 @@ describe('LumbreClient.getTask y getTasksByIds', () => {
 		expect(calls).toHaveLength(0);
 
 		await client.getTasksByIds(['a', 'b']);
-		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/tasks?ids=a%2Cb');
+		expect(calls[0]?.url).toBe(
+			'https://app.lumbre.pro/api/tasks?ids=a%2Cb&includeArchived=true',
+		);
+	});
+});
+
+describe('LumbreClient: la espera que pide un 429', () => {
+	it('lee los segundos de Retry-After cuando el servidor los manda', async () => {
+		const client = clientWith(async () => ({
+			status: 429,
+			headers: { 'retry-after': '12' },
+		}));
+
+		const result = await client.ping();
+
+		expect(result).toMatchObject({ reason: 'rate_limited', retryAfterSeconds: 12 });
+	});
+
+	it('sin esa cabecera no se inventa ninguna espera', async () => {
+		const client = clientWith(respondWith(429));
+
+		const result = await client.ping();
+
+		expect(result).toMatchObject({ reason: 'rate_limited' });
+		expect(result).not.toHaveProperty('retryAfterSeconds');
 	});
 });
 

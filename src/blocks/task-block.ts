@@ -22,6 +22,7 @@ import type { OperationQueue, QueuedOperation } from '../lumbre/queue';
 import type { LumbreTask } from '../lumbre/types';
 import { linkChipState, pendingOperationFor } from '../ui/link-chip-state';
 import { groupBySection } from '../ui/task-sections';
+import { logInvalidBlock } from './block-log';
 import type { QueryCache, QuerySnapshot } from './query-cache';
 import {
 	applyClientFilters,
@@ -79,9 +80,9 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		const parsed = parseQuery(this.source);
 		if (!parsed.ok) {
 			this.parseError = parsed.error;
-			// El texto de la consulta SÍ se apunta: es una instrucción al plugin, no
-			// contenido de la nota, y sin él el error no se puede reproducir.
-			this.host.logger.warn('Consulta del bloque no válida', {
+			// Un bloque que NO se entiende puede llevar cualquier cosa: el texto solo
+			// sale en `debug`, ver `logInvalidBlock`.
+			logInvalidBlock(this.host.logger, 'Consulta del bloque no válida', {
 				notePath: this.notePath,
 				error: parsed.error,
 				source: this.source,

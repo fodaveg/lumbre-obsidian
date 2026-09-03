@@ -10,14 +10,25 @@ import type {
 } from './client';
 import { Logger } from '../diagnostics/logger';
 import {
+	describeFailedItems,
 	MAX_ATTEMPTS,
 	OperationQueue,
-	type CreateOperation,
+	RATE_LIMIT_BACKOFF_MS,
+	type BatchQueuedOperation,
 	type LinkTarget,
 	type QueuedOperation,
 	type QueueStorage,
 } from './queue';
 import type { LumbreTask, TaskDraft } from './types';
+
+/** Promesa que se resuelve desde fuera, para parar un flush a media corrida. */
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve = (): void => undefined;
+	const promise = new Promise<void>((done) => {
+		resolve = done;
+	});
+	return { promise, resolve };
+}
 
 const DEVICE = 'device-a';
 
@@ -140,7 +151,7 @@ describe('OperationQueue: crear una tarea', () => {
 		expect(storage.operations).toHaveLength(1);
 	});
 
-	it('envía, hace flush, relee y solo entonces marca materialized guardando la tarea', async () => {
+	it('envía, relee y solo entonces marca materialized, sin guardar la tarea', async () => {
 		const created = task({ id: 'creada' });
 		const client = fakeClient();
 		const queue = queueWith(client, storage);
@@ -153,11 +164,15 @@ describe('OperationQueue: crear una tarea', () => {
 			{ title: 'Comprar pan' },
 			operation.clientTaskId,
 		);
-		expect(client.flush).toHaveBeenCalledTimes(1);
+		// `/api/ingest` ya drena antes de responder: un `client.flush()` detrás sería
+		// una petición de más contra un endpoint limitado a 60/min.
+		expect(client.flush).not.toHaveBeenCalled();
 		expect(client.getTask).toHaveBeenCalledWith(operation.clientTaskId);
 		const [stored] = storage.operations;
 		expect(stored?.state).toBe('materialized');
-		expect((stored as CreateOperation | undefined)?.task).toEqual(created);
+		// El texto de la tarea NO se guarda: `data.json` viaja por Obsidian Sync.
+		expect(stored).not.toHaveProperty('task');
+		expect(stored?.materializedAt).not.toBeNull();
 		expect(stored?.error).toBeNull();
 	});
 
@@ -434,7 +449,7 @@ describe('OperationQueue: un lote aprobado', () => {
 		expect(storage.operations[0]?.state).toBe('materialized');
 	});
 
-	it('un informe con una op en rojo NO se da por enviado', async () => {
+	it('un éxito PARCIAL queda enviado, con el índice y el motivo de lo que falló', async () => {
 		const storage = memoryStorage();
 		const client = fakeClient();
 		client.batch.mockResolvedValue({
@@ -449,9 +464,61 @@ describe('OperationQueue: un lote aprobado', () => {
 
 		await queue.flush();
 
-		// `/api/batch` responde 200 con éxito PARCIAL: el 200 no es la señal.
-		expect(storage.operations[0]?.state).toBe('rejected');
-		expect(storage.operations[0]?.sentAt).toBeNull();
+		// Las ops VÁLIDAS ya están aplicadas en Lumbre: dar el lote por no enviado
+		// llevaría a reenviarlo, y un `addSubtask` no es idempotente.
+		const stored = storage.operations[0] as BatchQueuedOperation | undefined;
+		expect(stored?.sentAt).not.toBeNull();
+		expect(stored?.failedItems).toEqual([{ index: 1, error: 'kind inválido' }]);
+	});
+
+	it('reintentar un lote ya aceptado NO lo vuelve a mandar', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.batch.mockResolvedValue({
+			ok: true,
+			value: [
+				{ index: 0, type: 'ingest', ok: true },
+				{ index: 1, type: 'mutate', ok: false, error: 'kind inválido' },
+			],
+		});
+		const queue = queueWith(client, storage);
+		const operation = await queue.enqueueBatch(OPS, ['nueva-1'], TARGET);
+		await queue.flush();
+		expect(client.batch).toHaveBeenCalledTimes(1);
+
+		await queue.retry(operation.id);
+		await queue.flush();
+
+		expect(client.batch).toHaveBeenCalledTimes(1);
+	});
+
+	it('una op del lote rechazada no deja el lote esperando esa tarea para siempre', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.batch.mockResolvedValue({
+			ok: true,
+			value: [
+				{ index: 0, type: 'ingest', ok: false, error: 'texto vacío' },
+				{ index: 1, type: 'mutate', ok: true },
+			],
+		});
+		const queue = queueWith(client, storage);
+		await queue.enqueueBatch(OPS, ['nueva-1'], TARGET);
+
+		await queue.flush();
+
+		// La única alta del lote fue la que cayó: no hay nada que releer.
+		expect(client.getTasksByIds).not.toHaveBeenCalled();
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('describeFailedItems nombra la acción por su posición, en base 1', () => {
+		expect(
+			describeFailedItems([
+				{ index: 1, error: 'kind inválido' },
+				{ index: 3, error: null },
+			]),
+		).toBe('acción 2 (kind inválido); acción 4');
 	});
 
 	it('un lote sin altas se confirma sin releer nada', async () => {
@@ -464,6 +531,164 @@ describe('OperationQueue: un lote aprobado', () => {
 
 		expect(client.getTasksByIds).not.toHaveBeenCalled();
 		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+});
+
+describe('OperationQueue: poda de la cola', () => {
+	/** Una materializada ya guardada, con la antigüedad que se le pida. */
+	function done(id: string, updatedAt: string): QueuedOperation {
+		return {
+			id,
+			deviceId: DEVICE,
+			state: 'materialized',
+			attempts: 0,
+			error: null,
+			createdAt: updatedAt,
+			updatedAt,
+			sentAt: updatedAt,
+			materializedAt: updatedAt,
+			kind: 'status',
+			taskId: `tarea-${id}`,
+			done: true,
+			target: TARGET,
+		};
+	}
+
+	it('descarta las materializadas de más de 7 días y conserva 50 como mucho', async () => {
+		const now = new Date('2026-09-03T12:00:00.000Z');
+		const storage = memoryStorage();
+		// 60 materializadas: 30 de hace un mes y 30 de ayer.
+		for (let i = 0; i < 30; i += 1) storage.operations.push(done(`vieja-${i}`, '2026-08-01T12:00:00.000Z'));
+		for (let i = 0; i < 30; i += 1) {
+			storage.operations.push(done(`reciente-${i}`, `2026-09-02T12:00:${String(i).padStart(2, '0')}.000Z`));
+		}
+		const queue = new OperationQueue({ client: fakeClient(), storage, now: () => now });
+
+		// Tres pendientes nuevas: la poda ocurre al ESCRIBIR la cola.
+		await queue.enqueueStatus('task-1', true, TARGET);
+		await queue.enqueueStatus('task-2', true, TARGET);
+		await queue.enqueueStatus('task-3', true, TARGET);
+
+		const kept = storage.operations;
+		expect(kept.filter((operation) => operation.state !== 'materialized')).toHaveLength(3);
+		const materialized = kept.filter((operation) => operation.state === 'materialized');
+		expect(materialized.length).toBeLessThanOrEqual(50);
+		expect(materialized.every((operation) => operation.updatedAt > '2026-08-27')).toBe(true);
+	});
+});
+
+describe('OperationQueue: una operación aceptada que nunca se confirma', () => {
+	it('deja de reintentarse tras MAX_ATTEMPTS y queda visible con su motivo', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		// El servidor acepta, pero la tarea no aparece nunca al releer.
+		client.getTask.mockResolvedValue({ ok: true, value: null });
+		const queue = queueWith(client, storage);
+		await queue.enqueueStatus('task-1', true, TARGET);
+
+		for (let attempt = 0; attempt < MAX_ATTEMPTS + 3; attempt += 1) await queue.flush();
+
+		expect(storage.operations[0]).toMatchObject({
+			state: 'recoverable_error',
+			attempts: MAX_ATTEMPTS,
+		});
+		expect(storage.operations[0]?.error).toContain('no la confirma');
+		// Cinco relecturas dobles y ni una sexta: ya no es accionable.
+		expect(client.getTask).toHaveBeenCalledTimes(MAX_ATTEMPTS * 2);
+		expect(client.mutate).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe('OperationQueue: economía de peticiones', () => {
+	it('un flush con cinco operaciones nuevas no gasta ningún drenaje aparte', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		for (let i = 0; i < 5; i += 1) await queue.enqueueStatus(`task-${i}`, true, TARGET);
+		client.getTask.mockImplementation(async (id: string) => ({
+			ok: true,
+			value: task({ id, done: true }),
+		}));
+
+		await queue.flush();
+
+		expect(client.mutate).toHaveBeenCalledTimes(5);
+		expect(client.flush.mock.calls.length).toBeLessThanOrEqual(1);
+	});
+
+	it('las que ya estaban enviadas comparten UN solo drenaje', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.getTask.mockResolvedValue({ ok: true, value: null });
+		const queue = queueWith(client, storage);
+		for (let i = 0; i < 3; i += 1) await queue.enqueueStatus(`task-${i}`, true, TARGET);
+		await queue.flush();
+		client.flush.mockClear();
+
+		await queue.flush();
+
+		expect(client.flush).toHaveBeenCalledTimes(1);
+	});
+
+	it('un 429 no gasta intentos y aplaza el siguiente intento', async () => {
+		const clock = { at: new Date('2026-09-03T12:00:00.000Z') };
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue(failure('rate_limited', 429));
+		const queue = new OperationQueue({
+			client,
+			storage,
+			sleep: vi.fn(async (_ms: number): Promise<void> => undefined),
+			now: () => clock.at,
+		});
+		await queue.enqueueStatus('task-1', true, TARGET);
+
+		for (let attempt = 0; attempt < 3; attempt += 1) {
+			await queue.flush();
+			// Pasa la espera: si no, la operación ni siquiera sería accionable.
+			clock.at = new Date(clock.at.getTime() + RATE_LIMIT_BACKOFF_MS + 1000);
+		}
+
+		expect(client.mutate).toHaveBeenCalledTimes(3);
+		expect(storage.operations[0]).toMatchObject({ state: 'recoverable_error', attempts: 0 });
+	});
+
+	it('mientras dura la espera del 429 la operación no se toca', async () => {
+		const clock = { at: new Date('2026-09-03T12:00:00.000Z') };
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue(failure('rate_limited', 429));
+		const queue = new OperationQueue({ client, storage, now: () => clock.at });
+		await queue.enqueueStatus('task-1', true, TARGET);
+
+		await queue.flush();
+		await queue.flush();
+
+		expect(client.mutate).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe('OperationQueue: encolar durante un flush en vuelo', () => {
+	it('la operación encolada mientras se drena se envía en el flush encadenado', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const gate = deferred();
+		client.mutate.mockImplementationOnce(async () => {
+			await gate.promise;
+			return OK;
+		});
+		const queue = queueWith(client, storage);
+		await queue.enqueueStatus('task-1', true, TARGET);
+
+		// El primer flush se queda dentro de `mutate`, sin resolver.
+		const first = queue.flush();
+		await queue.enqueueStatus('task-2', true, TARGET);
+		const second = queue.flush();
+		gate.resolve();
+		await Promise.all([first, second]);
+
+		expect(client.mutate).toHaveBeenCalledTimes(2);
+		expect(storage.operations.every((operation) => operation.sentAt !== null)).toBe(true);
 	});
 });
 

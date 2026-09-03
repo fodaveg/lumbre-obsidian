@@ -9,9 +9,15 @@
  * `data.json` viaja por Obsidian Sync. Por eso el `deviceId` NO vive aquí
  * cuando hay un sitio local donde ponerlo (ver `DeviceIdStore`): si viajara,
  * dos dispositivos se creerían el mismo y enviarían las mismas operaciones.
+ *
+ * Y por eso mismo `save()` RELEE el fichero antes de escribirlo y UNE lo que
+ * encuentra con lo que tiene en memoria. `load()` corre una sola vez, al
+ * arrancar: sin la relectura, un Obsidian abierto desde hace horas escribiría su
+ * foto vieja encima de lo que otro dispositivo hubiera subido mientras tanto, y
+ * las operaciones encoladas allí desaparecerían con los dos equipos dando éxito.
  */
 
-import { isLogLevel } from '../diagnostics/logger';
+import { isLogLevel, type Logger } from '../diagnostics/logger';
 import type { LumbreTaskLink } from '../links/link-store';
 import type { QueuedOperation } from '../lumbre/queue';
 import { DEFAULT_SETTINGS, type LumbreSettings } from '../settings';
@@ -69,9 +75,21 @@ export class PluginStore {
 	private pendingSave: Promise<void> | null = null;
 	private lastWrite: Promise<void> = Promise.resolve();
 
+	/**
+	 * Ids que ESTE dispositivo ha quitado a propósito (una operación descartada,
+	 * una podada, un vínculo desvinculado). La unión de `save()` no puede
+	 * resucitarlos porque sigan en la foto de disco: quitarlos fue una decisión,
+	 * no una pérdida. Vive en memoria y muere con la sesión, que es todo lo que
+	 * hace falta: la escritura siguiente ya deja el fichero sin ellos.
+	 */
+	private readonly removedOperations = new Set<string>();
+	private readonly removedLinks = new Set<string>();
+
 	constructor(
 		private readonly host: PluginDataHost,
 		private readonly deviceIdStore?: DeviceIdStore,
+		/** Registro de diagnóstico. Sin él, el almacén no apunta nada. */
+		private readonly logger?: Logger,
 	) {}
 
 	/**
@@ -92,8 +110,9 @@ export class PluginStore {
 	}
 
 	/**
-	 * Escribe el objeto entero. Varias llamadas dentro del mismo turno colapsan en
-	 * un solo `saveData`, y dos escrituras nunca se solapan.
+	 * Escribe el objeto entero, UNIDO con lo que haya en disco. Varias llamadas
+	 * dentro del mismo turno colapsan en un solo `saveData`, y dos escrituras
+	 * nunca se solapan.
 	 */
 	save(): Promise<void> {
 		const already = this.pendingSave;
@@ -105,7 +124,9 @@ export class PluginStore {
 			// hecha durante la escritura programe otra.
 			await Promise.resolve();
 			this.pendingSave = null;
-			const write = this.lastWrite.then(() => this.host.saveData(this.snapshot()));
+			const write = this.lastWrite.then(async () => {
+				await this.host.saveData(await this.merged());
+			});
 			this.lastWrite = write.catch(() => undefined);
 			await write;
 		})();
@@ -121,6 +142,7 @@ export class PluginStore {
 	}
 
 	async writeQueue(operations: QueuedOperation[]): Promise<void> {
+		remember(this.data.queue, operations, this.removedOperations);
 		this.data.queue = operations;
 		await this.save();
 	}
@@ -130,6 +152,7 @@ export class PluginStore {
 	}
 
 	async writeLinks(links: LumbreTaskLink[]): Promise<void> {
+		remember(this.data.links, links, this.removedLinks);
 		this.data.links = links;
 		await this.save();
 	}
@@ -144,7 +167,44 @@ export class PluginStore {
 	}
 
 	/**
-	 * Lo que se escribe de verdad. El `deviceId` solo baja a `data.json` si no hay
+	 * Lo que se escribe de verdad: la memoria, UNIDA con lo que hay en disco.
+	 *
+	 * Une la cola por `id` de operación y los vínculos por `id` de vínculo; ante
+	 * el mismo id gana el `updatedAt` más reciente.
+	 *
+	 * Los ajustes y el token son de la MEMORIA, sin unir: son lo que el usuario
+	 * acaba de tocar en esta ventana. En particular el token vacío gana, porque
+	 * vaciarlo es una decisión suya y recuperarlo del fichero sería devolver una
+	 * credencial que acaba de borrar.
+	 *
+	 * Si `data.json` no se puede leer, se escribe la memoria y se apunta el aviso:
+	 * perder lo del otro dispositivo es malo, pero dejar de guardar lo de este
+	 * sería peor.
+	 */
+	private async merged(): Promise<PluginData> {
+		const mine = this.snapshot();
+		let raw: unknown;
+		try {
+			raw = await this.host.loadData();
+		} catch (error) {
+			this.logger?.warn('No se ha podido releer data.json antes de guardar', {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return mine;
+		}
+
+		const onDisk = asRecord(raw);
+		if (onDisk === null) return mine;
+
+		return {
+			...mine,
+			queue: mergeById(asArray<QueuedOperation>(onDisk['queue']), mine.queue, this.removedOperations),
+			links: mergeById(asArray<LumbreTaskLink>(onDisk['links']), mine.links, this.removedLinks),
+		};
+	}
+
+	/**
+	 * Lo que hay en memoria. El `deviceId` solo baja a `data.json` si no hay
 	 * almacén local donde guardarlo: ver el comentario de cabecera.
 	 */
 	private snapshot(): PluginData {
@@ -196,6 +256,38 @@ function asString(value: unknown): string | null {
 
 function asArray<T>(value: unknown): T[] {
 	return Array.isArray(value) ? (value as T[]) : [];
+}
+
+/** Una fila con id y marca de tiempo: lo que tienen en común la cola y los vínculos. */
+interface Stamped {
+	id: string;
+	updatedAt: string;
+}
+
+/**
+ * Une dos listas por `id`. Ante el mismo id gana el `updatedAt` más reciente; lo
+ * que este dispositivo quitó a propósito (`removed`) no vuelve. El orden es el
+ * de disco primero y lo nuevo de esta memoria detrás, que es el orden en que
+ * ocurrieron.
+ */
+function mergeById<T extends Stamped>(fromDisk: T[], inMemory: T[], removed: ReadonlySet<string>): T[] {
+	const merged = new Map<string, T>();
+	for (const row of [...fromDisk, ...inMemory]) {
+		if (typeof row?.id !== 'string' || removed.has(row.id)) continue;
+		const previous = merged.get(row.id);
+		if (previous === undefined || (row.updatedAt ?? '') >= (previous.updatedAt ?? '')) {
+			merged.set(row.id, row);
+		}
+	}
+	return [...merged.values()];
+}
+
+/** Apunta como quitados a propósito los ids que estaban y ya no están. */
+function remember(before: readonly Stamped[], after: readonly Stamped[], removed: Set<string>): void {
+	const kept = new Set(after.map((row) => row.id));
+	for (const row of before) {
+		if (!kept.has(row.id)) removed.add(row.id);
+	}
 }
 
 /**

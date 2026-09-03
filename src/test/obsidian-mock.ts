@@ -16,10 +16,15 @@ export class SuggestModal {}
 export class ItemView {}
 export class Component {}
 
-/** En los tests no hay app de escritorio ni móvil: todo a `false`. */
+/**
+ * En los tests no hay app de escritorio ni móvil: todo a `false`. Es un objeto
+ * mutable a propósito, para que un test pueda ponerse en la plataforma que
+ * quiera probar (ver `open-in-lumbre.test.ts`).
+ */
 export const Platform = {
 	isDesktop: false,
 	isDesktopApp: false,
+	isMacOS: false,
 	isMobile: false,
 };
 

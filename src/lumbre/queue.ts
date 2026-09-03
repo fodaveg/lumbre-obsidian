@@ -3,9 +3,17 @@
  *
  * Existe porque un 200 de `/api/ingest` o de `/api/mutations` NO significa que
  * la tarea exista ya: el servidor ENCOLA (`inbound_tasks`, `inbound_mutations`)
- * y materializa al drenar. Así que cada operación se envía, se fuerza el flush
- * y se RELEE: solo cuando la relectura confirma la tarea se da por materializada
- * y se guarda lo leído.
+ * y materializa al drenar. Así que cada operación se envía y se RELEE: solo
+ * cuando la relectura la confirma se da por materializada.
+ *
+ * El drenaje explícito (`POST /api/sync/flush`, limitado a 60 llamadas por
+ * minuto) se gasta con cuentagotas: los tres endpoints de escritura ya llaman a
+ * `runHeadlessDrain` antes de responder, así que solo hace falta para las
+ * operaciones que quedaron aceptadas SIN confirmar de un flush anterior, y va
+ * UNO por flush para todas ellas.
+ *
+ * De lo releído no se guarda la tarea: la cola vive en `data.json`, que viaja
+ * por Obsidian Sync, y las materializadas se podan (7 días, 50 como mucho).
  *
  * No importa `obsidian`: persiste a través de `QueueStorage`, que implementa
  * `PluginStore`.
@@ -53,6 +61,14 @@ export interface LinkTarget {
 	excerpt: string | null;
 }
 
+/** Una op de un lote que Lumbre rechazó, con su posición dentro de `ops`. */
+export interface BatchFailedItem {
+	/** Posición dentro de `ops`, en base 0, tal y como la devuelve el informe. */
+	index: number;
+	/** Motivo del servidor. Es una validación suya, nunca texto de la nota. */
+	error: string | null;
+}
+
 interface OperationBase {
 	id: string;
 	/**
@@ -74,6 +90,17 @@ interface OperationBase {
 	 * releyendo, nunca se manda otra vez.
 	 */
 	sentAt: string | null;
+	/**
+	 * Cuándo la confirmó la relectura. Es lo ÚNICO que se guarda de lo leído: la
+	 * tarea entera viajaría por Obsidian Sync dentro de `data.json`, con su título
+	 * y sus notas dentro. Ausente en una cola escrita por una versión anterior.
+	 */
+	materializedAt?: string | null;
+	/**
+	 * A partir de cuándo se puede volver a intentar, o `null` si ya. Lo pone un
+	 * 429: reintentar antes solo gasta el cupo que el servidor acaba de negar.
+	 */
+	nextAttemptAt?: string | null;
 }
 
 export type CreateOperation = OperationBase & {
@@ -82,8 +109,6 @@ export type CreateOperation = OperationBase & {
 	clientTaskId: string;
 	draft: TaskDraft;
 	target: LinkTarget;
-	/** La tarea tal y como la devolvió la relectura que la confirmó. */
-	task: LumbreTask | null;
 };
 
 export type StatusOperation = OperationBase & {
@@ -91,7 +116,6 @@ export type StatusOperation = OperationBase & {
 	taskId: string;
 	done: boolean;
 	target: LinkTarget;
-	task: LumbreTask | null;
 };
 
 /**
@@ -127,8 +151,11 @@ export type BatchQueuedOperation = OperationBase & {
 	/** Ids de las tareas que el lote CREA. Son los que se releen. */
 	createdTaskIds: string[];
 	target: LinkTarget;
-	/** Las tareas creadas, tal y como las devolvió la relectura que las confirmó. */
-	tasks: LumbreTask[] | null;
+	/**
+	 * Las ops que Lumbre rechazó dentro de un lote que SÍ aceptó. Ausente en una
+	 * cola escrita por una versión anterior; vacío significa que entraron todas.
+	 */
+	failedItems?: BatchFailedItem[];
 };
 
 export type QueuedOperation =
@@ -178,6 +205,23 @@ export const WARN_AFTER_ATTEMPTS = 3;
 /** Espera antes de la SEGUNDA relectura, cuando la primera no encuentra la tarea. */
 export const REREAD_DELAY_MS = 1000;
 
+/**
+ * Espera tras un 429 cuando el servidor no dice cuánta (`Retry-After`). Lumbre
+ * limita `POST /api/sync/flush` a 60 llamadas por minuto, así que medio minuto
+ * es lo que hace falta para que la ventana se renueve.
+ */
+export const RATE_LIMIT_BACKOFF_MS = 30_000;
+
+/**
+ * Cuánto se conserva una operación ya materializada. La cola vive en
+ * `data.json`, que viaja por Obsidian Sync: sin poda crece sin techo con el
+ * historial de todo lo que se ha enviado nunca.
+ */
+export const MATERIALIZED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** Y cuántas se conservan como mucho, por recientes que sean. */
+export const MAX_MATERIALIZED = 50;
+
 /** Motivos que NO se reintentan: el servidor ya ha dicho que no. */
 const PERMANENT_REASONS: ReadonlySet<FailureReason> = new Set<FailureReason>([
 	'unauthorized',
@@ -189,6 +233,8 @@ export class OperationQueue {
 	private readonly now: () => Date;
 	private readonly log: Logger | null;
 	private inFlight: Promise<void> | null = null;
+	/** El flush de SEGUIMIENTO, el que recogerá lo encolado durante el que corre. */
+	private queuedFlush: Promise<void> | null = null;
 
 	constructor(private readonly options: OperationQueueOptions) {
 		this.log = options.logger ?? null;
@@ -212,7 +258,6 @@ export class OperationQueue {
 			clientTaskId: crypto.randomUUID(),
 			draft,
 			target,
-			task: null,
 		};
 		await this.append(operation);
 		this.logEnqueued(operation, { listId: draft.listId ?? null, subtasks: draft.subtasks?.length ?? 0 });
@@ -227,7 +272,6 @@ export class OperationQueue {
 			taskId,
 			done,
 			target,
-			task: null,
 		};
 		await this.append(operation);
 		this.logEnqueued(operation, { taskId, done });
@@ -268,7 +312,7 @@ export class OperationQueue {
 			ops,
 			createdTaskIds,
 			target,
-			tasks: null,
+			failedItems: [],
 		};
 		await this.append(operation);
 		this.logEnqueued(operation, { ops: ops.length, creates: createdTaskIds.length });
@@ -305,6 +349,8 @@ export class OperationQueue {
 		const from = operation.state;
 		operation.attempts = 0;
 		operation.error = null;
+		// Reintentar a mano es una orden del usuario: se salta la espera del 429.
+		operation.nextAttemptAt = null;
 		operation.state = operation.sentAt !== null ? 'sent' : 'pending_local';
 		operation.updatedAt = this.stamp();
 		await this.write(operations);
@@ -321,13 +367,47 @@ export class OperationQueue {
 	}
 
 	/**
-	 * Procesa la cola en orden, una a una. Un solo flush en vuelo: si ya hay uno
-	 * corriendo, esta llamada espera a ese.
+	 * Operaciones de este dispositivo que este flush intentaría mover: ni las
+	 * terminadas, ni las agotadas, ni las que están esperando tras un 429. Es lo
+	 * que mira el drenaje periódico para no llamar a `flush()` sin nada que hacer.
+	 */
+	actionable(): QueuedOperation[] {
+		const now = this.now();
+		return this.mine().filter((operation) => isActionable(operation, now));
+	}
+
+	/**
+	 * Procesa la cola en orden, una a una. Un solo flush en vuelo, y UNO de
+	 * seguimiento encadenado detrás: `runFlush` congela la lista de operaciones al
+	 * empezar, así que lo que se encole mientras tanto se quedaría sin enviar, sin
+	 * aviso y sin nadie que lo volviera a intentar. La ranura de seguimiento es
+	 * UNA: quien llegue mientras ya hay uno encadenado espera a ese mismo.
 	 */
 	async flush(): Promise<void> {
 		const running = this.inFlight;
-		if (running !== null) return running;
+		if (running === null) return this.start();
 
+		const queued = this.queuedFlush;
+		if (queued !== null) return queued;
+
+		const clear = (): void => {
+			this.queuedFlush = null;
+		};
+		const chained = running.then(
+			() => {
+				clear();
+				return this.flush();
+			},
+			() => {
+				clear();
+				return this.flush();
+			},
+		);
+		this.queuedFlush = chained;
+		return chained;
+	}
+
+	private async start(): Promise<void> {
 		const started = this.runFlush();
 		this.inFlight = started;
 		try {
@@ -347,13 +427,18 @@ export class OperationQueue {
 			this.log?.warn('Operaciones de otro dispositivo, se saltan', { count: foreign });
 		}
 
-		const actionable = mine.filter((operation) => isActionable(operation));
+		const actionable = mine.filter((operation) => isActionable(operation, this.now()));
 		this.log?.debug('Flush empezado', { actionable: actionable.length, queued: all.length });
+
+		// UN drenaje por flush como mucho, compartido por todas las operaciones que
+		// ya estaban aceptadas. `POST /api/sync/flush` está limitado a 60 llamadas
+		// por minuto: una por operación se come el cupo con una cola normalita.
+		const drain = onceDrain(() => this.options.client.flush());
 
 		let processed = 0;
 		let stopped: string | null = null;
 		for (const operation of actionable) {
-			const outcome = await this.process(operation);
+			const outcome = await this.process(operation, drain);
 			processed += 1;
 			// Sin token no ha llegado a haber petición: no se gasta un intento ni se
 			// marca nada, la cola se queda tal cual hasta que haya token.
@@ -374,19 +459,30 @@ export class OperationQueue {
 	}
 
 	/** Devuelve por qué se ha parado el flush, o `null` si se puede seguir. */
-	private async process(operation: QueuedOperation): Promise<'no_token' | 'rate_limited' | null> {
+	private async process(
+		operation: QueuedOperation,
+		drain: () => Promise<LumbreResult<void>>,
+	): Promise<'no_token' | 'rate_limited' | null> {
 		if (operation.sentAt === null) {
 			const sent = await this.send(operation);
 			if (!sent.ok) return this.recordFailure(operation, sent);
 			operation.sentAt = this.stamp();
 			operation.state = 'sent';
 			operation.error = null;
+			operation.nextAttemptAt = null;
 			await this.persist(operation);
 			this.logTransition(operation, 'pending_local', 'Lumbre aceptó el envío');
+			this.logBatchFailures(operation);
+			// Aquí NO se drena: `/api/ingest`, `/api/mutations` y `/api/batch` ya
+			// llaman a `runHeadlessDrain` antes de responder, así que lo recién
+			// aceptado ya está materializándose.
+		} else {
+			// Ya venía aceptada de un flush anterior: ahí sí puede quedar algo sin
+			// drenar. Es el único caso que gasta `POST /api/sync/flush`, y lo comparte
+			// con las demás operaciones de este mismo flush.
+			const flushed = await drain();
+			if (!flushed.ok) return this.recordFailure(operation, flushed);
 		}
-
-		const flushed = await this.options.client.flush();
-		if (!flushed.ok) return this.recordFailure(operation, flushed);
 
 		const confirmed = await this.confirm(operation);
 		if (confirmed !== 'missing' && confirmed !== 'materialized') {
@@ -396,15 +492,39 @@ export class OperationQueue {
 		if (confirmed === 'missing') {
 			// El servidor aceptó el envío pero la tarea todavía no aparece. Se queda
 			// en `sent` con un intento más: el siguiente flush la vuelve a comprobar
-			// SIN reenviar nada, porque el id ya está fijado.
+			// SIN reenviar nada, porque el id ya está fijado. Al agotar los intentos
+			// deja de reintentarse sola: si no, una tarea archivada en Lumbre (o
+			// borrada) se reintentaría para siempre.
+			const from = operation.state;
 			operation.attempts += 1;
-			operation.state = 'sent';
-			operation.error = 'Lumbre aceptó la operación pero todavía no aparece al releer.';
+			const exhausted = operation.attempts >= MAX_ATTEMPTS;
+			operation.state = exhausted ? 'recoverable_error' : 'sent';
+			operation.error = exhausted
+				? `Lumbre aceptó la operación pero no la confirma tras ${MAX_ATTEMPTS} relecturas.`
+				: 'Lumbre aceptó la operación pero todavía no aparece al releer.';
 			operation.updatedAt = this.stamp();
 			await this.persist(operation);
-			this.logTransition(operation, 'sent', 'Aceptada pero todavía no aparece al releer');
+			this.logTransition(
+				operation,
+				from,
+				operation.error,
+				{ unconfirmed: true },
+				exhausted ? 'error' : 'info',
+			);
 		}
 		return null;
+	}
+
+	/** Lo que Lumbre rechazó dentro de un lote que sí aceptó. */
+	private logBatchFailures(operation: QueuedOperation): void {
+		if (operation.kind !== 'batch') return;
+		const failed = operation.failedItems ?? [];
+		if (failed.length === 0) return;
+		this.log?.warn('Lumbre rechazó parte del lote', {
+			id: operation.id,
+			ops: operation.ops.length,
+			failed: describeFailedItems(failed),
+		});
 	}
 
 	private async send(operation: QueuedOperation): Promise<LumbreResult<void>> {
@@ -427,11 +547,14 @@ export class OperationQueue {
 			case 'batch': {
 				const sent = await this.options.client.batch(operation.ops);
 				if (!sent.ok) return sent;
-				// Éxito PARCIAL: `/api/batch` responde 200 aunque una op se rechace, y
-				// el informe es lo único que lo dice. Si alguna cayó, la operación NO
-				// se puede dar por enviada en silencio.
-				const failed = sent.value.filter((item) => !item.ok);
-				if (failed.length > 0) return { ok: false, reason: 'bad_request' };
+				// Éxito PARCIAL por diseño: `/api/batch` responde 200 aunque una op se
+				// rechace, y las VÁLIDAS ya están encoladas y drenadas. Por eso el lote
+				// queda ENVIADO aunque el informe traiga rojos: reenviarlo aplicaría
+				// otra vez lo que sí entró, y una `addSubtask` no es idempotente. Lo
+				// que falló se guarda dentro de la operación, con su índice.
+				operation.failedItems = sent.value
+					.filter((item) => !item.ok)
+					.map((item) => ({ index: item.index, error: item.error ?? null }));
 				return { ok: true, value: undefined };
 			}
 		}
@@ -456,7 +579,8 @@ export class OperationQueue {
 				const from = operation.state;
 				operation.state = 'materialized';
 				operation.error = null;
-				operation.updatedAt = this.stamp();
+				operation.materializedAt = this.stamp();
+				operation.updatedAt = operation.materializedAt;
 				await this.persist(operation);
 				this.logTransition(operation, from, 'Confirmada al releer', { reread: attempt + 1 });
 				this.options.onMaterialized?.(operation);
@@ -472,7 +596,8 @@ export class OperationQueue {
 	 * entrada del BRL por el JSON del día, porque no es una tarea y `getTask`
 	 * nunca la encontraría.
 	 *
-	 * Guarda lo leído dentro de la operación; quien llama solo marca el estado.
+	 * De lo leído NO se guarda nada: solo interesa si está o no. La tarea entera
+	 * (con su título y sus notas) acabaría en `data.json`, que viaja por Sync.
 	 */
 	private async reread(
 		operation: QueuedOperation,
@@ -485,15 +610,14 @@ export class OperationQueue {
 		}
 
 		if (operation.kind === 'batch') {
-			// Un lote sin altas no tiene nada que releer: sus mutaciones tocan tareas
-			// que ya existían, y el 200 con el informe en verde es cuanto se puede
-			// saber sin conocer qué esperaba cada `kind`.
-			if (operation.createdTaskIds.length === 0) return 'confirmed';
-			const read = await this.options.client.getTasksByIds(operation.createdTaskIds);
+			// Un lote sin altas (o con las altas rechazadas) no tiene nada que releer:
+			// sus mutaciones tocan tareas que ya existían, y el informe en verde es
+			// cuanto se puede saber sin conocer qué esperaba cada `kind`.
+			const ids = expectedTaskIds(operation);
+			if (ids.length === 0) return 'confirmed';
+			const read = await this.options.client.getTasksByIds(ids);
 			if (!read.ok) return read;
-			if (read.value.length < operation.createdTaskIds.length) return 'missing';
-			operation.tasks = read.value;
-			return 'confirmed';
+			return read.value.length < ids.length ? 'missing' : 'confirmed';
 		}
 
 		const id = operation.kind === 'create' ? operation.clientTaskId : operation.taskId;
@@ -502,14 +626,18 @@ export class OperationQueue {
 
 		const task = read.value;
 		if (task === null || !matchesOperation(operation, task)) return 'missing';
-		operation.task = task;
 		return 'confirmed';
 	}
 
 	/**
 	 * Marca el fallo y dice si el flush debe pararse. 401/403/400 dejan la
-	 * operación `rejected` (el servidor no va a cambiar de idea solo); red, 5xx y
-	 * 429 la dejan `recoverable_error` con un intento más.
+	 * operación `rejected` (el servidor no va a cambiar de idea solo); red y 5xx
+	 * la dejan `recoverable_error` con un intento más.
+	 *
+	 * El 429 es aparte: no ha fallado la operación, ha fallado el MOMENTO. No
+	 * gasta intento (si no, cinco 429 seguidos la dejarían muerta sin haberla
+	 * llegado a intentar de verdad) y aplaza el siguiente intento hasta que el
+	 * servidor diga, o medio minuto si no lo dice.
 	 */
 	private async recordFailure(
 		operation: QueuedOperation,
@@ -525,6 +653,10 @@ export class OperationQueue {
 		operation.updatedAt = this.stamp();
 		if (PERMANENT_REASONS.has(failure.reason)) {
 			operation.state = 'rejected';
+		} else if (failure.reason === 'rate_limited') {
+			operation.state = 'recoverable_error';
+			const wait = (failure.retryAfterSeconds ?? 0) * 1000 || RATE_LIMIT_BACKOFF_MS;
+			operation.nextAttemptAt = new Date(this.now().getTime() + wait).toISOString();
 		} else {
 			operation.state = 'recoverable_error';
 			operation.attempts += 1;
@@ -604,8 +736,15 @@ export class OperationQueue {
 		);
 	}
 
+	/**
+	 * Escribe la cola YA PODADA. Es el único camino de escritura, así que la poda
+	 * no depende de que nadie se acuerde de llamarla.
+	 */
 	private async write(operations: QueuedOperation[]): Promise<void> {
-		await this.options.storage.writeQueue(operations);
+		const kept = pruneQueue(operations, this.now());
+		const dropped = operations.length - kept.length;
+		if (dropped > 0) this.log?.debug('Materializadas podadas de la cola', { dropped });
+		await this.options.storage.writeQueue(kept);
 	}
 
 	private async append(operation: QueuedOperation): Promise<void> {
@@ -622,10 +761,76 @@ export class OperationQueue {
 }
 
 /** `true` si la operación todavía tiene algo que hacer en este flush. */
-function isActionable(operation: QueuedOperation): boolean {
+function isActionable(operation: QueuedOperation, now: Date): boolean {
 	if (operation.state === 'materialized' || operation.state === 'rejected') return false;
 	if (operation.state === 'recoverable_error' && operation.attempts >= MAX_ATTEMPTS) return false;
+	const wait = operation.nextAttemptAt;
+	if (typeof wait === 'string' && Date.parse(wait) > now.getTime()) return false;
 	return true;
+}
+
+/**
+ * Poda las operaciones ya terminadas: fuera las materializadas de más de
+ * `MATERIALIZED_TTL_MS`, y de las que quedan solo las `MAX_MATERIALIZED` más
+ * recientes. Lo que no está materializado no se toca NUNCA: ahí hay escrituras
+ * que todavía no han llegado a Lumbre.
+ */
+export function pruneQueue(operations: readonly QueuedOperation[], now: Date): QueuedOperation[] {
+	const materialized = operations.filter((operation) => operation.state === 'materialized');
+	if (materialized.length === 0) return [...operations];
+
+	const cutoff = now.getTime() - MATERIALIZED_TTL_MS;
+	const keep = new Set(
+		materialized
+			.filter((operation) => timeOf(operation.updatedAt) >= cutoff)
+			.sort((a, b) => timeOf(b.updatedAt) - timeOf(a.updatedAt))
+			.slice(0, MAX_MATERIALIZED)
+			.map((operation) => operation.id),
+	);
+	return operations.filter(
+		(operation) => operation.state !== 'materialized' || keep.has(operation.id),
+	);
+}
+
+/** Epoch de una marca ISO, o 0 si no se puede leer (una cola de otra versión). */
+function timeOf(stamp: string): number {
+	const parsed = Date.parse(stamp);
+	return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+/**
+ * UN drenaje por flush: la primera llamada pide `POST /api/sync/flush` y las
+ * demás esperan a esa misma respuesta.
+ */
+function onceDrain(run: () => Promise<LumbreResult<void>>): () => Promise<LumbreResult<void>> {
+	let pending: Promise<LumbreResult<void>> | null = null;
+	return () => (pending ??= run());
+}
+
+/** Las tareas del lote que HAY que releer: las que el servidor no rechazó. */
+function expectedTaskIds(operation: BatchQueuedOperation): string[] {
+	const failed = operation.failedItems ?? [];
+	if (failed.length === 0) return operation.createdTaskIds;
+
+	const rejected = new Set<string>();
+	for (const item of failed) {
+		const op = operation.ops[item.index];
+		if (op !== undefined && op.type === 'create') rejected.add(op.clientTaskId);
+	}
+	return operation.createdTaskIds.filter((id) => !rejected.has(id));
+}
+
+/**
+ * Qué ops del lote rechazó Lumbre, en una línea para el usuario. La posición va
+ * en base 1 (la primera acción es la 1) y el motivo es el del servidor: una
+ * validación suya, nunca texto de la nota.
+ */
+export function describeFailedItems(items: readonly BatchFailedItem[]): string {
+	return items
+		.map((item) =>
+			item.error === null ? `acción ${item.index + 1}` : `acción ${item.index + 1} (${item.error})`,
+		)
+		.join('; ');
 }
 
 /** `true` si la tarea leída ya refleja lo que pedía la operación. */

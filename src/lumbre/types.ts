@@ -120,8 +120,9 @@ export interface TaskDraft {
 export const DEFAULT_WEB_ORIGIN = 'https://app.lumbre.pro';
 
 /**
- * Las dos formas de abrir una tarea desde una nota: el esquema nativo del
- * escritorio y la URL de la web. Comprobadas en el repo de Lumbre
+ * Las dos formas de abrir una tarea desde una nota: el esquema nativo (que solo
+ * atiende la app de macOS, ver `openTaskInLumbre`) y la URL de la web.
+ * Comprobadas en el repo de Lumbre
  * (`src/lib/desktop-deeplink.ts`, `targetForAction`, y `src/lib/entry-params.ts`,
  * que lee `?tarea=`).
  */

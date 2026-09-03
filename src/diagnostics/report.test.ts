@@ -42,7 +42,6 @@ function operation(overrides: Partial<QueuedOperation> = {}): QueuedOperation {
 		taskId: 'task-1',
 		done: true,
 		target: { notePath: 'Cocina.md', label: 'Comprar pan', excerpt: null },
-		task: null,
 		...overrides,
 	} as QueuedOperation;
 }

@@ -23,6 +23,8 @@ import type { ListCache } from '../lumbre/list-cache';
 import type { OperationQueue, QueuedOperation } from '../lumbre/queue';
 import { taskDeepLinks, type LumbreTask } from '../lumbre/types';
 import { linkChipState, pendingOperationFor, type ChipState } from './link-chip-state';
+import { openTaskInLumbre } from './open-in-lumbre';
+import { operationActions } from './operation-actions';
 import { filterTasks } from './search-filter';
 import { groupBySection } from './task-sections';
 
@@ -279,14 +281,25 @@ export class NoteTasksView extends ItemView {
 		});
 		attach.disabled = link.syncState !== 'materialized';
 
-		if (operation !== undefined && operation.state === 'recoverable_error') {
-			this.button(row.actions, {
-				text: 'Reintentar',
-				icon: 'rotate-ccw',
-				onClick: () => {
-					void this.retry(operation.id);
+		if (operation !== undefined) {
+			const actions = operationActions(operation, {
+				retry: (id: string) => {
+					void this.retry(id);
+				},
+				discard: (id: string) => {
+					void this.discard(id);
 				},
 			});
+			for (const action of actions) {
+				this.button(row.actions, {
+					text: action.text,
+					icon: action.icon,
+					...(action.cls === undefined ? {} : { cls: action.cls }),
+					onClick: () => {
+						action.run();
+					},
+				});
+			}
 		}
 
 		if (this.confirmingUnlink === link.id) {
@@ -527,6 +540,17 @@ export class NoteTasksView extends ItemView {
 		this.render();
 	}
 
+	/**
+	 * Saca de la cola una operación que ya no se va a mover sola. No deshace nada
+	 * en Lumbre: si llegó a enviarse, allí sigue; si no, no se enviará nunca.
+	 */
+	private async discard(operationId: string): Promise<void> {
+		this.host.logger.info('Acción del usuario', { action: 'descartar', id: operationId });
+		await this.host.queue.discard(operationId);
+		new Notice('Operación descartada; ya no se volverá a enviar.');
+		this.render();
+	}
+
 	private async unlink(linkId: string): Promise<void> {
 		this.host.logger.info('Acción del usuario', { action: 'desvincular', id: linkId });
 		await this.host.links.unlink(linkId);
@@ -587,10 +611,9 @@ export class NoteTasksView extends ItemView {
 
 	private openInLumbre(task: LumbreTask): void {
 		this.host.logger.info('Acción del usuario', { action: 'abrir en Lumbre', taskId: task.id });
-		const links = taskDeepLinks(task, this.host.webOrigin());
-		// En escritorio el esquema nativo abre la app de Lumbre; en móvil no hay app
-		// que lo atienda, así que va la web.
-		window.open(Platform.isDesktopApp ? links.native : links.web);
+		// Quién abre qué lo decide `openTaskInLumbre`: la app nativa solo existe en
+		// macOS y en el resto hay que ir a la web (ver ese módulo).
+		openTaskInLumbre(taskDeepLinks(task, this.host.webOrigin()));
 	}
 
 	/** Carga las tareas de la lista de la nota, si la nota tiene `lumbre-list`. */

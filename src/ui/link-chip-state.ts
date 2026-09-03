@@ -33,6 +33,10 @@ export interface ChipState {
  * enviar, así que el vínculo ya puede apuntar a él. Un `batch` afecta a las
  * tareas que crea, cuyos ids también fija el plugin.
  *
+ * Cuando hay VARIAS sobre la misma tarea gana la más reciente por `createdAt`:
+ * con la primera, una rechazada de hace días dejaría la tarea marcada
+ * «Rechazada» para siempre, tapando la que se acaba de encolar encima.
+ *
  * Una operación de BRL no afecta a ninguna tarea: una entrada del registro no
  * lo es.
  */
@@ -40,7 +44,12 @@ export function pendingOperationFor(
 	operations: readonly QueuedOperation[],
 	taskId: string,
 ): QueuedOperation | undefined {
-	return operations.find((operation) => affectsTask(operation, taskId));
+	let latest: QueuedOperation | undefined;
+	for (const operation of operations) {
+		if (!affectsTask(operation, taskId)) continue;
+		if (latest === undefined || operation.createdAt >= latest.createdAt) latest = operation;
+	}
+	return latest;
 }
 
 function affectsTask(operation: QueuedOperation, taskId: string): boolean {

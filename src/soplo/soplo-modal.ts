@@ -15,8 +15,11 @@
  *   texto se pregunta por el consentimiento: si Lumbre dice que falta, el texto
  *   de la nota NO sale del dispositivo.
  * - Error: se pinta DENTRO del modal, no en un Notice que se va solo. Si el
- *   fallo es la falta de consentimiento, con el enlace a los ajustes de la web.
- * - Enviando: los botones se deshabilitan mientras se encola.
+ *   fallo es la falta de consentimiento, con el enlace a los ajustes de la web;
+ *   si fue al APLICAR, «Reintentar» vuelve a aplicar el plan ya aprobado y no
+ *   le manda otra vez el texto de la nota a Soplo.
+ * - Enviando: los botones se deshabilitan mientras se encola, y vuelven si algo
+ *   falla (ver `runApply`).
  *
  * El modal no habla con la red: recibe una función que pregunta y otra que
  * aplica, las dos inyectadas por `main.ts`.
@@ -25,6 +28,7 @@
 import { Modal, setIcon, type App } from 'obsidian';
 
 import type { AgentConsentState, AgentPlan, LumbreResult } from '../lumbre/client';
+import { runApply } from './apply-flow';
 
 /** Dónde se retira o se da el consentimiento de Soplo, en la web de Lumbre. */
 export const SOPLO_SETTINGS_PATH = '/settings';
@@ -58,6 +62,12 @@ export class SoploModal extends Modal {
 	private error: string | null = null;
 	/** `true` cuando el fallo es que falta el consentimiento (un 403 del endpoint). */
 	private needsConsent = false;
+	/**
+	 * `true` cuando el fallo fue al APLICAR: entonces «Reintentar» vuelve a
+	 * aplicar el plan que ya está aprobado, en vez de mandarle otra vez a Soplo el
+	 * texto de la nota.
+	 */
+	private retryApplies = false;
 	private closed = false;
 
 	constructor(
@@ -96,6 +106,7 @@ export class SoploModal extends Modal {
 		this.state = 'loading';
 		this.error = null;
 		this.needsConsent = false;
+		this.retryApplies = false;
 		this.render();
 
 		// Con el consentimiento sabido que FALTA, el texto de la nota no se manda:
@@ -190,7 +201,8 @@ export class SoploModal extends Modal {
 				text: 'Reintentar',
 				icon: 'rotate-ccw',
 				onClick: () => {
-					void this.ask();
+					if (this.retryApplies) void this.apply();
+					else void this.ask();
 				},
 			});
 		}
@@ -284,9 +296,20 @@ export class SoploModal extends Modal {
 		this.state = 'applying';
 		this.render();
 
-		await this.options.apply(plan, [...this.checked]);
+		// Aplicar puede lanzar (la cola escribe en `data.json`). Sin recogerlo, el
+		// modal se quedaba en «Aplicando…» con los botones muertos.
+		const outcome = await runApply(() => this.options.apply(plan, [...this.checked]));
 		if (this.closed) return;
-		this.close();
+		if (outcome.state === 'applied') {
+			this.close();
+			return;
+		}
+
+		this.state = 'error';
+		this.error = outcome.error;
+		this.needsConsent = false;
+		this.retryApplies = outcome.retry === 'apply';
+		this.render();
 	}
 
 	private button(

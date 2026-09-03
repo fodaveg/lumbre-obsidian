@@ -91,11 +91,10 @@ function harness(overrides: Partial<LumbreApiDeps> = {}): {
 			get: async (): Promise<LumbreList[]> => [list('lista-1', 'Casa')],
 			nameFor: (raw: string) => (raw === 'lista-1' || raw === 'Casa' ? 'Casa' : null),
 		},
-		openUrl: (url: string) => {
-			opened.push(url);
+		openTask: (links: { native: string; web: string }) => {
+			opened.push(links.web);
 		},
 		webOrigin: () => 'https://app.lumbre.pro',
-		isDesktopApp: () => true,
 		triggerWorkspace: (event: string) => {
 			triggered.push(event);
 		},
@@ -273,14 +272,17 @@ describe('LumbreApi', () => {
 		expect(api.linksForNote('Otra.md')).toHaveLength(0);
 	});
 
-	it('openInLumbre abre el esquema nativo en escritorio y la web en móvil', () => {
-		const desktop = harness();
-		desktop.api.openInLumbre('task-1');
-		expect(desktop.opened).toEqual(['lumbre://tarea/task-1']);
+	it('openInLumbre compone los dos enlaces y deja abrir al plugin', () => {
+		// Elegir entre el nativo y la web es de `openTaskInLumbre`, que sabe en qué
+		// sistema está; aquí solo se comprueba que llegan bien montados.
+		const links: { native: string; web: string }[] = [];
+		const { api } = harness({ openTask: (link) => links.push(link) });
 
-		const mobile = harness({ isDesktopApp: () => false });
-		mobile.api.openInLumbre('task-1');
-		expect(mobile.opened).toEqual(['https://app.lumbre.pro/?tarea=task-1']);
+		api.openInLumbre('task-1');
+
+		expect(links).toEqual([
+			{ native: 'lumbre://tarea/task-1', web: 'https://app.lumbre.pro/?tarea=task-1' },
+		]);
 	});
 });
 
