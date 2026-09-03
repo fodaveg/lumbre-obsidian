@@ -15,7 +15,11 @@ guiones largos como inciso: coma, punto o paréntesis.
 
 - **Lumbre manda sobre la tarea, el vault manda sobre la nota.** El plugin PROYECTA tareas de Lumbre
   dentro de Obsidian, nunca las copia al Markdown. Si una tarea acaba escrita en una nota, hay dos
-  fuentes de verdad y la que gana es la equivocada.
+  fuentes de verdad y la que gana es la equivocada. Única excepción: el comando que pega el BRL de
+  hoy, que es una FOTO FIJA pedida a mano y no se vuelve a tocar.
+- **La IA propone y el usuario confirma.** El plan de Soplo se enseña con una casilla por acción y
+  no se aplica nada sin el clic. Y solo se puede aplicar lo que se ha ENSEÑADO: una acción sin su
+  línea de preview se descarta.
 - **El token nunca entra en Markdown, frontmatter, logs ni Notices.** Solo se lee para construir la
   cabecera `Authorization`. Dónde se guarda es una decisión abierta (ver `src/token-store.ts`).
 
@@ -32,6 +36,13 @@ guiones largos como inciso: coma, punto o paréntesis.
 - `src/blocks/query-cache.ts`: UNA entrada por consulta, TTL de 30 s y peticiones deduplicadas. Los
   bloques se suscriben; la cola la invalida al materializar.
 - `src/blocks/task-block.ts`: el `MarkdownRenderChild` que pinta el bloque. No escribe en la nota.
+- `src/blocks/brl-cache.ts` y `src/blocks/brl-block.ts`: la gemela de la caché y del bloque para el
+  registro del día (```` ```lumbre-brl ````). Misma constante de TTL, clave por DÍA.
+- `src/brl/brl-ops.ts`: el texto de una entrada con su marcador (`-` nota, `=` pensamiento), la
+  relectura por id y el parseo del bloque. Sin red.
+- `src/soplo/plan-to-ops.ts`: el plan de Soplo a ops de `POST /api/batch`, solo lo MARCADO. Las
+  mutaciones viajan verbatim (`mutateRaw`): el payload lo escribió Lumbre y es lo que se aprobó.
+- `src/attachments/upload.ts`: el tope de 25 MB, las cabeceras y el cuerpo de la subida. Sin red.
 - `src/api/lumbre-api.ts`: la API PÚBLICA (`app.plugins.plugins.lumbre.api`), documentada en
   `docs/API.md`. Superficie pequeña y estable; todo lo que muta pasa por la cola.
 - `src/links/link-store.ts`: mapa nota ↔ tarea. La nota se identifica por RUTA, nunca por un id

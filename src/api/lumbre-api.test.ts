@@ -28,7 +28,7 @@ function task(id: string, content = 'Comprar pan'): LumbreTask {
 }
 
 function list(id: string, name: string): LumbreList {
-	return { id, name, icon: null, color: null, parentListId: null, taskCount: 0 };
+	return { id, name, icon: null, color: null, parentListId: null, pinned: false, taskCount: 0 };
 }
 
 /** Lo que la cola apunta de cada llamada, para poder afirmar sobre ello. */

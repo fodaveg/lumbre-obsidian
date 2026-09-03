@@ -28,13 +28,11 @@ export interface LumbreRef {
 /**
  * Una tarea de Lumbre, normalizada.
  *
- * Tres campos NO vienen hoy de `GET /api/tasks` (`serializeTask` no los
- * serializa, comprobado el 3 sep 2026) y se quedan en su valor por defecto:
- * `someday` (`false`), `time` (`null`) y `rolloverCount` (`0`). Se declaran
- * igualmente porque el plugin los necesita para pintar una tarea y porque
- * `taskFromApi` ya los lee si el servidor empieza a mandarlos: el día que los
- * exponga, esto funciona sin tocar nada. NUNCA se deben leer como "la tarea no
- * es de algún día" o "no tiene hora": significan "el servidor no lo dice".
+ * `someday`, `time` y `rolloverCount` los SIRVE Lumbre desde su SHA `861cfb4d`
+ * (`serializeTask` los pasa tal cual). Los valores por defecto que pone
+ * `taskFromApi` (`false`, `null` y `0`) siguen ahí para cubrir un servidor
+ * anterior a ese SHA: contra uno viejo significan "el servidor no lo dice", no
+ * "la tarea no es de algún día" ni "no tiene hora".
  */
 export interface LumbreTask {
 	id: string;
@@ -43,10 +41,10 @@ export interface LumbreTask {
 	notes: string | null;
 	/** Día programado `YYYY-MM-DD`, o `null`. */
 	date: string | null;
-	/** Ver el JSDoc de la interfaz: hoy la API no lo manda. */
+	/** Aparcada en "Algún día". Lo sirve Lumbre; ver el JSDoc de la interfaz. */
 	someday: boolean;
 	deadline: string | null;
-	/** Hora `HH:MM` dentro de `date`. Ver el JSDoc de la interfaz. */
+	/** Hora `HH:MM` dentro de `date`. Lo sirve Lumbre; ver el JSDoc de la interfaz. */
 	time: string | null;
 	priority: LumbrePriority;
 	done: boolean;
@@ -59,8 +57,14 @@ export interface LumbreTask {
 	archivedAt: string | null;
 	list: LumbreRef | null;
 	section: LumbreRef | null;
-	/** Ver el JSDoc de la interfaz: hoy la API no lo manda. */
+	/** Veces que ha rodado sin completarse. Lo sirve Lumbre; ver el JSDoc de la interfaz. */
 	rolloverCount: number;
+	/**
+	 * Cuántos adjuntos tiene la tarea. AUSENTE si la respuesta no traía el array
+	 * `attachments`: eso es "el servidor no lo dice", no "no tiene ninguno", y por
+	 * eso el panel solo pinta el número cuando el campo está.
+	 */
+	attachmentCount?: number;
 	/** Solo viene en el lookup por `id` y solo para tareas de primer nivel. */
 	subtasks?: LumbreSubtask[];
 	/** Id de la tarea padre si esta ES una subtarea; `null` si es de primer nivel. */
@@ -70,10 +74,10 @@ export interface LumbreTask {
 /**
  * Una lista de "Algún día".
  *
- * `GET /api/tasks?includeLists=1` manda hoy `{ id, name, taskCount }` y nada
- * más (comprobado el 3 sep 2026), así que `icon`, `color` y `parentListId`
- * salen `null` mientras el endpoint no los exponga. Mismo criterio que los
- * campos ausentes de `LumbreTask`: `null` es "el servidor no lo dice".
+ * `GET /api/tasks?includeLists=1` sirve `icon`, `color`, `parentListId` y
+ * `pinned` desde el SHA `861cfb4d` de Lumbre. Los valores por defecto (`null`
+ * los tres primeros, `false` el cuarto) cubren un servidor anterior a ese SHA:
+ * ahí `null` es "el servidor no lo dice", no "la lista no tiene icono".
  */
 export interface LumbreList {
 	id: string;
@@ -81,6 +85,8 @@ export interface LumbreList {
 	icon: string | null;
 	color: string | null;
 	parentListId: string | null;
+	/** Lista anclada arriba. `false` si el servidor no manda el campo. */
+	pinned: boolean;
 	/** Tareas de primer nivel vivas en la lista. `0` es un valor legítimo. */
 	taskCount: number;
 }
@@ -186,6 +192,7 @@ export function taskFromApi(raw: unknown): LumbreTask | null {
 	if (id === null || id.length === 0) return null;
 
 	const subtasks = subtasksFrom(row['subtasks']);
+	const attachments = row['attachments'];
 	return {
 		id,
 		content: asString(row['content']) ?? '',
@@ -201,6 +208,7 @@ export function taskFromApi(raw: unknown): LumbreTask | null {
 		list: refFrom(row['somedayListId'], row['list']),
 		section: refFrom(row['sectionId'], row['section']),
 		rolloverCount: typeof row['rolloverCount'] === 'number' ? row['rolloverCount'] : 0,
+		...(Array.isArray(attachments) ? { attachmentCount: attachments.length } : {}),
 		...(subtasks !== undefined ? { subtasks } : {}),
 		parentId: asString(row['parentId']),
 	};
@@ -228,6 +236,7 @@ export function listFromApi(raw: unknown): LumbreList | null {
 		icon: asString(row['icon']),
 		color: asString(row['color']),
 		parentListId: asString(row['parentListId']) ?? asString(row['parentId']),
+		pinned: row['pinned'] === true,
 		taskCount: typeof row['taskCount'] === 'number' ? row['taskCount'] : 0,
 	};
 }

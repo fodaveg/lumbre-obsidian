@@ -412,3 +412,203 @@
 .lumbre-panel--mobile .lumbre-search__input {
 	min-height: 44px;
 }
+
+/* ── Bloque ```lumbre-brl``` dentro de una nota ───────────────────────────── */
+
+/*
+ * Mismo criterio que el bloque de tareas: se apoya en el contenedor y no en la
+ * ventana, así cabe igual en el móvil y en un leaf estrecho.
+ */
+.lumbre-brl {
+	container-type: inline-size;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+	margin: var(--size-4-2) 0;
+	padding: var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+}
+
+.lumbre-brl__header {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--size-4-2);
+	font-size: var(--font-ui-small);
+}
+
+.lumbre-brl__title {
+	flex: 1 1 auto;
+	min-width: 0;
+	color: var(--text-normal);
+	font-weight: var(--font-semibold);
+	overflow-wrap: anywhere;
+}
+
+/* El Markdown del registro lo pinta el motor de Obsidian: aquí solo se le quita
+   el margen de arriba, para que no abra un hueco dentro del bloque. */
+.lumbre-brl__body > :first-child {
+	margin-top: 0;
+}
+
+.lumbre-brl__body > :last-child {
+	margin-bottom: 0;
+}
+
+.lumbre-brl__footer {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.lumbre-brl__stale {
+	color: var(--text-muted);
+}
+
+.lumbre-brl__error {
+	color: var(--text-error);
+	font-size: var(--font-ui-small);
+	overflow-wrap: anywhere;
+}
+
+@container (max-width: 340px) {
+	.lumbre-brl__header {
+		flex-direction: column;
+		align-items: stretch;
+	}
+}
+
+.lumbre-brl--mobile .lumbre-button {
+	min-height: 44px;
+	padding: var(--size-4-2) var(--size-4-3);
+	font-size: var(--font-ui-small);
+}
+
+/* ── Modal de anotar en el BRL ────────────────────────────────────────────── */
+
+.lumbre-brl-modal {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-3);
+}
+
+.lumbre-brl-modal__text {
+	width: 100%;
+	min-height: 6em;
+	resize: vertical;
+	font-family: inherit;
+}
+
+.lumbre-brl-modal__actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+}
+
+.lumbre-brl-modal__hint {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+/* ── Modal de Soplo ───────────────────────────────────────────────────────── */
+
+.lumbre-soplo__content {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-3);
+	font-size: var(--font-ui-small);
+}
+
+.lumbre-soplo__source {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-1);
+	padding: var(--size-4-2);
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+}
+
+.lumbre-soplo__label {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+
+/*
+ * El texto original se enseña ENTERO y envuelto: es lo que se le manda a Soplo,
+ * y esconder la mitad sería pedir permiso sobre algo que no se ve. `pre-wrap`
+ * conserva los saltos de línea del párrafo; el tope de altura evita que una
+ * parrafada de 4000 caracteres empuje los botones fuera de la pantalla.
+ */
+.lumbre-soplo__text {
+	max-height: 8em;
+	overflow-y: auto;
+	color: var(--text-normal);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.lumbre-soplo__warning {
+	color: var(--text-warning, var(--text-muted));
+	font-size: var(--font-ui-smaller);
+}
+
+.lumbre-soplo__summary {
+	color: var(--text-muted);
+}
+
+.lumbre-soplo__list {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-1);
+	max-height: 40vh;
+	overflow-y: auto;
+}
+
+.lumbre-soplo__item {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--size-4-2);
+	padding: var(--size-4-2);
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+}
+
+.lumbre-soplo__check {
+	flex: 0 0 auto;
+	margin-top: 0.15em;
+}
+
+.lumbre-soplo__item-text {
+	flex: 1 1 auto;
+	min-width: 0;
+	color: var(--text-normal);
+	overflow-wrap: anywhere;
+}
+
+.lumbre-soplo__actions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: var(--size-4-2);
+}
+
+/* En móvil el modal es casi la pantalla entera: los controles crecen al mínimo
+   táctil y los botones ocupan su línea. */
+.is-mobile .lumbre-soplo .lumbre-button,
+.is-mobile .lumbre-brl-modal .lumbre-button {
+	min-height: 44px;
+	flex: 1 1 10em;
+	justify-content: center;
+	padding: var(--size-4-2) var(--size-4-3);
+}
+
+.is-mobile .lumbre-soplo__check {
+	width: 22px;
+	height: 22px;
+}

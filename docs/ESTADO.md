@@ -37,6 +37,50 @@
     `docs/API.md`, con `version`, `isConnected`, `listTasks`, `getTask`, `listLists`, `createTask`,
     `completeTask`, `reopenTask`, `linksForNote`, `openInLumbre` y `on(...)`. Todo lo que muta pasa
     por la cola; además dispara `lumbre:tasks-changed` en el workspace.
+- **Qué hay (lote D, el BRL, Soplo y los adjuntos)**:
+  - Comando **Anotar en el BRL**: modal mínimo (un campo de texto prefijado con la selección y dos
+    botones, «Nota» y «Pensamiento»). Encola un `createBrlEntry` por la cola durable, con su
+    relectura propia (`GET /api/brl/<fecha>?format=json`, buscando el id que fijó el plugin), y
+    avisa con un Notice al encolar.
+  - Bloque de código ```` ```lumbre-brl ````: cuerpo opcional `date: today|YYYY-MM-DD`, el Markdown
+    del registro pintado con `MarkdownRenderer.render`, pie con «Datos de HH:MM» y botón
+    «Actualizar». Caché propia con el mismo TTL de 30 s (`BrlCache`), clave por día.
+  - Comando **Insertar el BRL de hoy como texto**: pega el Markdown en el cursor. Foto fija.
+  - Comando **Soplo con la selección** (paleta y menú contextual): manda la selección o el párrafo
+    del cursor a `POST /api/agent`, que corre siempre en modo previsualización, y abre un modal con
+    el texto original arriba y una casilla por acción del plan, todas marcadas. «Aplicar» manda solo
+    lo marcado por `POST /api/batch` a través de la cola y vincula a la nota las tareas creadas.
+  - Acción **Adjuntar fichero…** por tarea en el panel: `SuggestModal` con los ficheros no-Markdown
+    del vault, lectura con `app.vault.readBinary` y subida directa por `POST /api/attachments`. El
+    panel enseña el número de adjuntos cuando la API lo devuelve en la tarea.
+  - Módulos puros con tests: `src/brl/brl-ops.ts`, `src/soplo/plan-to-ops.ts`,
+    `src/attachments/upload.ts`. El cliente gana `brl`, `brlJson`, `agent` y `uploadAttachment`.
+  - Deuda de tipos cerrada: `LumbreList.pinned` y `LumbreTask.attachmentCount`, con los JSDoc de
+    `someday`/`time`/`rolloverCount` e `icon`/`color`/`parentListId` puestos al día (Lumbre los
+    sirve desde su SHA `861cfb4d`; los valores por defecto cubren un servidor anterior).
+- **Decisiones del lote D**:
+  - Las mutaciones del plan de Soplo viajan **verbatim** (`BatchOperation` de tipo `mutateRaw`): el
+    `kind` y el `payload` los escribió Lumbre y son lo que describía la línea que el usuario aprobó.
+    Traducirlos a la `MutationOp` del plugin recortaría los campos que el plugin no modela, o sea
+    aplicaría algo distinto de lo aprobado.
+  - El plan y su preview se emparejan **por índice**, que es como los construye el servidor
+    (`buildPreview` hace un `map` sobre el plan). Una acción sin su línea de preview se descarta:
+    no se aplica lo que no se ha visto.
+  - Las acciones de BRL y de hábitos del plan no se aplican: `POST /api/batch` solo entiende de
+    tareas. Se cuentan y se dicen en el Notice, en vez de tragárselas.
+  - Los adjuntos NO van por la cola. La cola persiste en `data.json`, que viaja por Obsidian Sync, y
+    meter ahí los bytes de un fichero de 25 MB hincharía el fichero de datos del plugin.
+  - `POST /api/attachments` va con `Content-Type: application/octet-stream` SIEMPRE y el mime real
+    en `x-lumbre-content-type`: SvelteKit rechaza con 403, antes del handler, un POST cuyo
+    `Content-Type` sea uno de los cuatro que trata como formulario, y `text/plain` es uno de ellos.
+  - La falta de consentimiento de Soplo se detecta por el **403 de `POST /api/agent`**, no por
+    `GET /api/agent/consent`: ese endpoint es solo por cookie de sesión y responde 401 a un token
+    Bearer, así que un plugin no puede consultarlo.
+  - `BrlCache` va aparte de `QueryCache` y comparte con ella la constante del TTL: lo que guardan es
+    distinto (Markdown de un día contra `LumbreTask[]` de una consulta).
+  - «Insertar el BRL de hoy» NO sirve una lectura vieja si la relectura falla, a diferencia del
+    bloque: eso escribe en la nota, y un texto de hace media hora pegado en el fichero ya no se
+    distingue del de ahora.
 - **Qué falta**: la decisión de dónde vive el token; las tareas están en la lista `lumbre-obsidian`
   de Lumbre, no aquí.
 - **Decisiones del lote B**: las listas se cachean en memoria cinco minutos (`ListCache`), no en

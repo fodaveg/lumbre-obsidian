@@ -5,7 +5,7 @@ import { ListCache } from './list-cache';
 import type { LumbreList } from './types';
 
 function list(id: string, name: string): LumbreList {
-	return { id, name, icon: null, color: null, parentListId: null, taskCount: 0 };
+	return { id, name, icon: null, color: null, parentListId: null, pinned: false, taskCount: 0 };
 }
 
 describe('ListCache', () => {

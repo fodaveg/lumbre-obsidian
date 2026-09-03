@@ -34,7 +34,9 @@ export type FailureReason =
 	| 'bad_request'
 	| 'rate_limited'
 	| 'network'
-	| 'server';
+	| 'server'
+	/** El cuerpo pasa del tope del endpoint. Hoy solo lo produce `uploadAttachment`. */
+	| 'too_large';
 
 export interface LumbreFailure {
 	ok: false;
@@ -53,8 +55,11 @@ export interface LumbreRequestInit {
 	url: string;
 	method: string;
 	headers: Record<string, string>;
-	/** Cuerpo ya serializado a JSON. Ausente en los GET. */
-	body?: string;
+	/**
+	 * Cuerpo ya serializado: JSON en texto, o los bytes crudos de un adjunto.
+	 * Ausente en los GET.
+	 */
+	body?: string | ArrayBuffer;
 	/** Con `false`, un status de error vuelve como respuesta en vez de como excepción. */
 	throw: false;
 }
@@ -68,6 +73,12 @@ export interface LumbreResponse {
 	 * lee dentro de un try (ver `readJson`).
 	 */
 	json?: unknown;
+	/**
+	 * Cuerpo en texto. En `requestUrl` también es un getter, así que se lee
+	 * dentro de un try igual que `json`. Lo usa el BRL, que responde
+	 * `text/markdown` y no JSON.
+	 */
+	text?: string;
 }
 
 export type LumbreRequestFn = (init: LumbreRequestInit) => Promise<LumbreResponse>;
@@ -124,12 +135,29 @@ export type MutationOp =
 	| { op: 'restore'; taskId: string }
 	| { op: 'addSubtask'; taskId: string; subtasks: string[] }
 	/** Completar una SUBTAREA es un `complete` dirigido a su propio id. */
-	| { op: 'completeSubtask'; subtaskId: string; done?: boolean };
+	| { op: 'completeSubtask'; subtaskId: string; done?: boolean }
+	/**
+	 * Una entrada NUEVA del registro del día (BRL). El id lo genera el llamador y
+	 * viaja como `taskId`, igual que un `clientTaskId`: reenviar la misma
+	 * operación no crea una segunda entrada. `entry` es el texto con su marcador
+	 * (`- nota`, `= pensamiento`); el servidor lo canonicaliza. `time` NO se manda:
+	 * la resuelve Lumbre con la zona horaria de la cuenta.
+	 */
+	| { op: 'createBrlEntry'; entryId: string; date: string; entry: string };
 
-/** Una operación de `POST /api/batch`: crear una tarea o mutar una existente. */
+/**
+ * Una operación de `POST /api/batch`: crear una tarea, mutar una existente, o
+ * reenviar VERBATIM una mutación que compuso el servidor.
+ *
+ * `mutateRaw` existe por el plan de Soplo: el `kind` y el `payload` los escribió
+ * Lumbre al planificar y son justo lo que el usuario vio en el preview.
+ * Traducirlos a una `MutationOp` del plugin recortaría los campos que el plugin
+ * todavía no modela, o sea aplicaría algo distinto de lo que se aprobó.
+ */
 export type BatchOperation =
 	| { type: 'create'; clientTaskId: string; draft: TaskDraft }
-	| { type: 'mutate'; op: MutationOp };
+	| { type: 'mutate'; op: MutationOp }
+	| { type: 'mutateRaw'; taskId: string; kind: string; payload: Record<string, unknown> };
 
 /** Una entrada del informe de `POST /api/batch`. `index` es la posición en `ops`. */
 export interface BatchResultItem {
@@ -151,11 +179,89 @@ type ServerMutation = {
 	payload: Record<string, unknown>;
 };
 
+/** Una entrada del registro del día, tal y como la sirve `?format=json`. */
+export interface BrlEntryRow {
+	id: string;
+	/** `HH:MM`, o cadena vacía cuando la entrada nació sin hora. */
+	time: string;
+	/** Texto con su marcador: `- nota` o `= pensamiento`. */
+	entry: string;
+}
+
+/** Lo que devuelve `GET /api/brl/<date>?format=json`. */
+export interface BrlDay {
+	/** El día ya resuelto: con `today`, el que decidió el servidor. */
+	date: string;
+	entries: BrlEntryRow[];
+}
+
+/**
+ * Una acción del plan de Soplo, tal y como la compuso el servidor. Viaja
+ * OPACA a propósito: el plugin no la interpreta, solo la enseña (por su
+ * `preview`) y la reenvía. Ver `RawOp` en el repo de Lumbre.
+ */
+export interface AgentPlanOp {
+	op: string;
+	[key: string]: unknown;
+}
+
+/**
+ * Una línea del preview legible. `op` dice de qué tipo es la acción y `text`
+ * es la frase que ya resolvió el servidor (con el título de la tarea dentro):
+ * el plugin NUNCA resuelve un id a un nombre.
+ */
+export interface AgentPreviewItem {
+	op: string;
+	taskId: string;
+	text: string;
+}
+
+/**
+ * La respuesta de `POST /api/agent` en modo previsualización.
+ *
+ * `plan` y `preview` van en paralelo, MISMO índice: el servidor construye el
+ * preview con un `map` sobre el plan. De ahí que una casilla del modal pueda
+ * seleccionar la acción por su posición.
+ */
+export interface AgentPlan {
+	plan: AgentPlanOp[];
+	preview: AgentPreviewItem[];
+	/** Frase de cierre del agente, si la dio. */
+	summary: string | null;
+	/** El texto se recortó por el tope del servidor (4000 caracteres). */
+	truncated: boolean;
+}
+
+/** Un adjunto ya subido, tal y como lo devuelve `POST /api/attachments`. */
+export interface LumbreAttachment {
+	id: string;
+	taskId: string | null;
+	filename: string;
+	mime: string;
+	size: number;
+}
+
+/** Cuerpo que NO es JSON, con las cabeceras que le tocan. */
+interface RawBody {
+	body: ArrayBuffer;
+	headers: Record<string, string>;
+}
+
 /** Tope de ids por petición que impone `GET /api/tasks?ids=` en el servidor. */
 const MAX_IDS_PER_REQUEST = 200;
 
 /** Tope de operaciones por lote que impone `POST /api/batch`. */
 export const MAX_BATCH_OPS = 200;
+
+/**
+ * Tope por fichero de `POST /api/attachments` (`MAX_ATTACHMENT_BYTES` en el
+ * repo de Lumbre). El servidor es el autoritativo; aquí se comprueba antes para
+ * no subir 30 MB y que los rechace al final.
+ */
+export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+/** Tope de caracteres del texto que acepta `POST /api/agent` (`MAX_PROMPT_LEN`). */
+export const MAX_AGENT_PROMPT_LENGTH = 4000;
 
 export class LumbreClient {
 	/**
@@ -266,16 +372,93 @@ export class LumbreClient {
 		if (ops.length === 0) return { ok: true, value: [] };
 		if (ops.length > MAX_BATCH_OPS) return { ok: false, reason: 'bad_request' };
 
-		const body = {
-			ops: ops.map((operation) =>
-				operation.type === 'create'
-					? { type: 'ingest', task: draftToIngestBody(operation.draft, operation.clientTaskId) }
-					: { type: 'mutate', ...translateOp(operation.op) },
-			),
-		};
+		const body = { ops: ops.map(batchOpBody) };
 		const response = await this.send('POST', '/api/batch', body);
 		if (!response.ok) return response;
 		return { ok: true, value: batchResultsFrom(response.value) };
+	}
+
+	/**
+	 * `GET /api/brl/<date>`: la nota del día ENTERA, en Markdown. `date` es
+	 * `YYYY-MM-DD` o el literal `today`, que resuelve el servidor con la zona
+	 * horaria de la cuenta (así el plugin no tiene que saberla).
+	 *
+	 * Con el add-on BRL apagado, Lumbre responde 403; aquí sale como
+	 * `unauthorized` con `status: 403`, y quien llama lo distingue por el status.
+	 */
+	async brl(date: string): Promise<LumbreResult<string>> {
+		const response = await this.request('GET', `/api/brl/${encodeURIComponent(date)}`);
+		if (!response.ok) return response;
+		return { ok: true, value: readText(response.value) };
+	}
+
+	/**
+	 * `GET /api/brl/<date>?format=json`: las mismas entradas CON su id. Es la
+	 * relectura de un `createBrlEntry`: el Markdown no lleva ids, así que sin
+	 * esta vista no habría forma de confirmar que la entrada existe.
+	 */
+	async brlJson(date: string): Promise<LumbreResult<BrlDay>> {
+		const response = await this.send(
+			'GET',
+			`/api/brl/${encodeURIComponent(date)}?format=json`,
+		);
+		if (!response.ok) return response;
+		return { ok: true, value: brlDayFrom(response.value, date) };
+	}
+
+	/**
+	 * `POST /api/agent`: manda un texto a Soplo y devuelve lo que HARÍA con él.
+	 *
+	 * Corre SIEMPRE en `dryRun` (lo fuerza el endpoint): la respuesta trae el
+	 * `plan` y su `preview` legible, y no se ha encolado nada. Aplicar es cosa de
+	 * quien llama, que manda las acciones elegidas por `POST /api/batch`.
+	 *
+	 * Un 403 aquí significa que falta el consentimiento de Soplo en la cuenta
+	 * (`requireSoploAgentAccess` en el repo de Lumbre). Sale como `unauthorized`
+	 * con `status: 403`, que es lo que distingue ese caso de un token caducado
+	 * (401): el endpoint de consentimiento va por cookie de sesión y un plugin
+	 * con token Bearer no puede consultarlo.
+	 */
+	async agent(text: string): Promise<LumbreResult<AgentPlan>> {
+		const response = await this.send('POST', '/api/agent', { prompt: text });
+		if (!response.ok) return response;
+		return { ok: true, value: agentPlanFrom(response.value) };
+	}
+
+	/**
+	 * `POST /api/attachments?taskId=`: sube un fichero del vault a una tarea.
+	 *
+	 * Va por la vía de credencial de máquina: cuerpo BINARIO crudo,
+	 * `Content-Type: application/octet-stream` SIEMPRE y el mime real en
+	 * `x-lumbre-content-type`. Ese desdoble no es cosmético: SvelteKit rechaza con
+	 * 403, antes de llegar al handler, un POST cuyo `Content-Type` sea uno de los
+	 * cuatro que trata como formulario, y `text/plain` (un `.txt` del vault) es
+	 * uno de ellos.
+	 *
+	 * Por encima de `MAX_ATTACHMENT_BYTES` no se gasta la petición.
+	 */
+	async uploadAttachment(
+		taskId: string,
+		filename: string,
+		mime: string,
+		bytes: ArrayBuffer,
+	): Promise<LumbreResult<LumbreAttachment>> {
+		if (bytes.byteLength === 0) return { ok: false, reason: 'bad_request' };
+		if (bytes.byteLength > MAX_ATTACHMENT_BYTES) return { ok: false, reason: 'too_large' };
+
+		const query = new URLSearchParams({ taskId });
+		const response = await this.send('POST', `/api/attachments?${query.toString()}`, undefined, {
+			body: bytes,
+			headers: {
+				'Content-Type': 'application/octet-stream',
+				// URL-encodeado y en cabecera, nunca en la query: un nombre de fichero
+				// ahí acabaría en los access logs del proxy.
+				'x-lumbre-filename': encodeURIComponent(filename),
+				'x-lumbre-content-type': mime,
+			},
+		});
+		if (!response.ok) return response;
+		return { ok: true, value: attachmentFrom(response.value) };
 	}
 
 	/**
@@ -305,17 +488,37 @@ export class LumbreClient {
 	 * Una petición autenticada. Devuelve el cuerpo ya parseado, o el fallo ya
 	 * clasificado. El error de red se traga a propósito: puede llevar la URL y no
 	 * aporta nada accionable más allá de "no se pudo conectar".
+	 *
+	 * `raw` es para el único cuerpo que no es JSON: los bytes de un adjunto, con
+	 * sus propias cabeceras.
 	 */
 	private async send(
 		method: string,
 		path: string,
 		body?: Record<string, unknown>,
+		raw?: RawBody,
 	): Promise<LumbreResult<unknown>> {
+		const response = await this.request(method, path, body, raw);
+		if (!response.ok) return response;
+		return { ok: true, value: readJson(response.value) };
+	}
+
+	/** Como `send`, pero devuelve la respuesta entera: la necesita el BRL, que responde Markdown. */
+	private async request(
+		method: string,
+		path: string,
+		body?: Record<string, unknown>,
+		raw?: RawBody,
+	): Promise<LumbreResult<LumbreResponse>> {
 		const token = await this.options.getToken();
 		if (!token) return { ok: false, reason: 'no_token' };
 
 		const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
 		if (body !== undefined) headers['Content-Type'] = 'application/json';
+		Object.assign(headers, raw?.headers);
+
+		const payload =
+			raw !== undefined ? raw.body : body !== undefined ? JSON.stringify(body) : undefined;
 
 		let response: LumbreResponse;
 		try {
@@ -323,7 +526,7 @@ export class LumbreClient {
 				url: `${this.origin()}${path}`,
 				method,
 				headers,
-				...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+				...(payload !== undefined ? { body: payload } : {}),
 				throw: false,
 			});
 		} catch {
@@ -332,7 +535,7 @@ export class LumbreClient {
 
 		const failure = failureForStatus(response.status);
 		if (failure !== null) return failure;
-		return { ok: true, value: readJson(response) };
+		return { ok: true, value: response };
 	}
 
 	private origin(): string {
@@ -382,6 +585,28 @@ export function translateOp(op: MutationOp): ServerMutation {
 			return { taskId: op.taskId, kind: 'restore', payload: {} };
 		case 'addSubtask':
 			return { taskId: op.taskId, kind: 'addSubtask', payload: { subtasks: op.subtasks } };
+		case 'createBrlEntry':
+			// El id de la ENTRADA viaja en `taskId`: esa columna es genérica en el
+			// servidor (lo mismo hacen `removeList` o `createList`). `time` no se
+			// manda a propósito, la resuelve el encolado con la zona de la cuenta.
+			return { taskId: op.entryId, kind: 'createBrlEntry', payload: { date: op.date, entry: op.entry } };
+	}
+}
+
+/** Una `BatchOperation` del plugin a la op que acepta `POST /api/batch`. */
+function batchOpBody(operation: BatchOperation): Record<string, unknown> {
+	switch (operation.type) {
+		case 'create':
+			return { type: 'ingest', task: draftToIngestBody(operation.draft, operation.clientTaskId) };
+		case 'mutate':
+			return { type: 'mutate', ...translateOp(operation.op) };
+		case 'mutateRaw':
+			return {
+				type: 'mutate',
+				taskId: operation.taskId,
+				kind: operation.kind,
+				payload: operation.payload,
+			};
 	}
 }
 
@@ -405,6 +630,87 @@ function readJson(response: LumbreResponse): unknown {
 	} catch {
 		return null;
 	}
+}
+
+/** El cuerpo en texto, o cadena vacía. Mismo cuidado con el getter que `readJson`. */
+function readText(response: LumbreResponse): string {
+	try {
+		return response.text ?? '';
+	} catch {
+		return '';
+	}
+}
+
+function asRow(value: unknown): Record<string, unknown> | null {
+	return value !== null && typeof value === 'object' && !Array.isArray(value)
+		? (value as Record<string, unknown>)
+		: null;
+}
+
+/** El JSON del BRL a `BrlDay`, descartando lo que no sea una entrada. */
+function brlDayFrom(raw: unknown, fallbackDate: string): BrlDay {
+	const row = asRow(raw);
+	const date = typeof row?.['date'] === 'string' ? row['date'] : fallbackDate;
+	const rawEntries = row?.['entries'];
+	if (!Array.isArray(rawEntries)) return { date, entries: [] };
+
+	const entries: BrlEntryRow[] = [];
+	for (const item of rawEntries) {
+		const entry = asRow(item);
+		const id = entry === null ? null : entry['id'];
+		if (typeof id !== 'string' || id.length === 0) continue;
+		entries.push({
+			id,
+			time: typeof entry?.['time'] === 'string' ? entry['time'] : '',
+			entry: typeof entry?.['entry'] === 'string' ? entry['entry'] : '',
+		});
+	}
+	return { date, entries };
+}
+
+/**
+ * La respuesta de `POST /api/agent` a `AgentPlan`. Se descartan las acciones sin
+ * su línea de preview: sin texto que enseñar no se puede pedir confirmación, y
+ * aplicar a ciegas algo que el usuario no ha visto es justo lo que no se hace.
+ */
+function agentPlanFrom(raw: unknown): AgentPlan {
+	const row = asRow(raw);
+	const rawPlan = Array.isArray(row?.['plan']) ? row['plan'] : [];
+	const rawPreview = Array.isArray(row?.['preview']) ? row['preview'] : [];
+
+	const plan: AgentPlanOp[] = [];
+	const preview: AgentPreviewItem[] = [];
+	for (const [index, item] of rawPlan.entries()) {
+		const op = asRow(item);
+		const line = asRow(rawPreview[index]);
+		if (op === null || line === null) continue;
+		if (typeof op['op'] !== 'string' || typeof line['text'] !== 'string') continue;
+		plan.push(op as AgentPlanOp);
+		preview.push({
+			op: typeof line['op'] === 'string' ? line['op'] : op['op'],
+			taskId: typeof line['taskId'] === 'string' ? line['taskId'] : '',
+			text: line['text'],
+		});
+	}
+
+	return {
+		plan,
+		preview,
+		summary: typeof row?.['summary'] === 'string' ? row['summary'] : null,
+		truncated: row?.['truncated'] === true,
+	};
+}
+
+/** El JSON de `POST /api/attachments` a `LumbreAttachment`. */
+function attachmentFrom(raw: unknown): LumbreAttachment {
+	const row = asRow(raw);
+	return {
+		id: typeof row?.['id'] === 'string' ? row['id'] : '',
+		taskId: typeof row?.['taskId'] === 'string' ? row['taskId'] : null,
+		filename: typeof row?.['filename'] === 'string' ? row['filename'] : '',
+		mime: typeof row?.['mime'] === 'string' ? row['mime'] : 'application/octet-stream',
+		size: typeof row?.['size'] === 'number' ? row['size'] : 0,
+	};
 }
 
 function batchResultsFrom(raw: unknown): BatchResultItem[] {
@@ -431,6 +737,8 @@ export function describeFailure(reason: FailureReason, status?: number): string 
 			return 'Demasiadas peticiones a Lumbre; espera un momento.';
 		case 'network':
 			return 'No se pudo conectar con Lumbre.';
+		case 'too_large':
+			return 'El fichero pasa de 25 MB, el tope de Lumbre.';
 		case 'server':
 			return status === undefined
 				? 'Lumbre respondió con un error.'

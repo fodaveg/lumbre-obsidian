@@ -11,7 +11,13 @@
  * `PluginStore`.
  */
 
-import type { LumbreClient, FailureReason, LumbreFailure, LumbreResult } from './client';
+import type {
+	BatchOperation,
+	LumbreClient,
+	FailureReason,
+	LumbreFailure,
+	LumbreResult,
+} from './client';
 import type { LumbreTask, TaskDraft } from './types';
 
 /**
@@ -81,7 +87,48 @@ export type StatusOperation = OperationBase & {
 	task: LumbreTask | null;
 };
 
-export type QueuedOperation = CreateOperation | StatusOperation;
+/**
+ * Una entrada NUEVA del registro del día (BRL).
+ *
+ * El id lo fija el plugin (`entryId`) y es el que tendrá la entrada, igual que
+ * el `clientTaskId` de un `create`: reenviarla no crea una segunda. La
+ * relectura es distinta, eso sí, porque una entrada del BRL no es una tarea y
+ * `getTask` no la encuentra: se relee `GET /api/brl/<date>?format=json` y se
+ * busca el id ahí.
+ */
+export type BrlOperation = OperationBase & {
+	kind: 'brl';
+	entryId: string;
+	/** Día del registro, `YYYY-MM-DD` o el literal `today`. */
+	date: string;
+	/** Texto con su marcador: `- nota` o `= pensamiento`. */
+	entry: string;
+	target: LinkTarget;
+};
+
+/**
+ * Un lote de operaciones aprobado por el usuario, hoy el plan de Soplo.
+ *
+ * Se envía por `POST /api/batch` (una petición, un drenaje) y se confirma
+ * releyendo las tareas CREADAS por `ids=`. Las mutaciones del lote no se
+ * releen: tocan tareas que ya existían y no hay un "existe / no existe" que
+ * comprobar sin saber qué esperaba cada `kind`.
+ */
+export type BatchQueuedOperation = OperationBase & {
+	kind: 'batch';
+	ops: BatchOperation[];
+	/** Ids de las tareas que el lote CREA. Son los que se releen. */
+	createdTaskIds: string[];
+	target: LinkTarget;
+	/** Las tareas creadas, tal y como las devolvió la relectura que las confirmó. */
+	tasks: LumbreTask[] | null;
+};
+
+export type QueuedOperation =
+	| CreateOperation
+	| StatusOperation
+	| BrlOperation
+	| BatchQueuedOperation;
 
 /** Lo que la cola necesita del almacén del plugin. Lo cumple `PluginStore`. */
 export interface QueueStorage {
@@ -92,7 +139,10 @@ export interface QueueStorage {
 }
 
 export interface OperationQueueOptions {
-	client: Pick<LumbreClient, 'createTask' | 'mutate' | 'flush' | 'getTask'>;
+	client: Pick<
+		LumbreClient,
+		'createTask' | 'mutate' | 'flush' | 'getTask' | 'getTasksByIds' | 'batch' | 'brlJson'
+	>;
 	storage: QueueStorage;
 	/** Espera entre la primera relectura vacía y la segunda. Inyectable para los tests. */
 	sleep?: (ms: number) => Promise<void>;
@@ -160,6 +210,44 @@ export class OperationQueue {
 			done,
 			target,
 			task: null,
+		};
+		await this.append(operation);
+		return operation;
+	}
+
+	/**
+	 * Encola una entrada nueva del registro del día. El id se fija AQUÍ, así que
+	 * reintentar no duplica la entrada.
+	 */
+	async enqueueBrl(date: string, entry: string, target: LinkTarget): Promise<BrlOperation> {
+		const operation: BrlOperation = {
+			...this.newBase(),
+			kind: 'brl',
+			entryId: crypto.randomUUID(),
+			date,
+			entry,
+			target,
+		};
+		await this.append(operation);
+		return operation;
+	}
+
+	/**
+	 * Encola un lote ya aprobado por el usuario. `createdTaskIds` son los ids de
+	 * las tareas que el lote crea, que es lo que se relee para confirmarlo.
+	 */
+	async enqueueBatch(
+		ops: BatchOperation[],
+		createdTaskIds: string[],
+		target: LinkTarget,
+	): Promise<BatchQueuedOperation> {
+		const operation: BatchQueuedOperation = {
+			...this.newBase(),
+			kind: 'batch',
+			ops,
+			createdTaskIds,
+			target,
+			tasks: null,
 		};
 		await this.append(operation);
 		return operation;
@@ -262,14 +350,33 @@ export class OperationQueue {
 	}
 
 	private async send(operation: QueuedOperation): Promise<LumbreResult<void>> {
-		if (operation.kind === 'create') {
-			return this.options.client.createTask(operation.draft, operation.clientTaskId);
+		switch (operation.kind) {
+			case 'create':
+				return this.options.client.createTask(operation.draft, operation.clientTaskId);
+			case 'status':
+				return this.options.client.mutate({
+					op: 'complete',
+					taskId: operation.taskId,
+					done: operation.done,
+				});
+			case 'brl':
+				return this.options.client.mutate({
+					op: 'createBrlEntry',
+					entryId: operation.entryId,
+					date: operation.date,
+					entry: operation.entry,
+				});
+			case 'batch': {
+				const sent = await this.options.client.batch(operation.ops);
+				if (!sent.ok) return sent;
+				// Éxito PARCIAL: `/api/batch` responde 200 aunque una op se rechace, y
+				// el informe es lo único que lo dice. Si alguna cayó, la operación NO
+				// se puede dar por enviada en silencio.
+				const failed = sent.value.filter((item) => !item.ok);
+				if (failed.length > 0) return { ok: false, reason: 'bad_request' };
+				return { ok: true, value: undefined };
+			}
 		}
-		return this.options.client.mutate({
-			op: 'complete',
-			taskId: operation.taskId,
-			done: operation.done,
-		});
 	}
 
 	/**
@@ -282,18 +389,13 @@ export class OperationQueue {
 	private async confirm(
 		operation: QueuedOperation,
 	): Promise<'materialized' | 'missing' | LumbreFailure> {
-		const id = operation.kind === 'create' ? operation.clientTaskId : operation.taskId;
-
 		for (let attempt = 0; attempt < 2; attempt += 1) {
 			if (attempt > 0) await this.sleep(REREAD_DELAY_MS);
 
-			const read = await this.options.client.getTask(id);
-			if (!read.ok) return read;
-
-			const task = read.value;
-			if (task !== null && matchesOperation(operation, task)) {
+			const read = await this.reread(operation);
+			if (read !== 'missing' && read !== 'confirmed') return read;
+			if (read === 'confirmed') {
 				operation.state = 'materialized';
-				operation.task = task;
 				operation.error = null;
 				operation.updatedAt = this.stamp();
 				await this.persist(operation);
@@ -302,6 +404,46 @@ export class OperationQueue {
 			}
 		}
 		return 'missing';
+	}
+
+	/**
+	 * UNA relectura. Cada tipo de operación se confirma en su propio sitio: una
+	 * tarea por `getTask`, un lote por `getTasksByIds` de lo que creó, y una
+	 * entrada del BRL por el JSON del día, porque no es una tarea y `getTask`
+	 * nunca la encontraría.
+	 *
+	 * Guarda lo leído dentro de la operación; quien llama solo marca el estado.
+	 */
+	private async reread(
+		operation: QueuedOperation,
+	): Promise<'confirmed' | 'missing' | LumbreFailure> {
+		if (operation.kind === 'brl') {
+			const read = await this.options.client.brlJson(operation.date);
+			if (!read.ok) return read;
+			const found = read.value.entries.some((entry) => entry.id === operation.entryId);
+			return found ? 'confirmed' : 'missing';
+		}
+
+		if (operation.kind === 'batch') {
+			// Un lote sin altas no tiene nada que releer: sus mutaciones tocan tareas
+			// que ya existían, y el 200 con el informe en verde es cuanto se puede
+			// saber sin conocer qué esperaba cada `kind`.
+			if (operation.createdTaskIds.length === 0) return 'confirmed';
+			const read = await this.options.client.getTasksByIds(operation.createdTaskIds);
+			if (!read.ok) return read;
+			if (read.value.length < operation.createdTaskIds.length) return 'missing';
+			operation.tasks = read.value;
+			return 'confirmed';
+		}
+
+		const id = operation.kind === 'create' ? operation.clientTaskId : operation.taskId;
+		const read = await this.options.client.getTask(id);
+		if (!read.ok) return read;
+
+		const task = read.value;
+		if (task === null || !matchesOperation(operation, task)) return 'missing';
+		operation.task = task;
+		return 'confirmed';
 	}
 
 	/**
@@ -380,7 +522,7 @@ function isActionable(operation: QueuedOperation): boolean {
 }
 
 /** `true` si la tarea leída ya refleja lo que pedía la operación. */
-function matchesOperation(operation: QueuedOperation, task: LumbreTask): boolean {
+function matchesOperation(operation: CreateOperation | StatusOperation, task: LumbreTask): boolean {
 	// Para un `create` basta con que la tarea EXISTA: el id lo fijamos nosotros.
 	if (operation.kind === 'create') return true;
 	return task.done === operation.done;
@@ -400,6 +542,8 @@ function failureText(failure: LumbreFailure): string {
 			return `Demasiadas peticiones a Lumbre${status}.`;
 		case 'network':
 			return 'No se pudo conectar con Lumbre.';
+		case 'too_large':
+			return 'El contenido pasa del tope de Lumbre.';
 		case 'server':
 			return `Lumbre respondió con un error${status}.`;
 	}

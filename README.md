@@ -7,19 +7,24 @@ Plugin de escritorio que conecta el vault de Obsidian con [Lumbre](https://lumbr
 El plugin **proyecta** tareas de Lumbre dentro de Obsidian. Nunca las copia al Markdown: la tarea
 vive en Lumbre y la nota es tuya.
 
-**Tres comandos** (en la paleta salen con el prefijo «Lumbre:»):
+**Los comandos** (en la paleta salen con el prefijo «Lumbre:»):
 
 | Comando | Qué hace |
 | --- | --- |
 | **Enviar como tarea** | Abre un formulario con el título ya puesto (la selección, o la línea del cursor sin su marcador de lista), lista, fecha o «Algún día», hora, prioridad, fecha límite, notas y subtareas. También está en el menú contextual del editor, como «Enviar a Lumbre». |
+| **Anotar en el BRL** | Un campo de texto (prefijado con la selección) y dos botones, «Nota» y «Pensamiento». La entrada va al registro de HOY por la misma cola durable que las tareas. |
+| **Insertar el BRL de hoy como texto** | Pega el Markdown del registro de hoy en el cursor. Es una **foto fija**: la única vez que el BRL entra en un fichero del vault, y solo porque lo pides a mano. |
+| **Soplo con la selección** | Manda la selección (o el párrafo del cursor) a Soplo y enseña lo que HARÍA, con una casilla por acción. Nada se aplica sin pulsar «Aplicar». También está en el menú contextual del editor. |
 | **Vincular esta nota a una lista** | Escribe la propiedad `lumbre-list` en el frontmatter con el id de la lista elegida. |
 | **Quitar el vínculo con la lista** | Borra esa propiedad. |
 
 **Un panel lateral**, «Tareas de esta nota» (icono en la barra izquierda, o el comando **Abrir las
 tareas de esta nota**). Sigue a la nota abierta y enseña:
 
-- Las tareas de Lumbre vinculadas a esa nota, con checkbox para completarlas o reabrirlas, su lista y
-  su fecha, botón para abrirlas en Lumbre y para desvincularlas.
+- Las tareas de Lumbre vinculadas a esa nota, con checkbox para completarlas o reabrirlas, su lista,
+  su fecha, cuántos adjuntos tiene, botón para abrirlas en Lumbre y para desvincularlas.
+- **Adjuntar fichero…** en cada tarea: elige un fichero del vault que no sea una nota y lo sube a esa
+  tarea de Lumbre. Tope de 25 MB, que se comprueba antes de subir nada.
 - Un buscador para vincular una tarea que ya existe, por título o por nombre de lista.
 - Si la nota tiene `lumbre-list`, todas las tareas de esa lista agrupadas por sección.
 
@@ -27,8 +32,8 @@ Completar una tarea no es inmediato: la escritura va por una cola durable y el c
 hasta que Lumbre la confirma al releerla. Sin conexión, la cabecera lo dice y se sigue enseñando lo
 último confirmado, nunca una caché disfrazada de dato fresco.
 
-`lumbre-list` es **lo único** que el plugin escribe dentro de una nota, y solo cuando lo pides con
-ese comando.
+`lumbre-list` es **lo único** que el plugin escribe dentro de una nota por su cuenta. Lo otro que
+puede acabar en un fichero es el BRL de hoy, y solo con el comando que lo pega a mano.
 
 ## El bloque `lumbre`
 
@@ -65,6 +70,38 @@ La casilla de cada tarea la completa o la reabre, y va por la misma cola durable
 «Enviando…» hasta que Lumbre la confirma al releer. El pie dice de qué hora son los datos y, si la
 última lectura falló, que eso es lo que estás viendo. Los bloques comparten una caché de 30 segundos,
 así que tener varios en una nota no multiplica las llamadas a Lumbre.
+
+## El bloque `lumbre-brl`
+
+El registro del día (el BRL de Lumbre) dentro de una nota, en vivo. El cuerpo tiene una sola clave,
+`date`, y un bloque vacío es el registro de hoy:
+
+````markdown
+```lumbre-brl
+date: today
+```
+````
+
+| Clave | Valores | Por defecto |
+| --- | --- | --- |
+| `date` | `today` (o `hoy`), o una fecha `YYYY-MM-DD`. | `today` |
+
+Con `today`, quién es «hoy» lo decide el **servidor** con la zona horaria de tu cuenta, no el reloj
+del dispositivo. El Markdown lo pinta el mismo motor que el resto de la nota, así que los enlaces
+internos y las listas salen como en cualquier otro sitio del vault. Igual que el bloque `lumbre`, no
+toca el Markdown, dice de qué hora son los datos y comparte una caché de 30 segundos.
+
+Necesita el add-on **BRL** activado en tu cuenta de Lumbre; si está apagado, el bloque lo dice.
+
+## Soplo desde una nota
+
+**Lumbre: Soplo con la selección** manda ese texto a Soplo, el agente de Lumbre, y abre un modal con
+lo que HARÍA: el texto original arriba y una casilla por acción, todas marcadas. **La IA propone y
+tú confirmas**: hasta que pulsas «Aplicar» no se ha encolado nada, y solo se aplica lo que dejaste
+marcado. Las tareas que nazcan de ahí quedan vinculadas a la nota desde la que lo pediste.
+
+El texto se recorta a 4000 caracteres, que es el tope del servidor, y el modal avisa cuando lo hace.
+Soplo exige tu consentimiento en Lumbre; si falta, el modal lo dice y lleva a los ajustes de la web.
 
 ## API para Dataview y js-engine
 

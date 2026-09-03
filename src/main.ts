@@ -14,13 +14,31 @@ import {
 } from 'obsidian';
 
 import { LumbreApi } from './api/lumbre-api';
+import { FileSuggestModal } from './attachments/file-suggest-modal';
+import { checkUploadSize, formatBytes, mimeForExtension } from './attachments/upload';
+import { BrlCache } from './blocks/brl-cache';
+import {
+	LUMBRE_BRL_BLOCK_LANGUAGE,
+	LumbreBrlBlock,
+	type BrlBlockHost,
+} from './blocks/brl-block';
 import { QueryCache } from './blocks/query-cache';
 import { LUMBRE_BLOCK_LANGUAGE, LumbreTaskBlock, type TaskBlockHost } from './blocks/task-block';
+import { BrlEntryModal } from './brl/brl-modal';
+import { BRL_TODAY, brlCreateOp, type BrlKind } from './brl/brl-ops';
 import { LinkStore } from './links/link-store';
 import { NOTE_LIST_PROPERTY, readNoteListId, writeNoteListId } from './links/note-list';
-import { LumbreClient } from './lumbre/client';
+import {
+	describeFailure,
+	LumbreClient,
+	MAX_AGENT_PROMPT_LENGTH,
+	type AgentPlan,
+	type LumbreResult,
+} from './lumbre/client';
 import { ListCache } from './lumbre/list-cache';
 import { OperationQueue, type LinkTarget } from './lumbre/queue';
+import { planToOps } from './soplo/plan-to-ops';
+import { SoploModal } from './soplo/soplo-modal';
 import { taskFromDraft, type LumbreTask, type TaskDraft } from './lumbre/types';
 import {
 	DEFAULT_SETTINGS,
@@ -64,6 +82,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	links!: LinkStore;
 	lists!: ListCache;
 	queries!: QueryCache;
+	brl!: BrlCache;
 
 	/**
 	 * API PÚBLICA del plugin, alcanzable como `app.plugins.plugins.lumbre.api` y
@@ -110,6 +129,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 				this.api.notifyTasksChanged();
 			},
 		});
+		this.brl = new BrlCache({ client: this.client });
 		this.api = new LumbreApi({
 			version: this.manifest.version,
 			client: this.client,
@@ -132,6 +152,12 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			LUMBRE_BLOCK_LANGUAGE,
 			(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) => {
 				ctx.addChild(new LumbreTaskBlock(el, source, ctx.sourcePath, this.taskBlockHost()));
+			},
+		);
+		this.registerMarkdownCodeBlockProcessor(
+			LUMBRE_BRL_BLOCK_LANGUAGE,
+			(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) => {
+				ctx.addChild(new LumbreBrlBlock(el, source, ctx.sourcePath, this.brlBlockHost()));
 			},
 		);
 		this.registerView(
@@ -170,6 +196,14 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 							.setIcon(NOTE_TASKS_ICON)
 							.onClick(() => {
 								void this.openSendModal(info.file ?? null, editorContext(editor));
+							}),
+					);
+					menu.addItem((item) =>
+						item
+							.setTitle('Soplo con la selección')
+							.setIcon('sparkles')
+							.onClick(() => {
+								this.openSoploModal(info.file ?? null, soploSource(editor));
 							}),
 					);
 				},
@@ -250,6 +284,230 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 				return true;
 			},
 		});
+
+		this.addCommand({
+			id: 'brl-entry',
+			name: 'Anotar en el BRL',
+			editorCallback: (editor: Editor) => {
+				new BrlEntryModal(this.app, {
+					defaultText: editor.getSelection(),
+					onSubmit: (text: string, kind: BrlKind) => this.sendBrlEntry(text, kind),
+				}).open();
+			},
+		});
+
+		this.addCommand({
+			id: 'insert-brl-today',
+			name: 'Insertar el BRL de hoy como texto',
+			editorCallback: (editor: Editor) => {
+				void this.insertBrlToday(editor);
+			},
+		});
+
+		this.addCommand({
+			id: 'soplo-selection',
+			name: 'Soplo con la selección',
+			editorCallback: (editor: Editor, context: MarkdownView | MarkdownFileInfo) => {
+				this.openSoploModal(context.file ?? null, soploSource(editor));
+			},
+		});
+	}
+
+	// ── BRL ──────────────────────────────────────────────────────────────────
+
+	/**
+	 * Encola una entrada del registro del día y avisa. El texto de la nota NO se
+	 * toca: el BRL vive en Lumbre, igual que las tareas.
+	 */
+	private async sendBrlEntry(text: string, kind: BrlKind): Promise<void> {
+		const operation = brlCreateOp(text, kind);
+		if (operation === null) {
+			new Notice('La entrada necesita un texto.');
+			return;
+		}
+
+		const file = this.app.workspace.getActiveFile();
+		const queued = await this.queue.enqueueBrl(operation.date, operation.entry, {
+			notePath: file?.path ?? '',
+			label: file?.basename ?? 'Sin nota',
+			excerpt: null,
+		});
+		new Notice(kind === 'thought' ? 'Pensamiento enviado al BRL' : 'Nota enviada al BRL');
+		this.notifyDataChange();
+
+		await this.queue.flush();
+		const after = this.queue.pending().find((candidate) => candidate.id === queued.id);
+		if (after?.state === 'rejected') {
+			new Notice(after.error ?? 'Lumbre rechazó la entrada del BRL.');
+		}
+		await this.refreshBrl();
+	}
+
+	/**
+	 * Pega el BRL de hoy en el cursor. Es la ÚNICA vez que el registro entra en un
+	 * fichero del vault, y es una FOTO FIJA: lo pide el usuario a mano y desde ahí
+	 * el texto es suyo, no se vuelve a tocar.
+	 */
+	private async insertBrlToday(editor: Editor): Promise<void> {
+		const read = await this.brl.get(BRL_TODAY, true);
+		// Aquí NO vale la última lectura buena, a diferencia del bloque: esto
+		// ESCRIBE en la nota, y un texto de hace media hora pegado en el fichero ya
+		// no se distingue del de ahora. Si la lectura falla, no se pega nada.
+		if (read.error !== null || read.fetchedAt === null) {
+			new Notice(read.error ?? 'No se pudo leer el BRL de hoy.');
+			return;
+		}
+		if (read.markdown.trim().length === 0) {
+			new Notice('El registro de hoy está vacío.');
+			return;
+		}
+		editor.replaceSelection(read.markdown.trimEnd().concat('\n'));
+		new Notice('BRL de hoy insertado en la nota');
+	}
+
+	// ── Soplo ────────────────────────────────────────────────────────────────
+
+	/**
+	 * Abre el preview de Soplo sobre un texto. La IA propone y el usuario
+	 * confirma: aquí no se aplica nada, solo se pregunta.
+	 */
+	private openSoploModal(file: TFile | null, source: string): void {
+		const text = source.trim();
+		if (text.length === 0) {
+			new Notice('Selecciona un texto, o pon el cursor en un párrafo.');
+			return;
+		}
+
+		const truncated = text.length > MAX_AGENT_PROMPT_LENGTH;
+		const prompt = truncated ? text.slice(0, MAX_AGENT_PROMPT_LENGTH) : text;
+
+		new SoploModal(this.app, {
+			text: prompt,
+			truncated,
+			ask: (): Promise<LumbreResult<AgentPlan>> => this.client.agent(prompt),
+			apply: (plan: AgentPlan, checked: boolean[]) => this.applySoploPlan(plan, checked, file),
+			openUrl: (url: string) => {
+				window.open(url);
+			},
+			webOrigin: () => this.config.apiOrigin,
+		}).open();
+	}
+
+	/**
+	 * Aplica SOLO lo marcado, por la cola durable. Las tareas que nacen del plan
+	 * se vinculan a la nota desde la que se pidió: sus ids los fija el plan, así
+	 * que el vínculo ya puede apuntar a ellos antes de que Lumbre las materialice.
+	 */
+	private async applySoploPlan(
+		plan: AgentPlan,
+		checked: boolean[],
+		file: TFile | null,
+	): Promise<void> {
+		const { ops, createdTaskIds, skipped } = planToOps(plan.plan, checked);
+		if (ops.length === 0) {
+			new Notice(
+				skipped > 0
+					? 'Nada que aplicar: lo marcado no son tareas.'
+					: 'No has marcado ninguna acción.',
+			);
+			return;
+		}
+
+		const target: LinkTarget = {
+			notePath: file?.path ?? '',
+			label: file?.basename ?? 'Sin nota',
+			excerpt: null,
+		};
+		const operation = await this.queue.enqueueBatch(ops, createdTaskIds, target);
+
+		if (file !== null) {
+			for (const op of ops) {
+				if (op.type !== 'create') continue;
+				await this.links.link(
+					file.path,
+					taskFromDraft(op.draft, op.clientTaskId, this.lists.refFor(op.draft.listId ?? null)),
+					{ label: target.label, excerpt: null },
+					'pending_local',
+				);
+			}
+		}
+
+		new Notice(
+			skipped > 0
+				? `${ops.length} acciones enviadas a Lumbre; ${skipped} no eran tareas y se han saltado.`
+				: `${ops.length} ${ops.length === 1 ? 'acción enviada' : 'acciones enviadas'} a Lumbre`,
+		);
+		this.notifyDataChange();
+
+		await this.queue.flush();
+		const after = this.queue.pending().find((candidate) => candidate.id === operation.id);
+		if (after?.state === 'rejected') {
+			new Notice(after.error ?? 'Lumbre rechazó parte del plan.');
+		}
+		if (file !== null && navigator.onLine) await this.links.refresh(file.path, this.client);
+		this.notifyDataChange();
+	}
+
+	// ── Adjuntos ─────────────────────────────────────────────────────────────
+
+	/**
+	 * Elige un fichero del vault y lo sube como adjunto de la tarea.
+	 *
+	 * Va DIRECTO, no por la cola: la cola persiste en `data.json`, que viaja por
+	 * Obsidian Sync, y meter ahí los bytes de un fichero de 25 MB hincharía el
+	 * fichero de datos del plugin. Si falla, se ofrece reintentar.
+	 */
+	private attachFileToTask(task: LumbreTask): void {
+		new FileSuggestModal(this.app, (file: TFile) => {
+			void this.uploadAttachment(task, file);
+		}).open();
+	}
+
+	private async uploadAttachment(task: LumbreTask, file: TFile): Promise<void> {
+		const size = checkUploadSize(file.stat.size);
+		if (!size.ok) {
+			new Notice(size.message);
+			return;
+		}
+
+		new Notice(`Subiendo ${file.name} (${formatBytes(file.stat.size)})…`);
+		const bytes = await this.app.vault.readBinary(file);
+		const result = await this.client.uploadAttachment(
+			task.id,
+			file.name,
+			mimeForExtension(file.extension),
+			bytes,
+		);
+
+		if (result.ok) {
+			new Notice(`${file.name} adjuntado a «${task.content}»`);
+			// El recuento de adjuntos sale de la tarea, así que hay que releerla.
+			for (const notePath of this.links.notesForTask(task.id)) {
+				await this.links.refresh(notePath, this.client);
+			}
+			this.notifyDataChange();
+			return;
+		}
+
+		// Un fallo de red se puede reintentar tal cual; un 404 significa que la
+		// tarea ya no está viva en Lumbre y reintentar no arreglaría nada.
+		const notice = new Notice(
+			`No se pudo adjuntar ${file.name}. ${describeFailure(result.reason, result.status)}`,
+			10_000,
+		);
+		if (result.reason !== 'network' && result.reason !== 'server') return;
+		const retry = notice.messageEl.createEl('button', { cls: 'lumbre-button' });
+		retry.setText('Reintentar');
+		retry.addEventListener('click', () => {
+			notice.hide();
+			void this.uploadAttachment(task, file);
+		});
+	}
+
+	/** Caduca el registro del día y refresca los bloques `lumbre-brl` montados. */
+	private async refreshBrl(): Promise<void> {
+		await this.brl.refreshAll();
+		this.notifyDataChange();
 	}
 
 	/** Abre el panel en la barra lateral derecha y lo trae al frente. */
@@ -358,6 +616,17 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		};
 	}
 
+	private brlBlockHost(): BrlBlockHost {
+		return {
+			cache: this.brl,
+			app: this.app,
+			onDataChange: (listener: () => void) => {
+				this.dataListeners.add(listener);
+				return () => this.dataListeners.delete(listener);
+			},
+		};
+	}
+
 	/**
 	 * Completa o reabre desde un bloque. Encola, drena y solo avisa con un Notice
 	 * si Lumbre RECHAZÓ la operación: un refresco normal no interrumpe a nadie.
@@ -407,6 +676,9 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			openSendModal: (file: TFile | null) => {
 				void this.openSendModal(file);
 			},
+			attachFile: (task: LumbreTask) => {
+				this.attachFileToTask(task);
+			},
 			noteListId: (file: TFile) => readNoteListId(this.app, file),
 			onDataChange: (listener: () => void) => {
 				this.dataListeners.add(listener);
@@ -454,4 +726,28 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 /** Lo que hay bajo el cursor, para prefijar el título de la tarea. */
 function editorContext(editor: Editor): EditorContext {
 	return { selection: editor.getSelection(), line: editor.getLine(editor.getCursor().line) };
+}
+
+/**
+ * El texto que se le manda a Soplo: la selección, y sin selección el PÁRRAFO del
+ * cursor, o sea las líneas seguidas alrededor hasta la primera en blanco. Una
+ * sola línea suele ser media frase, y a Soplo hay que darle la parrafada entera
+ * para que entienda de qué va.
+ */
+function soploSource(editor: Editor): string {
+	const selection = editor.getSelection();
+	if (selection.trim().length > 0) return selection;
+
+	const cursor = editor.getCursor().line;
+	if (editor.getLine(cursor).trim().length === 0) return '';
+
+	let first = cursor;
+	while (first > 0 && editor.getLine(first - 1).trim().length > 0) first -= 1;
+	let last = cursor;
+	const lastLine = editor.lastLine();
+	while (last < lastLine && editor.getLine(last + 1).trim().length > 0) last += 1;
+
+	const lines: string[] = [];
+	for (let line = first; line <= last; line += 1) lines.push(editor.getLine(line));
+	return lines.join('\n');
 }

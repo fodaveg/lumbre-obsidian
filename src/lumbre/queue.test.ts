@@ -1,9 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import type { LumbreFailure, LumbreResult, MutationOp } from './client';
+import type {
+	BatchOperation,
+	BatchResultItem,
+	BrlDay,
+	LumbreFailure,
+	LumbreResult,
+	MutationOp,
+} from './client';
 import {
 	MAX_ATTEMPTS,
 	OperationQueue,
+	type CreateOperation,
 	type LinkTarget,
 	type QueuedOperation,
 	type QueueStorage,
@@ -69,7 +77,7 @@ function failure(reason: LumbreFailure['reason'], status?: number): LumbreFailur
 	return status === undefined ? { ok: false, reason } : { ok: false, reason, status };
 }
 
-/** Los cuatro métodos del cliente que usa la cola, cada uno espiable. */
+/** Los métodos del cliente que usa la cola, cada uno espiable. */
 function fakeClient() {
 	return {
 		createTask: vi.fn(
@@ -81,6 +89,24 @@ function fakeClient() {
 			async (_id: string): Promise<LumbreResult<LumbreTask | null>> => ({
 				ok: true,
 				value: task(),
+			}),
+		),
+		getTasksByIds: vi.fn(
+			async (ids: string[]): Promise<LumbreResult<LumbreTask[]>> => ({
+				ok: true,
+				value: ids.map((id) => task({ id })),
+			}),
+		),
+		batch: vi.fn(
+			async (ops: BatchOperation[]): Promise<LumbreResult<BatchResultItem[]>> => ({
+				ok: true,
+				value: ops.map((_op, index) => ({ index, type: 'ingest' as const, ok: true })),
+			}),
+		),
+		brlJson: vi.fn(
+			async (date: string): Promise<LumbreResult<BrlDay>> => ({
+				ok: true,
+				value: { date, entries: [] },
 			}),
 		),
 	};
@@ -130,7 +156,7 @@ describe('OperationQueue: crear una tarea', () => {
 		expect(client.getTask).toHaveBeenCalledWith(operation.clientTaskId);
 		const [stored] = storage.operations;
 		expect(stored?.state).toBe('materialized');
-		expect(stored?.task).toEqual(created);
+		expect((stored as CreateOperation | undefined)?.task).toEqual(created);
 		expect(stored?.error).toBeNull();
 	});
 
@@ -344,5 +370,98 @@ describe('OperationQueue: dispositivos y gestión manual', () => {
 		await queue.discard(operation.id);
 
 		expect(storage.operations).toHaveLength(0);
+	});
+});
+
+describe('OperationQueue: una entrada del BRL', () => {
+	it('manda createBrlEntry con el id fijado aquí y confirma releyendo el JSON del día', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		const operation = await queue.enqueueBrl('2026-09-03', '- Llamé al fontanero', TARGET);
+		client.brlJson.mockResolvedValue({
+			ok: true,
+			value: {
+				date: '2026-09-03',
+				entries: [{ id: operation.entryId, time: '11:20', entry: '- Llamé al fontanero' }],
+			},
+		});
+
+		await queue.flush();
+
+		expect(client.mutate).toHaveBeenCalledWith({
+			op: 'createBrlEntry',
+			entryId: operation.entryId,
+			date: '2026-09-03',
+			entry: '- Llamé al fontanero',
+		});
+		expect(client.brlJson).toHaveBeenCalledWith('2026-09-03');
+		// Una entrada del BRL no es una tarea: `getTask` no pinta nada aquí.
+		expect(client.getTask).not.toHaveBeenCalled();
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('si el día releído no trae el id, se queda en sent con un intento más', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		await queue.enqueueBrl('2026-09-03', '= Un pensamiento', TARGET);
+
+		await queue.flush();
+
+		expect(client.brlJson).toHaveBeenCalledTimes(2);
+		expect(storage.operations[0]).toMatchObject({ state: 'sent', attempts: 1 });
+	});
+});
+
+describe('OperationQueue: un lote aprobado', () => {
+	const OPS: BatchOperation[] = [
+		{ type: 'create', clientTaskId: 'nueva-1', draft: { title: 'Uno' } },
+		{ type: 'mutateRaw', taskId: 'task-9', kind: 'complete', payload: { done: true } },
+	];
+
+	it('manda las ops por batch y confirma releyendo las tareas creadas', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		await queue.enqueueBatch(OPS, ['nueva-1'], TARGET);
+
+		await queue.flush();
+
+		expect(client.batch).toHaveBeenCalledWith(OPS);
+		expect(client.getTasksByIds).toHaveBeenCalledWith(['nueva-1']);
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('un informe con una op en rojo NO se da por enviado', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.batch.mockResolvedValue({
+			ok: true,
+			value: [
+				{ index: 0, type: 'ingest', ok: true },
+				{ index: 1, type: 'mutate', ok: false, error: 'kind inválido' },
+			],
+		});
+		const queue = queueWith(client, storage);
+		await queue.enqueueBatch(OPS, ['nueva-1'], TARGET);
+
+		await queue.flush();
+
+		// `/api/batch` responde 200 con éxito PARCIAL: el 200 no es la señal.
+		expect(storage.operations[0]?.state).toBe('rejected');
+		expect(storage.operations[0]?.sentAt).toBeNull();
+	});
+
+	it('un lote sin altas se confirma sin releer nada', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		await queue.enqueueBatch([OPS[1] as BatchOperation], [], TARGET);
+
+		await queue.flush();
+
+		expect(client.getTasksByIds).not.toHaveBeenCalled();
+		expect(storage.operations[0]?.state).toBe('materialized');
 	});
 });

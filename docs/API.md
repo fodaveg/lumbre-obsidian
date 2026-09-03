@@ -35,9 +35,19 @@ Dos reglas que explican por qué la API hace lo que hace:
 | `on(evento, handler): () => void` | Se apunta a un evento. Devuelve cómo darse de baja. |
 
 `LumbreTask` lleva `id`, `content`, `notes`, `date`, `someday`, `time`, `deadline`, `priority`
-(`p1`…`p4`), `done`, `cancelledAt`, `archivedAt`, `list`, `section` y `parentId`. Ojo: hoy
-`GET /api/tasks` no manda `someday`, `time` ni `rolloverCount`, así que esos tres salen en su valor
-por defecto. No los leas como «no tiene hora»: significan «el servidor no lo dice».
+(`p1`…`p4`), `done`, `cancelledAt`, `archivedAt`, `list`, `section`, `rolloverCount`, `parentId` y,
+cuando el servidor los cuenta, `attachmentCount`.
+
+`someday`, `time` y `rolloverCount` los **sirve** Lumbre desde su SHA `861cfb4d`. Contra un servidor
+anterior salen en su valor por defecto (`false`, `null` y `0`), y ahí no los leas como «no tiene
+hora»: significan «el servidor no lo dice».
+
+`attachmentCount` es **opcional a propósito**: ausente significa que la respuesta no traía el array
+`attachments`, no que la tarea no tenga ninguno. `0` sí es un dato.
+
+`LumbreList` lleva `id`, `name`, `icon`, `color`, `parentListId`, `pinned` y `taskCount`. Mismo
+criterio: los cuatro de en medio los sirve Lumbre desde ese SHA, y sus valores por defecto (`null`
+los tres primeros, `false` en `pinned`) cubren un servidor anterior.
 
 ### `createTask(draft, target?)`
 

@@ -47,6 +47,11 @@ export interface NoteTasksHost {
 	hasToken(): Promise<boolean>;
 	openSettings(): void;
 	openSendModal(file: TFile | null): void;
+	/**
+	 * Abre el selector de fichero y sube el elegido como adjunto de la tarea. La
+	 * subida NO va por la cola: un binario no se persiste en `data.json`.
+	 */
+	attachFile(task: LumbreTask): void;
 	/** El `lumbre-list` de la nota, o `null`. */
 	noteListId(file: TFile): string | null;
 	/** Avisa cuando cambian la cola o los vínculos. Devuelve cómo desuscribirse. */
@@ -256,6 +261,17 @@ export class NoteTasksView extends ItemView {
 			},
 		});
 
+		// Una tarea que todavía no existe en Lumbre no puede tener adjuntos: el
+		// servidor rechaza con 404 un `taskId` que no encuentra vivo.
+		const attach = this.button(row.actions, {
+			text: 'Adjuntar fichero…',
+			icon: 'paperclip',
+			onClick: () => {
+				this.host.attachFile(link.task);
+			},
+		});
+		attach.disabled = link.syncState !== 'materialized';
+
 		if (operation !== undefined && operation.state === 'recoverable_error') {
 			this.button(row.actions, {
 				text: 'Reintentar',
@@ -346,6 +362,18 @@ export class NoteTasksView extends ItemView {
 		}
 		if (task.date !== null) {
 			meta.createSpan({ cls: 'lumbre-task__meta-item', text: task.date });
+		}
+		// Solo cuando la API lo dice: `undefined` es "el servidor no lo cuenta", no
+		// "no tiene ninguno". Y un cero no se pinta, que no aporta nada.
+		if (task.attachmentCount !== undefined && task.attachmentCount > 0) {
+			const attachments = meta.createSpan({ cls: 'lumbre-task__meta-item' });
+			const icon = attachments.createSpan({ cls: 'lumbre-block__icon' });
+			setIcon(icon, 'paperclip');
+			attachments.createSpan({ text: String(task.attachmentCount) });
+			attachments.setAttribute(
+				'aria-label',
+				task.attachmentCount === 1 ? '1 adjunto' : `${task.attachmentCount} adjuntos`,
+			);
 		}
 
 		const actions = row.createDiv({ cls: 'lumbre-task__actions' });

@@ -30,16 +30,30 @@ export interface ChipState {
 /**
  * La operación de la cola que afecta a esta tarea, o `undefined`. Para un
  * `create` el id de la tarea ES el `clientTaskId`: lo fija el plugin antes de
- * enviar, así que el vínculo ya puede apuntar a él.
+ * enviar, así que el vínculo ya puede apuntar a él. Un `batch` afecta a las
+ * tareas que crea, cuyos ids también fija el plugin.
+ *
+ * Una operación de BRL no afecta a ninguna tarea: una entrada del registro no
+ * lo es.
  */
 export function pendingOperationFor(
 	operations: readonly QueuedOperation[],
 	taskId: string,
 ): QueuedOperation | undefined {
-	return operations.find(
-		(operation) =>
-			(operation.kind === 'create' ? operation.clientTaskId : operation.taskId) === taskId,
-	);
+	return operations.find((operation) => affectsTask(operation, taskId));
+}
+
+function affectsTask(operation: QueuedOperation, taskId: string): boolean {
+	switch (operation.kind) {
+		case 'create':
+			return operation.clientTaskId === taskId;
+		case 'status':
+			return operation.taskId === taskId;
+		case 'batch':
+			return operation.createdTaskIds.includes(taskId);
+		case 'brl':
+			return false;
+	}
 }
 
 /** Etiqueta y motivo del chip. La operación en curso gana sobre el vínculo. */
