@@ -17,7 +17,7 @@
  * no toca el vault y no escribe nada. Se prueba entero con Vitest.
  */
 
-import { describeFailure, REQUESTS_PER_MINUTE_WARN, type LumbreClient } from '../lumbre/client';
+import { describeFailure, MAX_TASKS_LIMIT, REQUESTS_PER_MINUTE_WARN, type LumbreClient } from '../lumbre/client';
 import type { Logger } from '../diagnostics/logger';
 import { taskDeepLinks, type LumbreTask } from '../lumbre/types';
 
@@ -149,7 +149,7 @@ async function staleSection(
 	const title = 'Vencidas y arrastradas';
 	const threshold = options.rolloverThreshold ?? ROLLOVER_THRESHOLD;
 
-	const overdue = await deps.client.listTasks({ scope: 'overdue', notes: 'none' });
+	const overdue = await deps.client.listTasks({ scope: 'overdue', notes: 'none', limit: MAX_TASKS_LIMIT });
 	if (!overdue.ok) {
 		return failedSection(title, 'las vencidas', describeFailure(overdue.reason, overdue.status));
 	}
@@ -161,7 +161,7 @@ async function staleSection(
 		lines.push(taskLine(task, threshold));
 	}
 
-	const pool = await deps.client.listTasks({ scope: 'all', notes: 'none' });
+	const pool = await deps.client.listTasks({ scope: 'all', notes: 'none', limit: MAX_TASKS_LIMIT });
 	if (!pool.ok) {
 		lines.push(`Arrastradas: ${describeFailure(pool.reason, pool.status)}`);
 		return { title, lines, failed: false };
@@ -205,7 +205,7 @@ async function listsWithoutNextActionSection(deps: WeeklySnapshotDeps): Promise<
 	const unreadable: string[] = [];
 	for (const [index, list] of lists.value.entries()) {
 		if (index > 0) await deps.wait(LIST_REQUEST_INTERVAL_MS);
-		const read = await deps.client.listTasks({ list: list.name, scope: 'all', notes: 'none' });
+		const read = await deps.client.listTasks({ list: list.name, scope: 'all', notes: 'none', limit: MAX_TASKS_LIMIT });
 		if (!read.ok) {
 			unreadable.push(oneLine(list.name));
 			continue;
@@ -236,7 +236,7 @@ async function somedaySection(
 ): Promise<Section> {
 	const title = 'Muestra de Algún día';
 
-	const read = await deps.client.listTasks({ scope: 'someday', notes: 'none' });
+	const read = await deps.client.listTasks({ scope: 'someday', notes: 'none', limit: MAX_TASKS_LIMIT });
 	if (!read.ok) {
 		return failedSection(title, 'Algún día', describeFailure(read.reason, read.status));
 	}

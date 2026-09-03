@@ -178,9 +178,9 @@ describe('buildWeeklySnapshot: listas sin próxima acción', () => {
 
 		expect(body).toEqual(['- Casa · 2 pendientes']);
 		expect(calls.filter((params) => params.list !== undefined)).toEqual([
-			{ list: 'Casa', scope: 'all', notes: 'none' },
-			{ list: 'Trabajo', scope: 'all', notes: 'none' },
-			{ list: 'Vacía', scope: 'all', notes: 'none' },
+			{ list: 'Casa', scope: 'all', notes: 'none', limit: 500 },
+			{ list: 'Trabajo', scope: 'all', notes: 'none', limit: 500 },
+			{ list: 'Vacía', scope: 'all', notes: 'none', limit: 500 },
 		]);
 	});
 
