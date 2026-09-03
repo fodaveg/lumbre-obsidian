@@ -9,8 +9,15 @@
  *
  * No importa `obsidian`: persiste a través de `QueueStorage`, que implementa
  * `PluginStore`.
+ *
+ * Todo lo que pasa aquí se apunta en el registro de diagnóstico si se le
+ * inyecta un logger: cada cambio de estado con su motivo, cada `flush()` con
+ * cuántas operaciones movió, y los dos casos que suelen ser la explicación de
+ * "no se ha enviado nada" (una operación agotada y una cola llena de
+ * operaciones de OTRO dispositivo).
  */
 
+import type { Logger } from '../diagnostics/logger';
 import type {
 	BatchOperation,
 	LumbreClient,
@@ -155,10 +162,18 @@ export interface OperationQueueOptions {
 	 * los bloques, para que la casilla se asiente en todos a la vez.
 	 */
 	onMaterialized?: (operation: QueuedOperation) => void;
+	/** Registro de diagnóstico. Sin él, la cola no apunta nada. */
+	logger?: Logger;
 }
 
 /** Intentos fallidos tras los cuales la operación solo se reintenta a mano. */
 export const MAX_ATTEMPTS = 5;
+
+/**
+ * Fallos recuperables a partir de los cuales el aviso sube a `warn`: uno es
+ * ruido de red, tres seguidos ya es un patrón que hay que mirar.
+ */
+export const WARN_AFTER_ATTEMPTS = 3;
 
 /** Espera antes de la SEGUNDA relectura, cuando la primera no encuentra la tarea. */
 export const REREAD_DELAY_MS = 1000;
@@ -172,9 +187,11 @@ const PERMANENT_REASONS: ReadonlySet<FailureReason> = new Set<FailureReason>([
 export class OperationQueue {
 	private readonly sleep: (ms: number) => Promise<void>;
 	private readonly now: () => Date;
+	private readonly log: Logger | null;
 	private inFlight: Promise<void> | null = null;
 
 	constructor(private readonly options: OperationQueueOptions) {
+		this.log = options.logger ?? null;
 		// `window.setTimeout` y no `setTimeout` a secas: en una ventana emergente de
 		// Obsidian el temporizador tiene que ser el de ESA ventana. Los tests
 		// inyectan el suyo, así que esta rama no corre fuera del plugin.
@@ -198,6 +215,7 @@ export class OperationQueue {
 			task: null,
 		};
 		await this.append(operation);
+		this.logEnqueued(operation, { listId: draft.listId ?? null, subtasks: draft.subtasks?.length ?? 0 });
 		return operation;
 	}
 
@@ -212,6 +230,7 @@ export class OperationQueue {
 			task: null,
 		};
 		await this.append(operation);
+		this.logEnqueued(operation, { taskId, done });
 		return operation;
 	}
 
@@ -229,6 +248,8 @@ export class OperationQueue {
 			target,
 		};
 		await this.append(operation);
+		// El TEXTO de la entrada no se apunta: es lo que el usuario ha escrito.
+		this.logEnqueued(operation, { date, length: entry.length });
 		return operation;
 	}
 
@@ -250,6 +271,7 @@ export class OperationQueue {
 			tasks: null,
 		};
 		await this.append(operation);
+		this.logEnqueued(operation, { ops: ops.length, creates: createdTaskIds.length });
 		return operation;
 	}
 
@@ -263,6 +285,15 @@ export class OperationQueue {
 	}
 
 	/**
+	 * TODAS las operaciones de este dispositivo, materializadas incluidas. Lo lee
+	 * el informe de diagnóstico, que necesita el recuento por estado y las
+	 * últimas diez tal cual están.
+	 */
+	snapshot(): QueuedOperation[] {
+		return this.mine();
+	}
+
+	/**
 	 * Devuelve una operación parada al camino: pone los intentos a cero y borra el
 	 * motivo del fallo. Si el servidor ya la había aceptado (`sentAt`), vuelve a
 	 * `sent` para que el siguiente `flush()` la RELEA en vez de reenviarla.
@@ -271,11 +302,13 @@ export class OperationQueue {
 		const operations = this.read();
 		const operation = operations.find((candidate) => candidate.id === id);
 		if (operation === undefined) return;
+		const from = operation.state;
 		operation.attempts = 0;
 		operation.error = null;
 		operation.state = operation.sentAt !== null ? 'sent' : 'pending_local';
 		operation.updatedAt = this.stamp();
 		await this.write(operations);
+		this.logTransition(operation, from, 'Reintento a mano');
 	}
 
 	/** Saca una operación de la cola. No deshace nada en Lumbre. */
@@ -284,6 +317,7 @@ export class OperationQueue {
 		const remaining = operations.filter((operation) => operation.id !== id);
 		if (remaining.length === operations.length) return;
 		await this.write(remaining);
+		this.log?.info('Operación descartada de la cola', { id, remaining: remaining.length });
 	}
 
 	/**
@@ -304,17 +338,39 @@ export class OperationQueue {
 	}
 
 	private async runFlush(): Promise<void> {
-		for (const operation of this.mine()) {
-			if (!isActionable(operation)) continue;
+		const startedAt = this.now().getTime();
+		const all = this.read();
+		const mine = all.filter((operation) => operation.deviceId === this.options.storage.deviceId);
+		const foreign = all.length - mine.length;
+		if (foreign > 0) {
+			// Con el id NO: identifica al otro dispositivo y no hace falta para nada.
+			this.log?.warn('Operaciones de otro dispositivo, se saltan', { count: foreign });
+		}
 
+		const actionable = mine.filter((operation) => isActionable(operation));
+		this.log?.debug('Flush empezado', { actionable: actionable.length, queued: all.length });
+
+		let processed = 0;
+		let stopped: string | null = null;
+		for (const operation of actionable) {
 			const outcome = await this.process(operation);
+			processed += 1;
 			// Sin token no ha llegado a haber petición: no se gasta un intento ni se
 			// marca nada, la cola se queda tal cual hasta que haya token.
-			if (outcome === 'no_token') return;
 			// Con 429 se para el flush entero: seguir con las demás solo gasta cupo
 			// contra un servidor que acaba de decir que espere.
-			if (outcome === 'rate_limited') return;
+			if (outcome !== null) {
+				stopped = outcome;
+				break;
+			}
 		}
+
+		this.log?.info('Flush terminado', {
+			processed,
+			pending: this.pending().length,
+			ms: this.now().getTime() - startedAt,
+			...(stopped === null ? {} : { stopped }),
+		});
 	}
 
 	/** Devuelve por qué se ha parado el flush, o `null` si se puede seguir. */
@@ -326,6 +382,7 @@ export class OperationQueue {
 			operation.state = 'sent';
 			operation.error = null;
 			await this.persist(operation);
+			this.logTransition(operation, 'pending_local', 'Lumbre aceptó el envío');
 		}
 
 		const flushed = await this.options.client.flush();
@@ -345,6 +402,7 @@ export class OperationQueue {
 			operation.error = 'Lumbre aceptó la operación pero todavía no aparece al releer.';
 			operation.updatedAt = this.stamp();
 			await this.persist(operation);
+			this.logTransition(operation, 'sent', 'Aceptada pero todavía no aparece al releer');
 		}
 		return null;
 	}
@@ -395,10 +453,12 @@ export class OperationQueue {
 			const read = await this.reread(operation);
 			if (read !== 'missing' && read !== 'confirmed') return read;
 			if (read === 'confirmed') {
+				const from = operation.state;
 				operation.state = 'materialized';
 				operation.error = null;
 				operation.updatedAt = this.stamp();
 				await this.persist(operation);
+				this.logTransition(operation, from, 'Confirmada al releer', { reread: attempt + 1 });
 				this.options.onMaterialized?.(operation);
 				return 'materialized';
 			}
@@ -455,8 +515,12 @@ export class OperationQueue {
 		operation: QueuedOperation,
 		failure: LumbreFailure,
 	): Promise<'no_token' | 'rate_limited' | null> {
-		if (failure.reason === 'no_token') return 'no_token';
+		if (failure.reason === 'no_token') {
+			this.log?.debug('Flush parado: no hay token', { id: operation.id, kind: operation.kind });
+			return 'no_token';
+		}
 
+		const from = operation.state;
 		operation.error = failureText(failure);
 		operation.updatedAt = this.stamp();
 		if (PERMANENT_REASONS.has(failure.reason)) {
@@ -466,7 +530,50 @@ export class OperationQueue {
 			operation.attempts += 1;
 		}
 		await this.persist(operation);
+
+		// Tres escalones, y cada uno dice una cosa distinta: uno recuperable es
+		// ruido; el tercero es un patrón; el que agota los intentos ya no se va a
+		// enviar solo nunca más, y eso es lo que hay que ver en el informe.
+		const level =
+			operation.state === 'rejected' || operation.attempts >= MAX_ATTEMPTS
+				? 'error'
+				: operation.attempts >= WARN_AFTER_ATTEMPTS
+					? 'warn'
+					: 'info';
+		this.logTransition(operation, from, operation.error, { reason: failure.reason }, level);
 		return failure.reason === 'rate_limited' ? 'rate_limited' : null;
+	}
+
+	// ── Registro ─────────────────────────────────────────────────────────────
+
+	private logEnqueued(operation: QueuedOperation, data: Record<string, unknown>): void {
+		this.log?.info('Operación encolada', {
+			id: operation.id,
+			kind: operation.kind,
+			...data,
+		});
+	}
+
+	/**
+	 * Un cambio de estado. Lleva SIEMPRE `from` y `to`: leyendo el registro, una
+	 * transición sin su origen no dice si algo se reintentó o si nació ya así.
+	 */
+	private logTransition(
+		operation: QueuedOperation,
+		from: OperationState,
+		reason: string,
+		data: Record<string, unknown> = {},
+		level: 'debug' | 'info' | 'warn' | 'error' = 'info',
+	): void {
+		this.log?.event(level, 'Operación de la cola', {
+			id: operation.id,
+			kind: operation.kind,
+			from,
+			to: operation.state,
+			attempts: operation.attempts,
+			reason,
+			...data,
+		});
 	}
 
 	private newBase(): OperationBase {

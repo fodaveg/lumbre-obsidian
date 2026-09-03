@@ -8,6 +8,7 @@ import type {
 	LumbreResult,
 	MutationOp,
 } from './client';
+import { Logger } from '../diagnostics/logger';
 import {
 	MAX_ATTEMPTS,
 	OperationQueue,
@@ -463,5 +464,105 @@ describe('OperationQueue: un lote aprobado', () => {
 
 		expect(client.getTasksByIds).not.toHaveBeenCalled();
 		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+});
+
+describe('OperationQueue: registro de diagnóstico', () => {
+	function loggedQueue(
+		client: ReturnType<typeof fakeClient>,
+		storage: QueueStorage,
+	): { queue: OperationQueue; logger: Logger } {
+		const logger = Logger.create({ console: null, level: 'info' });
+		const queue = new OperationQueue({
+			client,
+			storage,
+			sleep: vi.fn(async (_ms: number): Promise<void> => undefined),
+			logger: logger.child('queue'),
+		});
+		return { queue, logger };
+	}
+
+	it('apunta el encolado y la transición hasta materializar, con from → to', async () => {
+		const storage = memoryStorage();
+		const { queue, logger } = loggedQueue(fakeClient(), storage);
+
+		await queue.enqueueCreate({ title: 'Comprar pan' }, TARGET);
+		await queue.flush();
+
+		const messages = logger.recent().map((event) => event.message);
+		expect(messages).toContain('Operación encolada');
+		expect(messages).toContain('Flush terminado');
+
+		const transitions = logger
+			.recent()
+			.filter((event) => event.message === 'Operación de la cola')
+			.map((event) => event.data);
+		expect(transitions).toContainEqual(
+			expect.objectContaining({ from: 'pending_local', to: 'sent' }),
+		);
+		expect(transitions).toContainEqual(
+			expect.objectContaining({ from: 'sent', to: 'materialized', attempts: 0 }),
+		);
+	});
+
+	it('un fallo permanente sale como `error` con su motivo', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue(failure('bad_request', 400));
+		const { queue, logger } = loggedQueue(client, storage);
+
+		await queue.enqueueStatus('task-1', true, TARGET);
+		await queue.flush();
+
+		const rejected = logger
+			.recent()
+			.find((event) => event.message === 'Operación de la cola' && event.level === 'error');
+		expect(rejected?.data).toMatchObject({ to: 'rejected', reason: 'bad_request' });
+	});
+
+	it('avisa al tercer fallo recuperable y da error al agotar los intentos', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue(failure('network'));
+		const { queue, logger } = loggedQueue(client, storage);
+		await queue.enqueueStatus('task-1', true, TARGET);
+
+		for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) await queue.flush();
+
+		const levels = logger
+			.recent()
+			.filter((event) => event.message === 'Operación de la cola')
+			.map((event) => event.level);
+		expect(levels.slice(0, 2)).toEqual(['info', 'info']);
+		expect(levels).toContain('warn');
+		expect(levels.at(-1)).toBe('error');
+	});
+
+	it('avisa de las operaciones de OTRO dispositivo con el número, no con su id', async () => {
+		const storage = memoryStorage();
+		const otherQueue = new OperationQueue({
+			client: fakeClient(),
+			storage: asDevice(storage, 'device-b'),
+		});
+		await otherQueue.enqueueStatus('task-9', true, TARGET);
+		const { queue, logger } = loggedQueue(fakeClient(), storage);
+
+		await queue.flush();
+
+		const warning = logger
+			.recent()
+			.find((event) => event.message === 'Operaciones de otro dispositivo, se saltan');
+		expect(warning?.data).toEqual({ count: 1 });
+		expect(JSON.stringify(warning?.data)).not.toContain('device-b');
+	});
+
+	it('el texto de una entrada del BRL no entra en el registro', async () => {
+		const storage = memoryStorage();
+		const { queue, logger } = loggedQueue(fakeClient(), storage);
+
+		await queue.enqueueBrl('2026-09-03', '- lo que escribí en mi registro privado', TARGET);
+
+		expect(JSON.stringify(logger.recent())).not.toContain('registro privado');
+		expect(logger.recent()[0]?.data).toMatchObject({ kind: 'brl', length: 39 });
 	});
 });

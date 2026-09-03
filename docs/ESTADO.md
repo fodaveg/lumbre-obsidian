@@ -1,6 +1,6 @@
 # Estado
 
-- **Versión**: 0.1.2 (publicada para BRAT).
+- **Versión**: 0.1.4 (publicada para BRAT).
 - **Qué hay**: esqueleto del plugin, ajustes (origen + token), botón de prueba de conexión, gate
   `npm run check`, CI y workflow de release para BRAT con los tres assets sueltos.
 - **Qué hay (lote A)**: cliente HTTP completo (`listTasks`, `getTask`, `getTasksByIds`, `listLists`,
@@ -81,6 +81,54 @@
   - «Insertar el BRL de hoy» NO sirve una lectura vieja si la relectura falla, a diferencia del
     bloque: eso escribe en la nota, y un texto de hace media hora pegado en el fichero ya no se
     distingue del de ahora.
+- **Qué hay (lote F, el registro de diagnóstico)**:
+  - `src/diagnostics/logger.ts`: `Logger` con cuatro niveles, `child(module)` para etiquetar la
+    pieza (`http`, `queue`, `links`, `cache`, `block`, `panel`, `modal`, `api`, `settings`, `vault`,
+    `main`) y salida DOBLE: consola filtrada por el nivel de Ajustes, y buffer circular de 1000
+    eventos SIEMPRE, con independencia del nivel.
+  - `src/diagnostics/redact.ts`: sustituye el token (y cualquier secreto) por `«token»` en cadenas,
+    claves y valores anidados; tapa el valor de las claves prohibidas (todo lo que acabe en
+    `authorization`, `token`, `apikey`, `bearer`, `password` o `secret`); recorta las cadenas a 200
+    caracteres y aguanta ciclos, arrays largos y valores no serializables.
+  - `src/diagnostics/errors.ts`: `describeError` (`name`, `message`, `status?`, `reason?`), con
+    stack solo cuando se pide, o sea solo en `debug`.
+  - `src/diagnostics/report.ts`: `buildReport()`, el texto plano que se copia. Entorno, conexión,
+    cola por estado con las 10 últimas operaciones, vínculos, cachés con la edad de la entrada más
+    vieja y los últimos N eventos (300 por defecto).
+  - `src/diagnostics/unhandled.ts`: `guarded(logger, acción, fn)` para los callbacks que el plugin
+    registra, y `unhandledEvent` para los `error` y `unhandledrejection` de la ventana.
+  - `src/diagnostics/log-files.ts`: los informes guardados (`logs/lumbre-<fecha>-<hora>.log`, los 10
+    últimos) y el registro en vivo (`logs/lumbre-live.log`, rotación a 1 MB con una vuelta anterior).
+  - `src/diagnostics/diagnostics-modal.ts` y el comando **Mostrar diagnóstico**.
+  - Instrumentado: cliente (una línea por petición con método, ruta sin origen, status, ms y bytes;
+    aviso a los 3 s y al pasar de 100 peticiones por minuto), cola (cada transición con `from → to`,
+    intentos y motivo, y cada `flush`), vínculos, las dos cachés, los dos bloques, el panel, los
+    modales, los ajustes y la API pública.
+  - Ajustes: sección «Diagnóstico» con el nivel, «Copiar registro», «Guardar registro en el vault»,
+    el interruptor del registro en fichero y un resumen de estado de dos líneas.
+  - API pública: `api.diagnostics.report()` y `api.diagnostics.events(n)`.
+- **Decisiones del lote F**:
+  - El buffer se llena con TODO, también con los `debug`, aunque el nivel sea `info`. El nivel solo
+    filtra la consola. Si filtrara el buffer, «Copiar registro» tras un fallo traería justo lo que
+    no sirve: los eventos posteriores a subir el nivel, nunca los de antes.
+  - El token vive además en memoria (`secrets` de `main.ts`) porque `redact` es SÍNCRONO y
+    `tokenStore.get()` no. Es la única forma de COMPROBAR que un evento no lo lleva, en vez de
+    confiar en que cada llamador se acuerde. El almacén del token va envuelto para que un cambio en
+    los ajustes actualice esa copia.
+  - Nada de lo que escribe el usuario entra en `info`: ni el título de una tarea (solo en `debug` y
+    recortado a 80), ni el texto de una entrada del BRL, ni lo que se busca en el panel, ni el texto
+    que se manda a Soplo. De ellos van el recuento y la longitud. Sí van las RUTAS de las notas y el
+    texto de la consulta de un bloque: la ruta es lo que identifica un vínculo y la consulta es una
+    instrucción al plugin, no contenido.
+  - `guarded` NO relanza. Relanzar desde un handler de Obsidian no arregla nada y se lleva por
+    delante lo que viniera detrás; lo que faltaba era el contexto, y eso es lo que apunta.
+  - Los errores de la ventana se filtran por la marca `plugin:lumbre` del stack. Sin ella son de
+    otro plugin y solo se apuntan en `debug`: la consola de Obsidian es de todos.
+  - `PLUGIN_DATA_VERSION` sube a 2 por los dos ajustes nuevos (`logLevel`, `liveLog`). Un
+    `data.json` de la 1 los estrena en su valor por defecto sin perder nada, y `PluginStore` guarda
+    de qué versión venía para poder apuntarlo al arrancar.
+  - El nombre del fichero de informe lleva la hora como `HHMMSS`, sin dos puntos: un `:` en un
+    nombre dentro del vault mete a Obsidian Sync en bucle.
 - **Qué falta**: la decisión de dónde vive el token; las tareas están en la lista `lumbre-obsidian`
   de Lumbre, no aquí.
 - **Decisiones del lote B**: las listas se cachean en memoria cinco minutos (`ListCache`), no en

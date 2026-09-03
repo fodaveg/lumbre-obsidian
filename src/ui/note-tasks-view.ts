@@ -16,6 +16,7 @@
 
 import { ItemView, Notice, Platform, setIcon, type TFile, type WorkspaceLeaf } from 'obsidian';
 
+import type { Logger } from '../diagnostics/logger';
 import type { LinkStore, LumbreTaskLink } from '../links/link-store';
 import { describeFailure, type LumbreClient } from '../lumbre/client';
 import type { ListCache } from '../lumbre/list-cache';
@@ -56,6 +57,8 @@ export interface NoteTasksHost {
 	noteListId(file: TFile): string | null;
 	/** Avisa cuando cambian la cola o los vínculos. Devuelve cómo desuscribirse. */
 	onDataChange(listener: () => void): () => void;
+	/** Registro de diagnóstico, ya etiquetado como `panel`. */
+	logger: Logger;
 }
 
 /** Lo cargado de la lista de proyecto de la nota. */
@@ -147,6 +150,10 @@ export class NoteTasksView extends ItemView {
 		this.searchResults = null;
 		this.confirmingUnlink = null;
 		this.project = null;
+		this.host.logger.info('El panel cambia de nota', {
+			notePath: file?.path ?? null,
+			links: file === null ? 0 : this.host.links.linksForNote(file.path).length,
+		});
 		this.render();
 
 		this.hasToken = await this.host.hasToken();
@@ -493,6 +500,11 @@ export class NoteTasksView extends ItemView {
 	/** Completa o reabre. Encola, pinta "Enviando…" y relee cuando la cola acaba. */
 	private async toggleDone(task: LumbreTask, done: boolean): Promise<void> {
 		const file = this.file;
+		this.host.logger.info('Acción del usuario', {
+			action: done ? 'completar tarea' : 'reabrir tarea',
+			taskId: task.id,
+			notePath: file?.path ?? null,
+		});
 		await this.host.queue.enqueueStatus(task.id, done, {
 			notePath: file?.path ?? '',
 			label: file?.basename ?? 'Sin nota',
@@ -507,6 +519,7 @@ export class NoteTasksView extends ItemView {
 	}
 
 	private async retry(operationId: string): Promise<void> {
+		this.host.logger.info('Acción del usuario', { action: 'reintentar', id: operationId });
 		await this.host.queue.retry(operationId);
 		this.render();
 		await this.host.queue.flush();
@@ -515,6 +528,7 @@ export class NoteTasksView extends ItemView {
 	}
 
 	private async unlink(linkId: string): Promise<void> {
+		this.host.logger.info('Acción del usuario', { action: 'desvincular', id: linkId });
 		await this.host.links.unlink(linkId);
 		this.confirmingUnlink = null;
 		this.render();
@@ -535,6 +549,10 @@ export class NoteTasksView extends ItemView {
 		this.searching = false;
 
 		if (!read.ok) {
+			this.host.logger.warn('La búsqueda de tareas falló', {
+				reason: read.reason,
+				status: read.status,
+			});
 			new Notice(`No se pudo buscar en Lumbre. ${describeFailure(read.reason, read.status)}`);
 			this.searchResults = [];
 			this.render();
@@ -542,6 +560,13 @@ export class NoteTasksView extends ItemView {
 		}
 
 		this.searchResults = filterTasks(read.value, this.searchQuery).slice(0, MAX_SEARCH_RESULTS);
+		// El TEXTO buscado no se apunta: lo escribe el usuario y puede ser cualquier
+		// cosa. Cuántas tareas se miraron y cuántas casaron sí.
+		this.host.logger.info('Acción del usuario', {
+			action: 'buscar tareas',
+			scanned: read.value.length,
+			matched: this.searchResults.length,
+		});
 		this.render();
 	}
 
@@ -549,6 +574,11 @@ export class NoteTasksView extends ItemView {
 	private async linkExisting(task: LumbreTask): Promise<void> {
 		const file = this.file;
 		if (file === null) return;
+		this.host.logger.info('Acción del usuario', {
+			action: 'vincular una tarea existente',
+			taskId: task.id,
+			notePath: file.path,
+		});
 		await this.host.links.link(file.path, task, { label: file.basename, excerpt: null });
 		new Notice('Tarea vinculada a esta nota');
 		this.searchResults = null;
@@ -556,6 +586,7 @@ export class NoteTasksView extends ItemView {
 	}
 
 	private openInLumbre(task: LumbreTask): void {
+		this.host.logger.info('Acción del usuario', { action: 'abrir en Lumbre', taskId: task.id });
 		const links = taskDeepLinks(task, this.host.webOrigin());
 		// En escritorio el esquema nativo abre la app de Lumbre; en móvil no hay app
 		// que lo atienda, así que va la web.

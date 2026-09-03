@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { Logger, type LogLevel } from '../diagnostics/logger';
 import {
 	LumbreClient,
 	MAX_ATTACHMENT_BYTES,
+	REQUESTS_PER_MINUTE_WARN,
+	SLOW_REQUEST_MS,
 	type LumbreRequestInit,
 	type LumbreRequestFn,
 	type MutationOp,
@@ -652,5 +655,118 @@ describe('LumbreClient.uploadAttachment', () => {
 
 		expect(result).toEqual({ ok: false, reason: 'bad_request' });
 		expect(calls).toHaveLength(0);
+	});
+});
+
+describe('LumbreClient: registro de diagnóstico', () => {
+	/** Cliente con un logger silencioso, para poder afirmar sobre sus eventos. */
+	function loggedClient(
+		options: { level?: LogLevel; status?: number; token?: string | null; now?: () => number } = {},
+	): { client: LumbreClient; logger: Logger } {
+		const logger = Logger.create({ console: null, level: options.level ?? 'info' });
+		const client = new LumbreClient({
+			apiOrigin: ORIGIN,
+			getToken: async () => (options.token === undefined ? 'tok-123' : options.token),
+			request: async () => ({ status: options.status ?? 200, json: [] }),
+			logger: logger.child('http'),
+			...(options.now === undefined ? {} : { now: options.now }),
+		});
+		return { client, logger };
+	}
+
+	it('apunta UN evento por petición, con método, ruta, status y milisegundos', async () => {
+		const { client, logger } = loggedClient();
+
+		await client.listTasks({ scope: 'today' });
+
+		const events = logger.recent();
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({ level: 'info', module: 'http', message: 'Petición' });
+		expect(events[0]?.data).toMatchObject({ method: 'GET', path: '/api/tasks', status: 200 });
+		expect(typeof events[0]?.data?.['ms']).toBe('number');
+	});
+
+	it('en `info` la ruta va SIN los parámetros de la consulta', async () => {
+		const { client, logger } = loggedClient();
+
+		await client.listTasks({ scope: 'today', list: 'Casa' });
+
+		expect(logger.recent()[0]?.data).not.toHaveProperty('query');
+		expect(logger.recent()[0]?.data?.['path']).toBe('/api/tasks');
+	});
+
+	it('en `debug` sí van los parámetros', async () => {
+		const { client, logger } = loggedClient({ level: 'debug' });
+
+		await client.listTasks({ scope: 'today' });
+
+		expect(logger.recent()[0]?.data?.['query']).toContain('scope=today');
+	});
+
+	it('una petición fallida sale como aviso con su motivo traducido', async () => {
+		const { client, logger } = loggedClient({ status: 401 });
+
+		await client.ping();
+
+		expect(logger.recent()[0]).toMatchObject({ level: 'warn', message: 'Petición fallida' });
+		expect(logger.recent()[0]?.data).toMatchObject({ status: 401 });
+	});
+
+	it('una petición lenta sale como aviso', async () => {
+		let clock = 0;
+		const { client, logger } = loggedClient({
+			now: () => {
+				clock += SLOW_REQUEST_MS;
+				return clock;
+			},
+		});
+
+		await client.ping();
+
+		expect(logger.recent().some((event) => event.message === 'Petición lenta')).toBe(true);
+	});
+
+	it('avisa UNA vez al pasar de las 100 peticiones en un minuto', async () => {
+		const { client, logger } = loggedClient({ now: () => 1000 });
+
+		for (let index = 0; index < REQUESTS_PER_MINUTE_WARN + 5; index += 1) await client.ping();
+
+		const warnings = logger
+			.recent()
+			.filter((event) => event.message === 'Muchas peticiones en un minuto');
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.data).toMatchObject({ limit: REQUESTS_PER_MINUTE_WARN });
+	});
+
+	it('sin token no se gasta petición y queda apuntado en `debug`', async () => {
+		const { client, logger } = loggedClient({ token: null, level: 'debug' });
+
+		await client.ping();
+
+		expect(logger.recent()[0]?.message).toBe('Petición sin token, no se envía');
+	});
+
+	it('guarda la última prueba de conexión, para el informe', async () => {
+		const { client } = loggedClient({ status: 500 });
+
+		expect(client.lastPing).toBeNull();
+		await client.ping();
+
+		expect(client.lastPing).toMatchObject({ ok: false, reason: 'server', status: 500 });
+	});
+
+	it('el token NUNCA sale en un evento, ni siquiera en `debug`', async () => {
+		const secret = 'lum_tok_9f8e7d6c5b4a3210';
+		const logger = Logger.create({ console: null, level: 'debug', secrets: () => [secret] });
+		const client = new LumbreClient({
+			apiOrigin: ORIGIN,
+			getToken: async () => secret,
+			request: async () => ({ status: 200, json: [] }),
+			logger: logger.child('http'),
+		});
+
+		await client.listTasks();
+
+		expect(JSON.stringify(logger.recent())).not.toContain(secret);
 	});
 });

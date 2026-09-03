@@ -16,6 +16,7 @@
 
 import { MarkdownRenderChild, Platform, setIcon } from 'obsidian';
 
+import type { Logger } from '../diagnostics/logger';
 import type { ListCache } from '../lumbre/list-cache';
 import type { OperationQueue, QueuedOperation } from '../lumbre/queue';
 import type { LumbreTask } from '../lumbre/types';
@@ -26,6 +27,7 @@ import {
 	applyClientFilters,
 	describeQuery,
 	parseQuery,
+	queryKey,
 	resolveQuery,
 	type ParsedQuery,
 	type ResolvedQuery,
@@ -48,6 +50,8 @@ export interface TaskBlockHost {
 	noteListId(notePath: string): string | null;
 	/** Avisa cuando cambian la cola o los vínculos. Devuelve cómo desuscribirse. */
 	onDataChange(listener: () => void): () => void;
+	/** Registro de diagnóstico, ya etiquetado como `block`. */
+	logger: Logger;
 }
 
 export class LumbreTaskBlock extends MarkdownRenderChild {
@@ -75,6 +79,13 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		const parsed = parseQuery(this.source);
 		if (!parsed.ok) {
 			this.parseError = parsed.error;
+			// El texto de la consulta SÍ se apunta: es una instrucción al plugin, no
+			// contenido de la nota, y sin él el error no se puede reproducir.
+			this.host.logger.warn('Consulta del bloque no válida', {
+				notePath: this.notePath,
+				error: parsed.error,
+				source: this.source,
+			});
 			this.render();
 			return;
 		}
@@ -90,6 +101,12 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 	/** Al desmontar el bloque se cancela su suscripción a la caché. */
 	onunload(): void {
 		this.unloaded = true;
+		if (this.query !== null) {
+			this.host.logger.debug('Bloque de tareas desmontado', {
+				notePath: this.notePath,
+				key: queryKey(this.query),
+			});
+		}
 		this.unsubscribeCache?.();
 		this.unsubscribeCache = null;
 		this.unsubscribeData?.();
@@ -116,6 +133,12 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 			resolveList: (raw) => this.host.lists.nameFor(raw),
 		});
 		this.query = query;
+		this.host.logger.info('Bloque de tareas montado', {
+			notePath: this.notePath,
+			key: queryKey(query),
+			scope: query.scope,
+			list: query.list,
+		});
 
 		this.unsubscribeCache = this.host.cache.subscribe(query, (snapshot) => {
 			this.snapshot = snapshot;
@@ -153,9 +176,20 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 			return;
 		}
 
+		const startedAt = Date.now();
 		this.renderHeader(root);
-		this.renderBody(root);
+		const painted = this.renderBody(root);
 		this.renderFooter(root);
+
+		// En `debug`: un bloque se repinta con cada cambio de la cola y con cada
+		// edición de la nota, así que en `info` sería un evento por tecla.
+		if (this.query !== null) {
+			this.host.logger.debug('Bloque de tareas pintado', {
+				key: queryKey(this.query),
+				tasks: painted,
+				ms: Date.now() - startedAt,
+			});
+		}
 	}
 
 	private renderHeader(root: HTMLElement): void {
@@ -176,12 +210,13 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		});
 	}
 
-	private renderBody(root: HTMLElement): void {
+	/** Devuelve cuántas tareas ha pintado, que es lo que se apunta en el registro. */
+	private renderBody(root: HTMLElement): number {
 		const snapshot = this.snapshot;
 		const query = this.query;
 		if (snapshot === null || query === null) {
 			root.createDiv({ cls: 'lumbre-empty', text: 'Cargando…' });
-			return;
+			return 0;
 		}
 
 		if (snapshot.fetchedAt === null) {
@@ -191,13 +226,13 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 				cls: snapshot.error === null ? 'lumbre-empty' : 'lumbre-block__error',
 				text: snapshot.error ?? 'Cargando…',
 			});
-			return;
+			return 0;
 		}
 
 		const tasks = applyClientFilters(snapshot.tasks, query);
 		if (tasks.length === 0) {
 			root.createDiv({ cls: 'lumbre-empty', text: 'Nada aquí' });
-			return;
+			return 0;
 		}
 
 		// Todo el listado se construye DESENGANCHADO del documento y entra de una
@@ -219,6 +254,7 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		}
 
 		root.createDiv({ cls: 'lumbre-block__body' }).appendChild(fragment);
+		return tasks.length;
 	}
 
 	private renderTaskList(

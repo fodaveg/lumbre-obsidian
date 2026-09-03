@@ -11,12 +11,19 @@
  * dos dispositivos se creerían el mismo y enviarían las mismas operaciones.
  */
 
+import { isLogLevel } from '../diagnostics/logger';
 import type { LumbreTaskLink } from '../links/link-store';
 import type { QueuedOperation } from '../lumbre/queue';
 import { DEFAULT_SETTINGS, type LumbreSettings } from '../settings';
 
-/** Versión del formato de `data.json`. Sube cuando la forma cambie. */
-export const PLUGIN_DATA_VERSION = 1;
+/**
+ * Versión del formato de `data.json`. Sube cuando la forma cambie.
+ *
+ * - 1: el objeto único (ajustes, token, cola, vínculos, deviceId).
+ * - 2: los ajustes ganan `logLevel` y `liveLog`. Un `data.json` de la 1 los
+ *   estrena en su valor por defecto, sin perder nada.
+ */
+export const PLUGIN_DATA_VERSION = 2;
 
 export interface PluginData {
 	version: number;
@@ -52,6 +59,13 @@ export class PluginStore {
 	/** El objeto entero, ya migrado. Se muta en memoria y se guarda con `save()`. */
 	data: PluginData = emptyData();
 
+	/**
+	 * De qué versión venía lo que había en disco, o `null` si no había nada. Lo
+	 * apunta el registro de diagnóstico al arrancar: una migración que no ocurre
+	 * es una de las explicaciones de "se me han borrado los ajustes".
+	 */
+	migratedFrom: number | null = null;
+
 	private pendingSave: Promise<void> | null = null;
 	private lastWrite: Promise<void> = Promise.resolve();
 
@@ -66,6 +80,7 @@ export class PluginStore {
 	 */
 	async load(): Promise<PluginData> {
 		const raw = await this.host.loadData();
+		this.migratedFrom = versionOf(raw);
 		this.data = migrate(raw);
 		this.data.deviceId = this.resolveDeviceId(this.data.deviceId);
 		return this.data;
@@ -199,12 +214,29 @@ export function migrate(raw: unknown): PluginData {
 	const apiOrigin =
 		asString(settings?.['apiOrigin']) ?? asString(row['apiOrigin']) ?? DEFAULT_SETTINGS.apiOrigin;
 
+	// Los ajustes de diagnóstico entraron en la versión 2. Un `data.json` de la 1
+	// no los trae y estrena los valores por defecto, que es todo lo que hay que
+	// migrar: no se pierde nada de lo anterior.
+	const rawLevel = settings?.['logLevel'];
+	const logLevel = isLogLevel(rawLevel) ? rawLevel : DEFAULT_SETTINGS.logLevel;
+
 	return {
 		version: PLUGIN_DATA_VERSION,
-		settings: { ...DEFAULT_SETTINGS, apiOrigin },
+		settings: { ...DEFAULT_SETTINGS, apiOrigin, logLevel, liveLog: settings?.['liveLog'] === true },
 		token: asString(row['token']),
 		queue: asArray<QueuedOperation>(row['queue']),
 		links: asArray<LumbreTaskLink>(row['links']),
 		deviceId: asString(row['deviceId']),
 	};
+}
+
+/**
+ * La versión que declara lo que hay en disco, o `null` si no hay nada guardado.
+ * El formato viejo (ajustes sueltos en la raíz) no la declara y sale como 0.
+ */
+export function versionOf(raw: unknown): number | null {
+	const row = asRecord(raw);
+	if (row === null) return null;
+	const version = row['version'];
+	return typeof version === 'number' ? version : 0;
 }

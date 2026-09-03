@@ -17,6 +17,7 @@
  * No importa `obsidian`: recibe el cliente por inyección, igual que el resto.
  */
 
+import type { Logger } from '../diagnostics/logger';
 import { describeFailure, type LumbreClient } from '../lumbre/client';
 import type { LumbreTask } from '../lumbre/types';
 import { queryKey, queryParams, type ResolvedQuery } from './query-parser';
@@ -48,6 +49,15 @@ export interface QueryCacheOptions {
 	 * `tasks-changed`: cualquier refresco cuenta, no solo las materializaciones.
 	 */
 	onRefresh?: () => void;
+	/** Registro de diagnóstico. Sin él, la caché no apunta nada. */
+	logger?: Logger;
+}
+
+/** Lo que la caché le dice al informe de diagnóstico. */
+export interface CacheSnapshotStats {
+	entries: number;
+	/** Epoch ms de la lectura buena más VIEJA que sigue guardada, o `null`. */
+	oldestFetchedAt: number | null;
 }
 
 interface CacheEntry {
@@ -73,10 +83,12 @@ export class QueryCache {
 	private readonly entries = new Map<string, CacheEntry>();
 	private readonly ttlMs: number;
 	private readonly now: () => number;
+	private readonly log: Logger | null;
 
 	constructor(private readonly options: QueryCacheOptions) {
 		this.ttlMs = options.ttlMs ?? DEFAULT_QUERY_TTL_MS;
 		this.now = options.now ?? ((): number => Date.now());
+		this.log = options.logger ?? null;
 	}
 
 	/**
@@ -102,13 +114,31 @@ export class QueryCache {
 	 */
 	async get(query: ResolvedQuery, force = false): Promise<QuerySnapshot> {
 		const entry = this.entryFor(query);
-		if (!force && this.isFresh(entry)) return snapshot(entry);
+		if (!force && this.isFresh(entry)) {
+			this.log?.debug('Caché de consultas: acierto', { key: queryKey(query) });
+			return snapshot(entry);
+		}
+		this.log?.debug('Caché de consultas: hay que pedirla', {
+			key: queryKey(query),
+			reason: force ? 'forzada' : entry.stale ? 'invalidada' : 'caducada',
+		});
 		return this.load(entry);
 	}
 
 	/** Marca todas las consultas como caducadas, sin pedir nada todavía. */
-	invalidate(): void {
+	invalidate(reason = 'a mano'): void {
 		for (const entry of this.entries.values()) entry.stale = true;
+		this.log?.debug('Caché de consultas invalidada', { reason, entries: this.entries.size });
+	}
+
+	/** Lo que enseña el informe de diagnóstico. */
+	stats(): CacheSnapshotStats {
+		let oldest: number | null = null;
+		for (const entry of this.entries.values()) {
+			if (entry.fetchedAt === null) continue;
+			if (oldest === null || entry.fetchedAt < oldest) oldest = entry.fetchedAt;
+		}
+		return { entries: this.entries.size, oldestFetchedAt: oldest };
 	}
 
 	/**
@@ -117,9 +147,14 @@ export class QueryCache {
 	 * cola materializa una operación, para que la casilla se asiente en todos los
 	 * bloques que enseñen esa tarea.
 	 */
-	async refreshAll(): Promise<void> {
-		this.invalidate();
+	async refreshAll(reason = 'la cola ha materializado algo'): Promise<void> {
+		this.invalidate(reason);
 		const live = [...this.entries.values()].filter((entry) => entry.listeners.size > 0);
+		this.log?.info('Refresco de las consultas con bloques montados', {
+			reason,
+			queries: live.length,
+			cached: this.entries.size,
+		});
 		await Promise.all(live.map((entry) => this.load(entry)));
 	}
 
@@ -155,7 +190,12 @@ export class QueryCache {
 	/** Una sola petición en vuelo por consulta: las demás esperan a esa. */
 	private async load(entry: CacheEntry): Promise<QuerySnapshot> {
 		const running = entry.inFlight;
-		if (running !== null) return running;
+		if (running !== null) {
+			this.log?.debug('Caché de consultas: petición deduplicada', {
+				key: queryKey(entry.query),
+			});
+			return running;
+		}
 
 		const started = this.fetch(entry);
 		entry.inFlight = started;
@@ -170,6 +210,8 @@ export class QueryCache {
 		entry.loading = true;
 		this.notify(entry);
 
+		const key = queryKey(entry.query);
+		const startedAt = this.now();
 		const read = await this.options.client.listTasks(queryParams(entry.query));
 		entry.loading = false;
 
@@ -178,10 +220,22 @@ export class QueryCache {
 			entry.fetchedAt = this.now();
 			entry.stale = false;
 			entry.error = null;
+			this.log?.info('Consulta leída', {
+				key,
+				tasks: read.value.length,
+				ms: this.now() - startedAt,
+			});
 		} else {
 			// Lo leído NO se borra: sin red se sigue enseñando la última lectura
 			// confirmada con su hora, que es el trato del bloque.
 			entry.error = describeFailure(read.reason, read.status);
+			this.log?.warn('Consulta fallida, se conserva la última lectura', {
+				key,
+				reason: read.reason,
+				status: read.status,
+				hadPrevious: entry.fetchedAt !== null,
+				tasks: entry.tasks.length,
+			});
 		}
 
 		this.notify(entry);

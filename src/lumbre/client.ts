@@ -14,8 +14,15 @@
  *
  * Límite de la API: 120 llamadas por minuto (60/min en `/api/mutations` y en
  * `/api/sync/flush`), así que un 429 es esperable y sale como `rate_limited`.
+ *
+ * El logger también entra por inyección y es OPCIONAL: sin él el cliente
+ * funciona igual, que es lo que hace que los tests que no miran el registro no
+ * tengan que montarlo. Lo que se apunta de cada petición es método, ruta SIN
+ * origen, status, milisegundos y bytes; los parámetros de la consulta solo en
+ * `debug`, y el token en ningún nivel.
  */
 
+import type { Logger } from '../diagnostics/logger';
 import {
 	draftToIngestBody,
 	listsFromApi,
@@ -93,6 +100,22 @@ export interface LumbreClientOptions {
 	/** Devuelve el token personal, o `null` si todavía no hay ninguno guardado. */
 	getToken: () => Promise<string | null>;
 	request: LumbreRequestFn;
+	/** Registro de diagnóstico. Sin él, el cliente no apunta nada. */
+	logger?: Logger;
+	/** Reloj en epoch ms, inyectable para los tests. */
+	now?: () => number;
+}
+
+/**
+ * Resultado de la última prueba de conexión. Lo guarda el cliente porque es el
+ * único sitio por el que pasan todas: el informe de diagnóstico lo lee de aquí.
+ */
+export interface PingRecord {
+	/** ISO 8601 de cuándo se hizo. */
+	at: string;
+	ok: boolean;
+	reason?: FailureReason;
+	status?: number;
 }
 
 /** Parámetros de `GET /api/tasks`, mismos nombres que los del endpoint. */
@@ -263,6 +286,18 @@ export const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
 /** Tope de caracteres del texto que acepta `POST /api/agent` (`MAX_PROMPT_LEN`). */
 export const MAX_AGENT_PROMPT_LENGTH = 4000;
 
+/** A partir de aquí una petición se apunta como lenta. */
+export const SLOW_REQUEST_MS = 3000;
+
+/**
+ * Peticiones por minuto a partir de las cuales se avisa. El límite del servidor
+ * es 120, así que el aviso sale con margen para poder mirar qué las dispara.
+ */
+export const REQUESTS_PER_MINUTE_WARN = 100;
+
+/** Ventana del contador de peticiones. */
+const RATE_WINDOW_MS = 60_000;
+
 export class LumbreClient {
 	/**
 	 * El `flush()` en vuelo, si lo hay. Un solo flush a la vez: los demás
@@ -272,7 +307,27 @@ export class LumbreClient {
 	 */
 	private inFlightFlush: Promise<LumbreResult<void>> | null = null;
 
-	constructor(private readonly options: LumbreClientOptions) {}
+	/** Última prueba de conexión, para el informe de diagnóstico. */
+	private ping_: PingRecord | null = null;
+
+	/** Contador de peticiones de la ventana en curso. */
+	private windowStart = 0;
+	private windowCount = 0;
+	/** El aviso de ritmo sale UNA vez por ventana, no una por petición. */
+	private windowWarned = false;
+
+	private readonly log: Logger | null;
+	private readonly clock: () => number;
+
+	constructor(private readonly options: LumbreClientOptions) {
+		this.log = options.logger ?? null;
+		this.clock = options.now ?? ((): number => Date.now());
+	}
+
+	/** Resultado de la última prueba de conexión, o `null` si no ha habido ninguna. */
+	get lastPing(): PingRecord | null {
+		return this.ping_;
+	}
 
 	/**
 	 * Comprueba que el origen y el token valen: pide una tarea y descarta el cuerpo.
@@ -280,6 +335,11 @@ export class LumbreClient {
 	 */
 	async ping(): Promise<PingResult> {
 		const response = await this.send('GET', '/api/tasks?limit=1&notes=none');
+		this.ping_ = {
+			at: new Date(this.clock()).toISOString(),
+			ok: response.ok,
+			...(response.ok ? {} : { reason: response.reason, status: response.status }),
+		};
 		if (!response.ok) return response;
 		return { ok: true, value: undefined };
 	}
@@ -511,7 +571,10 @@ export class LumbreClient {
 		raw?: RawBody,
 	): Promise<LumbreResult<LumbreResponse>> {
 		const token = await this.options.getToken();
-		if (!token) return { ok: false, reason: 'no_token' };
+		if (!token) {
+			this.log?.debug('Petición sin token, no se envía', { method, path: routeOf(path) });
+			return { ok: false, reason: 'no_token' };
+		}
 
 		const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
 		if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -519,6 +582,9 @@ export class LumbreClient {
 
 		const payload =
 			raw !== undefined ? raw.body : body !== undefined ? JSON.stringify(body) : undefined;
+
+		const startedAt = this.clock();
+		this.countRequest(method, path);
 
 		let response: LumbreResponse;
 		try {
@@ -530,12 +596,74 @@ export class LumbreClient {
 				throw: false,
 			});
 		} catch {
+			// El error de red se traga a propósito: puede llevar la URL entera y no
+			// aporta nada más allá de "no se pudo conectar".
+			this.logRequest(method, path, startedAt, { reason: 'network' });
 			return { ok: false, reason: 'network' };
 		}
 
 		const failure = failureForStatus(response.status);
+		this.logRequest(method, path, startedAt, {
+			status: response.status,
+			bytes: bytesOf(response),
+			...(failure === null ? {} : { reason: failure.reason }),
+		});
 		if (failure !== null) return failure;
 		return { ok: true, value: response };
+	}
+
+	/**
+	 * UN evento por petición, que es el trato del nivel `info`. Los parámetros de
+	 * la consulta solo se apuntan en `debug`: son instrucciones al servidor, no
+	 * contenido de una nota, pero engordan el registro sin hacer falta casi nunca.
+	 */
+	private logRequest(
+		method: string,
+		path: string,
+		startedAt: number,
+		outcome: { status?: number; bytes?: number; reason?: FailureReason },
+	): void {
+		const logger = this.log;
+		if (logger === null) return;
+
+		const ms = this.clock() - startedAt;
+		const data: Record<string, unknown> = { method, path: routeOf(path), ms };
+		if (outcome.status !== undefined) data['status'] = outcome.status;
+		if (outcome.bytes !== undefined) data['bytes'] = outcome.bytes;
+		if (outcome.reason !== undefined) data['reason'] = describeFailure(outcome.reason, outcome.status);
+		if (logger.enabled('debug')) {
+			const query = queryOf(path);
+			if (query !== null) data['query'] = query;
+		}
+
+		if (outcome.reason !== undefined) logger.warn('Petición fallida', data);
+		else if (ms >= SLOW_REQUEST_MS) logger.warn('Petición lenta', data);
+		else logger.info('Petición', data);
+	}
+
+	/**
+	 * Cuenta las peticiones por minuto y avisa al pasar de `REQUESTS_PER_MINUTE_WARN`.
+	 * El límite del servidor es 120, así que este aviso es lo que da tiempo a ver
+	 * qué las está disparando antes de comerse los 429.
+	 */
+	private countRequest(method: string, path: string): void {
+		const now = this.clock();
+		if (now - this.windowStart >= RATE_WINDOW_MS) {
+			this.windowStart = now;
+			this.windowCount = 0;
+			this.windowWarned = false;
+		}
+		this.windowCount += 1;
+		if (this.windowCount <= REQUESTS_PER_MINUTE_WARN || this.windowWarned) return;
+
+		this.windowWarned = true;
+		this.log?.warn('Muchas peticiones en un minuto', {
+			count: this.windowCount,
+			limit: REQUESTS_PER_MINUTE_WARN,
+			serverLimit: 120,
+			method,
+			path: routeOf(path),
+		});
 	}
 
 	private origin(): string {
@@ -621,6 +749,31 @@ function failureForStatus(status: number): LumbreFailure | null {
 	if (status === 401 || status === 403) return { ok: false, reason: 'unauthorized', status };
 	if (status === 429) return { ok: false, reason: 'rate_limited', status };
 	return { ok: false, reason: 'server', status };
+}
+
+/** La ruta sin sus parámetros: lo que se apunta en el registro por defecto. */
+function routeOf(path: string): string {
+	const mark = path.indexOf('?');
+	return mark < 0 ? path : path.slice(0, mark);
+}
+
+/** Los parámetros de la consulta, o `null` si no los hay. Solo se apuntan en `debug`. */
+function queryOf(path: string): string | null {
+	const mark = path.indexOf('?');
+	return mark < 0 ? null : path.slice(mark + 1);
+}
+
+/**
+ * Bytes del cuerpo de la respuesta, si se pueden saber. El `text` de
+ * `requestUrl` es un getter que puede lanzar (una respuesta binaria, un cuerpo
+ * vacío), así que se lee dentro de un try como todo lo demás.
+ */
+function bytesOf(response: LumbreResponse): number | undefined {
+	try {
+		return response.text?.length;
+	} catch {
+		return undefined;
+	}
 }
 
 /** El cuerpo JSON, o `null` si no lo hay (el getter de `requestUrl` puede lanzar). */

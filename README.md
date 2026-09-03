@@ -17,6 +17,7 @@ vive en Lumbre y la nota es tuya.
 | **Soplo con la selección** | Manda la selección (o el párrafo del cursor) a Soplo y enseña lo que HARÍA, con una casilla por acción. Nada se aplica sin pulsar «Aplicar». También está en el menú contextual del editor. |
 | **Vincular esta nota a una lista** | Escribe la propiedad `lumbre-list` en el frontmatter con el id de la lista elegida. |
 | **Quitar el vínculo con la lista** | Borra esa propiedad. |
+| **Mostrar diagnóstico** | El resumen de estado y los últimos 100 eventos del registro, con botones para copiarlo o guardarlo. Ver «Cuando algo falla». |
 
 **Un panel lateral**, «Tareas de esta nota» (icono en la barra izquierda, o el comando **Abrir las
 tareas de esta nota**). Sigue a la nota abierta y enseña:
@@ -102,6 +103,34 @@ marcado. Las tareas que nazcan de ahí quedan vinculadas a la nota desde la que 
 
 El texto se recorta a 4000 caracteres, que es el tope del servidor, y el modal avisa cuando lo hace.
 Soplo exige tu consentimiento en Lumbre; si falta, el modal lo dice y lleva a los ajustes de la web.
+
+## Cuando algo falla
+
+El plugin lleva un registro de diagnóstico que dice **qué** pasó, **dónde** y con qué datos. Nunca
+lleva tu token, ni una cabecera `Authorization`, ni el texto de tus notas: de las tareas salen ids y
+recuentos, y los títulos solo en nivel `debug` y recortados.
+
+Si algo va mal, en **Ajustes → Lumbre → Diagnóstico**:
+
+1. Pon el **nivel del registro** en `Todo (debug)` y repite lo que fallaba. Da igual si ya había
+   pasado: el registro guarda **siempre** los últimos 1000 eventos, con independencia del nivel, así
+   que lo de antes también está.
+2. Pulsa **Copiar registro** y pégalo donde lo vayas a contar. Si el portapapeles no funciona (pasa
+   en móvil), **Guardar registro en el vault** deja el mismo texto en
+   `<carpeta de configuración>/plugins/lumbre/logs/lumbre-<fecha>-<hora>.log`, normalmente
+   `.obsidian/plugins/lumbre/logs/`. Se conservan los 10 últimos.
+3. Baja otra vez el nivel a `Normal (info)` cuando termines. En `debug` el registro es verboso a
+   propósito.
+
+Lo mismo, sin abrir los ajustes: el comando **Lumbre: Mostrar diagnóstico**, que enseña el resumen de
+estado, los últimos 100 eventos y los dos mismos botones.
+
+Para un fallo que ocurre **cuando no estás mirando** está el interruptor **Registrar también en
+fichero en vivo**: apagado por defecto, y con él cada aviso y cada error se van escribiendo en
+`logs/lumbre-live.log` según pasan. Rota al llegar a 1 MB y conserva una vuelta anterior.
+
+El informe empieza con la versión del plugin y de Obsidian, la plataforma, el origen de la API, si
+hay token (nunca cuál), la última prueba de conexión, el estado de la cola y de los vínculos.
 
 ## API para Dataview y js-engine
 

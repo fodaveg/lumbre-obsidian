@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { QueryCache } from '../blocks/query-cache';
+import { Logger } from '../diagnostics/logger';
 import type { LumbreTaskLink } from '../links/link-store';
 import type { LumbreResult } from '../lumbre/client';
 import type { CreateOperation, LinkTarget, StatusOperation } from '../lumbre/queue';
@@ -44,6 +45,7 @@ function harness(overrides: Partial<LumbreApiDeps> = {}): {
 	opened: string[];
 	triggered: string[];
 	tasks: LumbreTask[];
+	logger: Logger;
 } {
 	const log: QueueLog = { creates: [], statuses: [], flushes: 0 };
 	const opened: string[] = [];
@@ -97,10 +99,14 @@ function harness(overrides: Partial<LumbreApiDeps> = {}): {
 		triggerWorkspace: (event: string) => {
 			triggered.push(event);
 		},
+		// Sin consola: en los tests el registro solo tiene que llenar su buffer,
+		// que es lo que se afirma.
+		logger: Logger.create({ console: null }).child('api'),
+		buildReport: () => 'informe de prueba',
 		...overrides,
 	};
 
-	return { api: new LumbreApi(deps), log, opened, triggered, tasks };
+	return { api: new LumbreApi(deps), log, opened, triggered, tasks, logger: deps.logger };
 }
 
 describe('LumbreApi', () => {
@@ -273,5 +279,45 @@ describe('LumbreApi', () => {
 		const mobile = harness({ isDesktopApp: () => false });
 		mobile.api.openInLumbre('task-1');
 		expect(mobile.opened).toEqual(['https://app.lumbre.pro/?tarea=task-1']);
+	});
+});
+
+describe('LumbreApi: diagnóstico', () => {
+	it('`diagnostics.report()` devuelve el informe que compone el plugin', () => {
+		expect(harness().api.diagnostics.report()).toBe('informe de prueba');
+	});
+
+	it('`diagnostics.events()` devuelve los últimos eventos del registro', async () => {
+		const { api, logger } = harness();
+
+		await api.listLists();
+
+		const events = api.diagnostics.events();
+		expect(events.map((event) => event.message)).toContain('Llamada a la API pública');
+		expect(logger.recent().length).toBeGreaterThan(0);
+	});
+
+	it('apunta UN evento por llamada, con el nombre del método', async () => {
+		const { api, logger } = harness();
+
+		await api.listTasks({ scope: 'today' });
+
+		const calls = logger.recent().filter((event) => event.message === 'Llamada a la API pública');
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.data).toEqual({ method: 'listTasks' });
+	});
+
+	it('los argumentos solo se apuntan en `debug`', async () => {
+		const { api, logger } = harness();
+		await api.createTask({ title: 'Comprar pan' });
+		expect(logger.recent().some((event) => event.message === 'Argumentos de la llamada')).toBe(
+			false,
+		);
+
+		logger.setLevel('debug');
+		await api.createTask({ title: 'Comprar pan' });
+
+		const args = logger.recent().find((event) => event.message === 'Argumentos de la llamada');
+		expect(args?.data).toMatchObject({ method: 'createTask', title: 'Comprar pan' });
 	});
 });

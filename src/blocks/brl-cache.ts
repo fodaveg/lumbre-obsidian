@@ -18,8 +18,9 @@
  * No importa `obsidian`: recibe el cliente por inyección, igual que el resto.
  */
 
+import type { Logger } from '../diagnostics/logger';
 import { describeFailure, type LumbreClient } from '../lumbre/client';
-import { DEFAULT_QUERY_TTL_MS } from './query-cache';
+import { DEFAULT_QUERY_TTL_MS, type CacheSnapshotStats } from './query-cache';
 
 /** Lo que ve un bloque de su día. */
 export interface BrlSnapshot {
@@ -40,6 +41,8 @@ export interface BrlCacheOptions {
 	ttlMs?: number;
 	/** Reloj, inyectable para los tests. */
 	now?: () => number;
+	/** Registro de diagnóstico. Sin él, la caché no apunta nada. */
+	logger?: Logger;
 }
 
 interface BrlEntry {
@@ -57,10 +60,12 @@ export class BrlCache {
 	private readonly entries = new Map<string, BrlEntry>();
 	private readonly ttlMs: number;
 	private readonly now: () => number;
+	private readonly log: Logger | null;
 
 	constructor(private readonly options: BrlCacheOptions) {
 		this.ttlMs = options.ttlMs ?? DEFAULT_QUERY_TTL_MS;
 		this.now = options.now ?? ((): number => Date.now());
+		this.log = options.logger ?? null;
 	}
 
 	/** Apunta a un bloque a los cambios de un día. Devuelve cómo darse de baja. */
@@ -80,20 +85,35 @@ export class BrlCache {
 	/** El día. Va al servidor solo si venció el TTL, si se invalidó o si `force`. */
 	async get(date: string, force = false): Promise<BrlSnapshot> {
 		const entry = this.entryFor(date);
-		if (!force && this.isFresh(entry)) return snapshot(entry);
+		if (!force && this.isFresh(entry)) {
+			this.log?.debug('Caché del BRL: acierto', { date });
+			return snapshot(entry);
+		}
 		return this.load(entry);
 	}
 
 	/** Marca todos los días como caducados, sin pedir nada todavía. */
-	invalidate(): void {
+	invalidate(reason = 'a mano'): void {
 		for (const entry of this.entries.values()) entry.stale = true;
+		this.log?.debug('Caché del BRL invalidada', { reason, entries: this.entries.size });
 	}
 
 	/** Invalida y refresca los días con algún bloque montado, una petición por día. */
-	async refreshAll(): Promise<void> {
-		this.invalidate();
+	async refreshAll(reason = 'una entrada nueva del registro'): Promise<void> {
+		this.invalidate(reason);
 		const live = [...this.entries.values()].filter((entry) => entry.listeners.size > 0);
+		this.log?.info('Refresco del registro del día', { reason, days: live.length });
 		await Promise.all(live.map((entry) => this.load(entry)));
+	}
+
+	/** Lo que enseña el informe de diagnóstico. */
+	stats(): CacheSnapshotStats {
+		let oldest: number | null = null;
+		for (const entry of this.entries.values()) {
+			if (entry.fetchedAt === null) continue;
+			if (oldest === null || entry.fetchedAt < oldest) oldest = entry.fetchedAt;
+		}
+		return { entries: this.entries.size, oldestFetchedAt: oldest };
 	}
 
 	private entryFor(date: string): BrlEntry {
@@ -121,7 +141,10 @@ export class BrlCache {
 
 	private async load(entry: BrlEntry): Promise<BrlSnapshot> {
 		const running = entry.inFlight;
-		if (running !== null) return running;
+		if (running !== null) {
+			this.log?.debug('Caché del BRL: petición deduplicada', { date: entry.date });
+			return running;
+		}
 
 		const started = this.fetch(entry);
 		entry.inFlight = started;
@@ -144,6 +167,8 @@ export class BrlCache {
 			entry.fetchedAt = this.now();
 			entry.stale = false;
 			entry.error = null;
+			// El Markdown del registro NO se apunta: es texto del usuario. Solo cuánto.
+			this.log?.info('Registro del día leído', { date: entry.date, chars: read.value.length });
 		} else {
 			// Lo leído NO se borra: sin red se sigue enseñando la última lectura
 			// confirmada con su hora, igual que en el bloque de tareas.
@@ -151,6 +176,12 @@ export class BrlCache {
 				read.reason === 'unauthorized' && read.status === 403
 					? 'El add-on BRL está desactivado en tu cuenta de Lumbre.'
 					: describeFailure(read.reason, read.status);
+			this.log?.warn('Registro del día fallido, se conserva la última lectura', {
+				date: entry.date,
+				reason: read.reason,
+				status: read.status,
+				hadPrevious: entry.fetchedAt !== null,
+			});
 		}
 
 		this.notify(entry);

@@ -33,6 +33,8 @@ Dos reglas que explican por qué la API hace lo que hace:
 | `linksForNote(path): LumbreTaskLink[]` | Los vínculos nota ↔ tarea de una nota, por su ruta en el vault. |
 | `openInLumbre(id): void` | Abre la tarea: la app de escritorio si la hay, la web en móvil. |
 | `on(evento, handler): () => void` | Se apunta a un evento. Devuelve cómo darse de baja. |
+| `diagnostics.report(): string` | El informe de diagnóstico en texto plano, el mismo que copia el botón de los ajustes. |
+| `diagnostics.events(n?): LogEvent[]` | Los últimos `n` eventos del registro (300 por defecto), del más viejo al más nuevo. |
 
 `LumbreTask` lleva `id`, `content`, `notes`, `date`, `someday`, `time`, `deadline`, `priority`
 (`p1`…`p4`), `done`, `cancelledAt`, `archivedAt`, `list`, `section`, `rolloverCount`, `parentId` y,
@@ -126,6 +128,30 @@ componente al que colgar la baja:
 ```js
 this.registerEvent(app.workspace.on('lumbre:tasks-changed', () => dv.container.empty()));
 ```
+
+## Diagnóstico
+
+`diagnostics` es solo lectura y sirve para el mismo caso que el botón de los ajustes: enseñar qué
+está pasando cuando algo no va. Lo que devuelve ya viene limpio, con las mismas reglas que el
+informe: **nunca** el token, nunca una cabecera `Authorization` y nunca el texto de una nota.
+
+```js
+const lumbre = app.plugins.plugins['lumbre']?.api;
+
+// El informe entero, para pegarlo en una nota o en un aviso.
+const informe = lumbre.diagnostics.report();
+
+// Solo los errores recientes.
+const errores = lumbre.diagnostics.events(200).filter((event) => event.level === 'error');
+```
+
+Cada `LogEvent` lleva `seq` (contador), `ts` (ISO 8601), `level` (`debug`, `info`, `warn`, `error`),
+`module` (`http`, `queue`, `links`, `cache`, `block`, `panel`, `modal`, `api`, `settings`, `vault`,
+`main`), `message` y un `data` opcional con datos sueltos.
+
+El buffer guarda **siempre** los últimos 1000 eventos, con independencia del nivel elegido en los
+ajustes: ese nivel solo decide qué llega a la consola. Así que `events()` trae también los `debug`
+anteriores al fallo, que son justo los que nadie tenía activados cuando pasó.
 
 ## Ejemplo: Dataview JS
 

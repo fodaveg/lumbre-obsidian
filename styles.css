@@ -612,3 +612,57 @@
 	width: 22px;
 	height: 22px;
 }
+
+/* ── Diagnóstico ──────────────────────────────────────────────────────────
+   El resumen de estado de los ajustes y el modal de «Mostrar diagnóstico».
+   La lista de eventos va monoespaciada y con scroll propio: son líneas largas
+   que no se deben partir, y el modal no puede crecer sin fin. */
+
+.lumbre-settings__status,
+.lumbre-diagnostics__status {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-2-1);
+	margin-bottom: var(--size-4-3);
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.lumbre-diagnostics__label {
+	margin-bottom: var(--size-4-1);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.lumbre-diagnostics__events {
+	max-height: 50vh;
+	margin: 0 0 var(--size-4-3);
+	padding: var(--size-4-2);
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+	color: var(--text-muted);
+	font-family: var(--font-monospace);
+	font-size: var(--font-smallest);
+	line-height: 1.5;
+	white-space: pre;
+	overflow: auto;
+}
+
+.lumbre-diagnostics__actions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: flex-end;
+	gap: var(--size-4-2);
+}
+
+/* En móvil los botones ocupan su línea, como en el resto de los modales. */
+.is-mobile .lumbre-diagnostics .lumbre-button {
+	min-height: 44px;
+	flex: 1 1 10em;
+	justify-content: center;
+	padding: var(--size-4-2) var(--size-4-3);
+}
+
+.is-mobile .lumbre-diagnostics__events {
+	max-height: 40vh;
+}

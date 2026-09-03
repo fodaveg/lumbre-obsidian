@@ -19,6 +19,8 @@
  */
 
 import type { QueryCache } from '../blocks/query-cache';
+import { shortTitle, type LogEvent, type Logger } from '../diagnostics/logger';
+import { DEFAULT_REPORT_EVENTS } from '../diagnostics/report';
 import {
 	applyClientFilters,
 	parseQuery,
@@ -84,6 +86,22 @@ export interface LumbreApiDeps {
 	isDesktopApp(): boolean;
 	/** Dispara un evento del workspace de Obsidian. */
 	triggerWorkspace(event: string): void;
+	/** Registro de diagnóstico, ya etiquetado como `api`. */
+	logger: Logger;
+	/** El informe de diagnóstico en texto plano. Lo compone `main.ts`. */
+	buildReport(): string;
+}
+
+/**
+ * La parte de diagnóstico de la API pública. Es de solo lectura y ya viene
+ * limpia: ni el token ni el contenido de una nota salen por aquí, igual que en
+ * el informe que copia el botón de Ajustes.
+ */
+export interface LumbreDiagnosticsApi {
+	/** El informe entero, el mismo que «Copiar registro». */
+	report(): string;
+	/** Los últimos eventos del registro, del más viejo al más nuevo. */
+	events(count?: number): LogEvent[];
 }
 
 export class LumbreApi {
@@ -100,8 +118,24 @@ export class LumbreApi {
 	/** Último estado de conexión conocido, para no repetir el evento. */
 	private connected: boolean | null = null;
 
+	/**
+	 * El registro de diagnóstico, para que un script pueda leerlo sin abrir los
+	 * ajustes: es lo que hace útil un botón de js-engine que pide el informe.
+	 */
+	readonly diagnostics: LumbreDiagnosticsApi;
+
 	constructor(private readonly deps: LumbreApiDeps) {
 		this.version = deps.version;
+		this.diagnostics = {
+			report: (): string => {
+				this.called('diagnostics.report');
+				return this.deps.buildReport();
+			},
+			events: (count = DEFAULT_REPORT_EVENTS): LogEvent[] => {
+				this.called('diagnostics.events', { count });
+				return this.deps.logger.recent(count);
+			},
+		};
 	}
 
 	/**
@@ -109,6 +143,7 @@ export class LumbreApi {
 	 * respuesta cambia respecto a la anterior.
 	 */
 	async isConnected(): Promise<boolean> {
+		this.called('isConnected');
 		const result = await this.deps.client.ping();
 		this.notifyConnectionChanged(result.ok);
 		return result.ok;
@@ -124,6 +159,7 @@ export class LumbreApi {
 	 * la petición falló, o si la consulta no se entiende.
 	 */
 	async listTasks(query: string | LumbreQueryInput = ''): Promise<LumbreTask[]> {
+		this.called('listTasks', { query });
 		const resolved = await this.resolve(query);
 		const snapshot = await this.deps.cache.get(resolved);
 		if (snapshot.fetchedAt === null && snapshot.error !== null) throw new Error(snapshot.error);
@@ -132,6 +168,7 @@ export class LumbreApi {
 
 	/** Una tarea por id, o `null` si no existe o no es del token. */
 	async getTask(id: string): Promise<LumbreTask | null> {
+		this.called('getTask', { id });
 		const read = await this.deps.client.getTask(id);
 		if (!read.ok) throw new Error(describeFailure(read.reason, read.status));
 		return read.value;
@@ -139,6 +176,7 @@ export class LumbreApi {
 
 	/** Las listas de Lumbre, de la caché de listas. */
 	async listLists(): Promise<LumbreList[]> {
+		this.called('listLists');
 		return this.deps.lists.get();
 	}
 
@@ -148,6 +186,13 @@ export class LumbreApi {
 	 * el primer momento, aunque el envío todavía no haya salido.
 	 */
 	async createTask(draft: TaskDraft, target?: LumbreApiTarget): Promise<string> {
+		this.called('createTask', {
+			notePath: target?.notePath ?? null,
+			listId: draft.listId ?? null,
+			// El título lo escribe quien llama y puede venir de una nota: solo en
+			// `debug` y recortado, como en el resto del plugin.
+			title: shortTitle(draft.title),
+		});
 		const operation = await this.deps.queue.enqueueCreate(draft, linkTarget(target));
 		await this.flush();
 		return operation.clientTaskId;
@@ -155,16 +200,19 @@ export class LumbreApi {
 
 	/** Encola completar una tarea. La casilla no se asienta hasta materializar. */
 	async completeTask(id: string, target?: LumbreApiTarget): Promise<void> {
+		this.called('completeTask', { id, notePath: target?.notePath ?? null });
 		await this.setDone(id, true, target);
 	}
 
 	/** Encola reabrir una tarea. */
 	async reopenTask(id: string, target?: LumbreApiTarget): Promise<void> {
+		this.called('reopenTask', { id, notePath: target?.notePath ?? null });
 		await this.setDone(id, false, target);
 	}
 
 	/** Los vínculos nota ↔ tarea de una nota, por su ruta dentro del vault. */
 	linksForNote(path: string): LumbreTaskLink[] {
+		this.called('linksForNote', { notePath: path });
 		return this.deps.links.linksForNote(path);
 	}
 
@@ -173,6 +221,7 @@ export class LumbreApi {
 	 * en móvil, donde no hay nada que atienda `lumbre://`.
 	 */
 	openInLumbre(id: string): void {
+		this.called('openInLumbre', { id });
 		const links = taskDeepLinks({ id }, this.deps.webOrigin());
 		this.deps.openUrl(this.deps.isDesktopApp() ? links.native : links.web);
 	}
@@ -181,11 +230,23 @@ export class LumbreApi {
 	on(event: 'tasks-changed', handler: LumbreApiEvents['tasks-changed']): () => void;
 	on(event: 'connection-changed', handler: LumbreApiEvents['connection-changed']): () => void;
 	on(event: keyof LumbreApiEvents, handler: AnyHandler): () => void {
+		this.called('on', { event });
 		const set = event === 'tasks-changed' ? this.tasksHandlers : this.connectionHandlers;
 		set.add(handler);
 		return (): void => {
 			set.delete(handler);
 		};
+	}
+
+	/**
+	 * UN evento por llamada en `info`, que es el trato: el nombre del método basta
+	 * para seguir qué hizo un script. Los argumentos van aparte y solo en `debug`,
+	 * porque ahí es donde pueden aparecer títulos o rutas de notas.
+	 */
+	private called(method: string, args?: Record<string, unknown>): void {
+		this.deps.logger.info('Llamada a la API pública', { method });
+		if (args === undefined || !this.deps.logger.enabled('debug')) return;
+		this.deps.logger.debug('Argumentos de la llamada', { method, ...args });
 	}
 
 	// ── Lo que llama el plugin, no los scripts ───────────────────────────────

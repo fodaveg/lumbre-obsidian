@@ -19,6 +19,7 @@
 import { MarkdownRenderChild, MarkdownRenderer, Platform, setIcon, type App } from 'obsidian';
 
 import { BRL_TODAY, parseBrlQuery } from '../brl/brl-ops';
+import type { Logger } from '../diagnostics/logger';
 import type { BrlCache, BrlSnapshot } from './brl-cache';
 
 /** El lenguaje del bloque: ```lumbre-brl```. */
@@ -37,6 +38,8 @@ export interface BrlBlockHost {
 	app: App;
 	/** Avisa cuando cambian la cola o los vínculos. Devuelve cómo desuscribirse. */
 	onDataChange(listener: () => void): () => void;
+	/** Registro de diagnóstico, ya etiquetado como `block`. */
+	logger: Logger;
 }
 
 export class LumbreBrlBlock extends MarkdownRenderChild {
@@ -63,11 +66,19 @@ export class LumbreBrlBlock extends MarkdownRenderChild {
 		const parsed = parseBrlQuery(this.source);
 		if (!parsed.ok) {
 			this.parseError = parsed.error;
+			// El texto del bloque es una instrucción al plugin, no contenido de la
+			// nota: sin él no se puede reproducir el error.
+			this.host.logger.warn('Consulta del bloque de BRL no válida', {
+				notePath: this.notePath,
+				error: parsed.error,
+				source: this.source,
+			});
 			this.render();
 			return;
 		}
 
 		this.date = parsed.date;
+		this.host.logger.info('Bloque de BRL montado', { notePath: this.notePath, date: parsed.date });
 		this.unsubscribeData = this.host.onDataChange(() => {
 			this.render();
 		});
@@ -82,6 +93,12 @@ export class LumbreBrlBlock extends MarkdownRenderChild {
 
 	onunload(): void {
 		this.unloaded = true;
+		if (this.date !== null) {
+			this.host.logger.debug('Bloque de BRL desmontado', {
+				notePath: this.notePath,
+				date: this.date,
+			});
+		}
 		this.unsubscribeCache?.();
 		this.unsubscribeCache = null;
 		this.unsubscribeData?.();

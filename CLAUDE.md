@@ -21,7 +21,9 @@ guiones largos como inciso: coma, punto o paréntesis.
   no se aplica nada sin el clic. Y solo se puede aplicar lo que se ha ENSEÑADO: una acción sin su
   línea de preview se descarta.
 - **El token nunca entra en Markdown, frontmatter, logs ni Notices.** Solo se lee para construir la
-  cabecera `Authorization`. Dónde se guarda es una decisión abierta (ver `src/token-store.ts`).
+  cabecera `Authorization`. Dónde se guarda es una decisión abierta (ver `src/token-store.ts`). En
+  el registro lo garantiza `src/diagnostics/redact.ts`, por el que pasa TODO lo que se apunta; el
+  contenido de una nota tampoco entra, y el título de una tarea solo en `debug` y recortado a 80.
 
 ## Estructura
 
@@ -47,6 +49,10 @@ guiones largos como inciso: coma, punto o paréntesis.
   `docs/API.md`. Superficie pequeña y estable; todo lo que muta pasa por la cola.
 - `src/links/link-store.ts`: mapa nota ↔ tarea. La nota se identifica por RUTA, nunca por un id
   escrito en el frontmatter.
+- `src/diagnostics/`: el registro. `logger.ts` (niveles, `child(module)` y buffer circular de 1000
+  eventos que se llena SIEMPRE, filtre lo que filtre la consola), `redact.ts` (el token fuera de
+  todo), `errors.ts`, `report.ts` (el texto que se copia), `unhandled.ts` (`guarded`) y
+  `log-files.ts`. Ninguno hace red; solo el modal importa `obsidian`.
 - `src/storage/plugin-store.ts`: el único objeto de `data.json`, con las escrituras coalescidas.
 - `src/settings.ts`: pestaña de ajustes.
 - `src/token-store.ts`: almacén del token detrás de una interfaz.

@@ -14,6 +14,7 @@
  * `LinkStorage`, que implementa `PluginStore`.
  */
 
+import { shortTitle, type Logger } from '../diagnostics/logger';
 import type { LumbreClient } from '../lumbre/client';
 import type { OperationState } from '../lumbre/queue';
 import type { LumbreTask } from '../lumbre/types';
@@ -57,13 +58,23 @@ export interface LinkStoreOptions {
 	storage: LinkStorage;
 	/** Reloj, inyectable para los tests. */
 	now?: () => Date;
+	/** Registro de diagnóstico. Sin él, el mapa no apunta nada. */
+	logger?: Logger;
 }
+
+/**
+ * Vínculos en una misma nota a partir de los cuales se avisa. No es un tope: es
+ * que una nota con tantas tareas suele ser un vínculo que se está duplicando.
+ */
+export const MANY_LINKS_WARNING = 50;
 
 export class LinkStore {
 	private readonly now: () => Date;
+	private readonly log: Logger | null;
 
 	constructor(private readonly options: LinkStoreOptions) {
 		this.now = options.now ?? (() => new Date());
+		this.log = options.logger ?? null;
 	}
 
 	/** Todos los enlaces, en el orden en que se crearon. */
@@ -115,6 +126,7 @@ export class LinkStore {
 			existing.orphanedAt = null;
 			existing.updatedAt = stamp;
 			await this.options.storage.writeLinks(links);
+			this.logLink('Vínculo actualizado', path, task, syncState, links);
 			return existing;
 		}
 
@@ -130,7 +142,9 @@ export class LinkStore {
 			updatedAt: stamp,
 			orphanedAt: null,
 		};
-		await this.options.storage.writeLinks([...links, link]);
+		const created = [...links, link];
+		await this.options.storage.writeLinks(created);
+		this.logLink('Vínculo creado', path, task, syncState, created);
 		return link;
 	}
 
@@ -138,8 +152,12 @@ export class LinkStore {
 	async unlink(id: string): Promise<void> {
 		const links = this.all();
 		const remaining = links.filter((link) => link.id !== id);
-		if (remaining.length === links.length) return;
+		if (remaining.length === links.length) {
+			this.log?.debug('Desvincular sin efecto: ese vínculo ya no está', { id });
+			return;
+		}
 		await this.options.storage.writeLinks(remaining);
+		this.log?.info('Vínculo quitado', { id, total: remaining.length });
 	}
 
 	/**
@@ -172,13 +190,21 @@ export class LinkStore {
 				link.updatedAt = stamp;
 			}
 			await this.options.storage.writeLinks(links);
+			this.log?.warn('Relectura de los vínculos fallida', {
+				notePath: path,
+				links: mine.length,
+				reason: read.reason,
+				status: read.status,
+			});
 			return mine;
 		}
 
 		const byId = new Map(read.value.map((task) => [task.id, task]));
+		let missing = 0;
 		for (const link of mine) {
 			const task = byId.get(link.taskId);
 			if (task === undefined) {
+				missing += 1;
 				link.syncState = 'recoverable_error';
 				link.error = 'Lumbre no devolvió esta tarea; se conserva la última lectura.';
 			} else {
@@ -189,6 +215,12 @@ export class LinkStore {
 			link.updatedAt = stamp;
 		}
 		await this.options.storage.writeLinks(links);
+		this.log?.event(missing > 0 ? 'warn' : 'info', 'Vínculos releídos', {
+			notePath: path,
+			links: mine.length,
+			refreshed: mine.length - missing,
+			missing,
+		});
 		return mine;
 	}
 
@@ -211,7 +243,12 @@ export class LinkStore {
 			moved += 1;
 		}
 
-		if (moved > 0) await this.options.storage.writeLinks(links);
+		if (moved > 0) {
+			await this.options.storage.writeLinks(links);
+			this.log?.info('Vínculos movidos por un renombrado', { oldPath, newPath, moved });
+		} else {
+			this.log?.debug('Renombrado sin vínculos que mover', { oldPath, newPath });
+		}
 		return moved;
 	}
 
@@ -232,12 +269,41 @@ export class LinkStore {
 			marked += 1;
 		}
 
-		if (marked > 0) await this.options.storage.writeLinks(links);
+		if (marked > 0) {
+			await this.options.storage.writeLinks(links);
+			this.log?.warn('Vínculos huérfanos: su nota ha desaparecido', { path, marked });
+		}
 		return marked;
 	}
 
 	private stamp(): string {
 		return this.now().toISOString();
+	}
+
+	/**
+	 * Un vínculo creado o actualizado. El TÍTULO de la tarea solo en `debug` y
+	 * recortado: es texto del usuario, y en `info` bastan el id y la ruta.
+	 */
+	private logLink(
+		message: string,
+		path: string,
+		task: LumbreTask,
+		syncState: OperationState,
+		links: readonly LumbreTaskLink[],
+	): void {
+		const logger = this.log;
+		if (logger === null) return;
+
+		const inNote = links.filter((link) => link.notePath === path).length;
+		logger.info(message, { notePath: path, taskId: task.id, syncState, inNote });
+		if (logger.enabled('debug')) logger.debug('Tarea del vínculo', { title: shortTitle(task.content) });
+		if (inNote > MANY_LINKS_WARNING) {
+			logger.warn('Esa nota tiene muchísimos vínculos', {
+				notePath: path,
+				links: inNote,
+				threshold: MANY_LINKS_WARNING,
+			});
+		}
 	}
 }
 

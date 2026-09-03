@@ -1,4 +1,6 @@
 import {
+	apiVersion,
+	normalizePath,
 	Notice,
 	Platform,
 	Plugin,
@@ -26,6 +28,16 @@ import { QueryCache } from './blocks/query-cache';
 import { LUMBRE_BLOCK_LANGUAGE, LumbreTaskBlock, type TaskBlockHost } from './blocks/task-block';
 import { BrlEntryModal } from './brl/brl-modal';
 import { BRL_TODAY, brlCreateOp, type BrlKind } from './brl/brl-ops';
+import { DiagnosticsModal } from './diagnostics/diagnostics-modal';
+import {
+	LiveLog,
+	logsFolder,
+	saveReport as writeReportFile,
+	type LogFileAdapter,
+} from './diagnostics/log-files';
+import { formatEvent, Logger, shortTitle, type LogEvent, type LogLevel } from './diagnostics/logger';
+import { buildReport, DEFAULT_REPORT_EVENTS, type CacheStats } from './diagnostics/report';
+import { guarded, unhandledEvent } from './diagnostics/unhandled';
 import { LinkStore } from './links/link-store';
 import { NOTE_LIST_PROPERTY, readNoteListId, writeNoteListId } from './links/note-list';
 import {
@@ -92,6 +104,13 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	api!: LumbreApi;
 
 	/**
+	 * El registro de diagnóstico del plugin entero. Se crea LO PRIMERO de
+	 * `onload`, antes que el almacén: si algo falla al cargar `data.json`, ese
+	 * fallo tiene que quedar apuntado igual.
+	 */
+	logger!: Logger;
+
+	/**
 	 * Quién quiere enterarse de que han cambiado la cola o los vínculos. El panel
 	 * se apunta aquí en vez de que el plugin guarde una referencia a la vista:
 	 * las vistas van y vienen con los leaves, y una referencia guardada sobrevive
@@ -99,11 +118,49 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	 */
 	private readonly dataListeners = new Set<() => void>();
 
+	/** El logger de `main`, que es el que usa esta clase. */
+	private log!: Logger;
+
+	/**
+	 * Lo que hay que tapar en todo lo que se registre: hoy, el token. Se guarda
+	 * aquí en memoria porque `redact` es SÍNCRONO y `tokenStore.get()` no, y
+	 * porque comparar es la única forma de no dejarlo salir por un camino nuevo.
+	 */
+	private secrets: string[] = [];
+
+	/** El registro en fichero, solo si está encendido en Ajustes. */
+	private liveLog: LiveLog | null = null;
+	private stopLiveLog: (() => void) | null = null;
+
 	async onload(): Promise<void> {
+		const startedAt = Date.now();
+		this.logger = Logger.create({ secrets: () => this.secrets });
+		this.log = this.logger.child('main');
+		this.log.info('Cargando el plugin', {
+			version: this.manifest.version,
+			obsidian: apiVersion,
+			mobile: Platform.isMobile,
+			desktop: Platform.isDesktop,
+		});
+
 		this.store = new PluginStore(this, this.deviceIdStore());
 		await this.store.load();
 		this.config = this.store.data.settings;
-		this.tokenStore = new PluginDataTokenStore(this.store);
+		// El nivel guardado manda desde aquí: lo de arriba se apuntó con el de
+		// fábrica, que es `info` y por tanto nunca se pierde.
+		this.logger.setLevel(this.config.logLevel);
+		this.tokenStore = this.watchedTokenStore(new PluginDataTokenStore(this.store));
+		await this.refreshSecrets();
+		this.log.info('Almacén cargado', {
+			migratedFrom: this.store.migratedFrom,
+			version: this.store.data.version,
+			links: this.store.data.links.length,
+			queued: this.store.data.queue.length,
+			hasToken: this.secrets.length > 0,
+			logLevel: this.config.logLevel,
+			liveLog: this.config.liveLog,
+		});
+		if (this.config.liveLog) this.startLiveLog();
 
 		this.client = new LumbreClient({
 			// Como función: así cambiar el origen en los ajustes no deja al cliente
@@ -111,6 +168,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			apiOrigin: () => this.config.apiOrigin,
 			getToken: () => this.tokenStore.get(),
 			request: (init) => requestUrl(init),
+			logger: this.logger.child('http'),
 		});
 		this.queue = new OperationQueue({
 			client: this.client,
@@ -120,16 +178,18 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			onMaterialized: () => {
 				void this.refreshBlocks();
 			},
+			logger: this.logger.child('queue'),
 		});
-		this.links = new LinkStore({ storage: this.store });
+		this.links = new LinkStore({ storage: this.store, logger: this.logger.child('links') });
 		this.lists = new ListCache({ client: this.client });
 		this.queries = new QueryCache({
 			client: this.client,
 			onRefresh: () => {
 				this.api.notifyTasksChanged();
 			},
+			logger: this.logger.child('cache'),
 		});
-		this.brl = new BrlCache({ client: this.client });
+		this.brl = new BrlCache({ client: this.client, logger: this.logger.child('cache') });
 		this.api = new LumbreApi({
 			version: this.manifest.version,
 			client: this.client,
@@ -145,81 +205,124 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			triggerWorkspace: (event: string) => {
 				this.app.workspace.trigger(event);
 			},
+			logger: this.logger.child('api'),
+			buildReport: () => this.buildReport(),
 		});
 
 		this.addSettingTab(new LumbreSettingTab(this.app, this));
 		this.registerMarkdownCodeBlockProcessor(
 			LUMBRE_BLOCK_LANGUAGE,
-			(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) => {
-				ctx.addChild(new LumbreTaskBlock(el, source, ctx.sourcePath, this.taskBlockHost()));
-			},
+			guarded(
+				this.log,
+				'procesador del bloque lumbre',
+				(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) => {
+					ctx.addChild(new LumbreTaskBlock(el, source, ctx.sourcePath, this.taskBlockHost()));
+				},
+			),
 		);
 		this.registerMarkdownCodeBlockProcessor(
 			LUMBRE_BRL_BLOCK_LANGUAGE,
-			(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) => {
-				ctx.addChild(new LumbreBrlBlock(el, source, ctx.sourcePath, this.brlBlockHost()));
-			},
+			guarded(
+				this.log,
+				'procesador del bloque lumbre-brl',
+				(source: string, el: HTMLElement, ctx: MarkdownPostProcessorContext) => {
+					ctx.addChild(new LumbreBrlBlock(el, source, ctx.sourcePath, this.brlBlockHost()));
+				},
+			),
 		);
 		this.registerView(
 			NOTE_TASKS_VIEW_TYPE,
 			(leaf: WorkspaceLeaf) => new NoteTasksView(leaf, this.noteTasksHost()),
 		);
-		this.addRibbonIcon(NOTE_TASKS_ICON, 'Tareas de esta nota', () => {
-			void this.openNoteTasksView();
-		});
+		this.addRibbonIcon(
+			NOTE_TASKS_ICON,
+			'Tareas de esta nota',
+			guarded(this.log, 'icono de la barra lateral', () => {
+				this.log.info('Acción del usuario', { action: 'abrir el panel desde la barra' });
+				void this.openNoteTasksView();
+			}),
+		);
 		this.registerCommands();
 
 		// La nota se identifica por RUTA, así que un renombrado hay que seguirlo o
 		// el enlace se pierde. Vale igual para carpetas: `renamePath` casa el
 		// prefijo.
 		this.registerEvent(
-			this.app.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
-				void this.links.renamePath(oldPath, file.path).then(() => {
-					this.notifyDataChange();
-				});
-			}),
+			this.app.vault.on(
+				'rename',
+				guarded(this.logger.child('vault'), 'renombrado', (file: TAbstractFile, oldPath: string) => {
+					void this.links.renamePath(oldPath, file.path).then(() => {
+						this.notifyDataChange();
+					});
+				}),
+			),
 		);
 		this.registerEvent(
-			this.app.vault.on('delete', (file: TAbstractFile) => {
-				void this.links.markDeleted(file.path).then(() => {
-					this.notifyDataChange();
-				});
-			}),
+			this.app.vault.on(
+				'delete',
+				guarded(this.logger.child('vault'), 'borrado', (file: TAbstractFile) => {
+					void this.links.markDeleted(file.path).then(() => {
+						this.notifyDataChange();
+					});
+				}),
+			),
 		);
 		this.registerEvent(
 			this.app.workspace.on(
 				'editor-menu',
-				(menu: Menu, editor: Editor, info: MarkdownView | MarkdownFileInfo) => {
-					menu.addItem((item) =>
-						item
-							.setTitle('Enviar a Lumbre')
-							.setIcon(NOTE_TASKS_ICON)
-							.onClick(() => {
-								void this.openSendModal(info.file ?? null, editorContext(editor));
-							}),
-					);
-					menu.addItem((item) =>
-						item
-							.setTitle('Soplo con la selección')
-							.setIcon('sparkles')
-							.onClick(() => {
-								this.openSoploModal(info.file ?? null, soploSource(editor));
-							}),
-					);
-				},
+				guarded(
+					this.logger.child('vault'),
+					'menú contextual del editor',
+					(menu: Menu, editor: Editor, info: MarkdownView | MarkdownFileInfo) => {
+						menu.addItem((item) =>
+							item
+								.setTitle('Enviar a Lumbre')
+								.setIcon(NOTE_TASKS_ICON)
+								.onClick(() => {
+									this.log.info('Acción del usuario', { action: 'enviar a Lumbre (menú)' });
+									void this.openSendModal(info.file ?? null, editorContext(editor));
+								}),
+						);
+						menu.addItem((item) =>
+							item
+								.setTitle('Soplo con la selección')
+								.setIcon('sparkles')
+								.onClick(() => {
+									this.log.info('Acción del usuario', { action: 'Soplo (menú)' });
+									this.openSoploModal(info.file ?? null, soploSource(editor));
+								}),
+						);
+					},
+				),
 			),
 		);
 
 		// Al volver la red hay que drenar lo que se encoló sin conexión.
 		this.registerDomEvent(window, 'online', () => {
+			this.log.info('La red ha vuelto');
 			this.api.notifyConnectionChanged(true);
 			void this.flushIfConnected();
 		});
 		this.registerDomEvent(window, 'offline', () => {
+			this.log.warn('Sin conexión');
 			this.api.notifyConnectionChanged(false);
 		});
+		this.registerUnhandled();
 
+		this.log.info('Plugin cargado', {
+			ms: Date.now() - startedAt,
+			links: this.links.all().length,
+			pending: this.queue.pending().length,
+		});
 		void this.flushIfConnected();
+	}
+
+	onunload(): void {
+		this.log.info('Plugin descargado', { pending: this.queue.pending().length });
+		this.stopLiveLog?.();
+		this.stopLiveLog = null;
+		void this.liveLog?.flush();
+		this.liveLog = null;
 	}
 
 	/**
@@ -235,6 +338,172 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	async saveSettings(): Promise<void> {
 		this.store.data.settings = this.config;
 		await this.store.save();
+		await this.refreshSecrets();
+	}
+
+	// ── Diagnóstico ──────────────────────────────────────────────────────────
+
+	/**
+	 * Relee el token para poder taparlo en el registro. Es la ÚNICA copia del
+	 * token que el plugin tiene fuera del almacén, y existe solo porque `redact`
+	 * es síncrono: sin ella no se podría comprobar que un evento no lo lleva.
+	 */
+	private async refreshSecrets(): Promise<void> {
+		const token = await this.tokenStore.get();
+		this.secrets = token === null ? [] : [token];
+	}
+
+	/**
+	 * El almacén del token, envuelto para que CADA cambio actualice lo que hay
+	 * que tapar en el registro. Sin esto, pegar un token nuevo en los ajustes
+	 * dejaría al redactor buscando el anterior.
+	 */
+	private watchedTokenStore(store: TokenStore): TokenStore {
+		return {
+			get: () => store.get(),
+			set: async (token: string | null): Promise<void> => {
+				await store.set(token);
+				await this.refreshSecrets();
+			},
+		};
+	}
+
+	/** Cambia el nivel del registro, lo guarda y lo deja apuntado. */
+	async setLogLevel(level: LogLevel): Promise<void> {
+		this.config.logLevel = level;
+		this.logger.setLevel(level);
+		await this.saveSettings();
+		// Se apunta como `warn` a propósito: así la línea entra en el registro en
+		// vivo aunque el nivel nuevo sea `error`, y se ve desde cuándo falta lo demás.
+		this.logger.child('settings').warn('Nivel del registro cambiado', { level });
+	}
+
+	/** Enciende o apaga el registro en fichero y lo guarda. */
+	async setLiveLog(enabled: boolean): Promise<void> {
+		this.config.liveLog = enabled;
+		await this.saveSettings();
+		if (enabled) this.startLiveLog();
+		else this.stopLiveLogging();
+		this.logger.child('settings').info('Registro en fichero', { enabled });
+	}
+
+	/**
+	 * Engancha el registro en fichero. Solo se escriben `warn` y `error`: el
+	 * fichero es para el fallo que ocurre cuando nadie mira, y un `debug` por
+	 * repintado lo llenaría en minutos.
+	 */
+	private startLiveLog(): void {
+		if (this.liveLog !== null) return;
+		const live = new LiveLog(this.logAdapter(), this.logsFolder());
+		this.liveLog = live;
+		this.stopLiveLog = this.logger.onEvent((event: LogEvent) => {
+			if (event.level !== 'warn' && event.level !== 'error') return;
+			void live.append(formatEvent(event));
+		});
+	}
+
+	private stopLiveLogging(): void {
+		this.stopLiveLog?.();
+		this.stopLiveLog = null;
+		void this.liveLog?.flush();
+		this.liveLog = null;
+	}
+
+	/** El informe entero, ya limpio. Es lo que copian los dos botones y la API. */
+	buildReport(events = DEFAULT_REPORT_EVENTS): string {
+		const caches: CacheStats[] = [
+			{ name: 'consultas de bloques', ...this.queries.stats() },
+			{ name: 'registro del día', ...this.brl.stats() },
+		];
+		return buildReport({
+			pluginVersion: this.manifest.version,
+			obsidianVersion: apiVersion,
+			platform: { mobile: Platform.isMobile, desktop: Platform.isDesktop },
+			apiOrigin: this.config.apiOrigin,
+			hasToken: this.secrets.length > 0,
+			connection: this.client.lastPing,
+			queue: this.queue.snapshot(),
+			links: this.links.all(),
+			caches,
+			events: this.logger.recent(events),
+			droppedEvents: this.logger.droppedEvents + (this.liveLog?.dropped ?? 0),
+			generatedAt: new Date(),
+			now: Date.now(),
+			secrets: this.secrets,
+		});
+	}
+
+	/** Guarda el informe en la carpeta del plugin y devuelve la ruta escrita. */
+	async saveReport(): Promise<string> {
+		const path = await writeReportFile(
+			this.logAdapter(),
+			this.logsFolder(),
+			this.buildReport(),
+			new Date(),
+		);
+		this.log.info('Informe de diagnóstico guardado', { path });
+		return path;
+	}
+
+	/** Dos líneas de estado: la conexión y la cola. */
+	statusLines(): string[] {
+		const ping = this.client.lastPing;
+		const connection =
+			ping === null
+				? 'Conexión: sin probar todavía.'
+				: ping.ok
+					? `Conexión: correcta (${ping.at}).`
+					: `Conexión: falló (${ping.reason ?? 'desconocido'}${
+							ping.status === undefined ? '' : ` ${ping.status}`
+						}).`;
+
+		const pending = this.queue.pending();
+		const failing = pending.filter(
+			(operation) => operation.state === 'rejected' || operation.state === 'recoverable_error',
+		).length;
+		const queue =
+			pending.length === 0
+				? 'Cola: vacía, todo confirmado.'
+				: `Cola: ${pending.length} sin materializar, ${failing} con error.`;
+
+		return [connection, queue];
+	}
+
+	/** La carpeta de registros dentro de la configuración del vault. */
+	private logsFolder(): string {
+		return normalizePath(logsFolder(this.app.vault.configDir, this.manifest.id));
+	}
+
+	/**
+	 * El adaptador del vault, con la forma recortada que usan los ficheros de
+	 * registro. `app.vault.adapter` la cumple entera.
+	 */
+	private logAdapter(): LogFileAdapter {
+		return this.app.vault.adapter;
+	}
+
+	/**
+	 * Los errores que se escapan de la ventana. Se filtran por el stack: sin la
+	 * marca `plugin:lumbre` no son nuestros y solo se apuntan en `debug`, porque
+	 * la consola de Obsidian es de todos los plugins.
+	 */
+	private registerUnhandled(): void {
+		const logger = this.logger.child('main');
+		this.registerDomEvent(window, 'error', (event: ErrorEvent) => {
+			const entry = unhandledEvent(event.error ?? event.message, {
+				asynchronous: false,
+				debug: logger.enabled('debug'),
+				source: event.filename,
+			});
+			if (entry !== null) logger.error(entry.message, entry.data);
+		});
+		this.registerDomEvent(window, 'unhandledrejection', (event: PromiseRejectionEvent) => {
+			const entry = unhandledEvent(event.reason, {
+				asynchronous: true,
+				debug: logger.enabled('debug'),
+			});
+			if (entry !== null) logger.error(entry.message, entry.data);
+		});
 	}
 
 	// ── Comandos ─────────────────────────────────────────────────────────────
@@ -250,17 +519,20 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			// lo antepone Obsidian, y repetirlo aquí lo prohíbe el linter de plugins.
 			// En el menú contextual, que NO lleva prefijo, sí se escribe entero.
 			name: 'Enviar como tarea',
-			editorCallback: (editor: Editor, context: MarkdownView | MarkdownFileInfo) => {
-				void this.openSendModal(context.file ?? null, editorContext(editor));
-			},
+			editorCallback: this.command(
+				'send-task',
+				(editor: Editor, context: MarkdownView | MarkdownFileInfo) => {
+					void this.openSendModal(context.file ?? null, editorContext(editor));
+				},
+			),
 		});
 
 		this.addCommand({
 			id: 'open-note-tasks',
 			name: 'Abrir las tareas de esta nota',
-			callback: () => {
+			callback: this.command('open-note-tasks', () => {
 				void this.openNoteTasksView();
-			},
+			}),
 		});
 
 		this.addCommand({
@@ -269,7 +541,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			checkCallback: (checking: boolean) => {
 				const file = this.app.workspace.getActiveFile();
 				if (file === null) return false;
-				if (!checking) void this.linkNoteToList(file);
+				if (!checking) this.command('link-note-to-list', () => this.linkNoteToList(file))();
 				return true;
 			},
 		});
@@ -280,7 +552,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			checkCallback: (checking: boolean) => {
 				const file = this.app.workspace.getActiveFile();
 				if (file === null || readNoteListId(this.app, file) === null) return false;
-				if (!checking) void this.unlinkNoteFromList(file);
+				if (!checking) this.command('unlink-note-from-list', () => this.unlinkNoteFromList(file))();
 				return true;
 			},
 		});
@@ -288,29 +560,62 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		this.addCommand({
 			id: 'brl-entry',
 			name: 'Anotar en el BRL',
-			editorCallback: (editor: Editor) => {
+			editorCallback: this.command('brl-entry', (editor: Editor) => {
 				new BrlEntryModal(this.app, {
 					defaultText: editor.getSelection(),
 					onSubmit: (text: string, kind: BrlKind) => this.sendBrlEntry(text, kind),
 				}).open();
-			},
+			}),
 		});
 
 		this.addCommand({
 			id: 'insert-brl-today',
 			name: 'Insertar el BRL de hoy como texto',
-			editorCallback: (editor: Editor) => {
+			editorCallback: this.command('insert-brl-today', (editor: Editor) => {
 				void this.insertBrlToday(editor);
-			},
+			}),
 		});
 
 		this.addCommand({
 			id: 'soplo-selection',
 			name: 'Soplo con la selección',
-			editorCallback: (editor: Editor, context: MarkdownView | MarkdownFileInfo) => {
-				this.openSoploModal(context.file ?? null, soploSource(editor));
-			},
+			editorCallback: this.command(
+				'soplo-selection',
+				(editor: Editor, context: MarkdownView | MarkdownFileInfo) => {
+					this.openSoploModal(context.file ?? null, soploSource(editor));
+				},
+			),
 		});
+
+		this.addCommand({
+			id: 'show-diagnostics',
+			name: 'Mostrar diagnóstico',
+			callback: this.command('show-diagnostics', () => {
+				new DiagnosticsModal(this.app, {
+					statusLines: () => this.statusLines(),
+					events: (count: number) => this.logger.recent(count),
+					buildReport: () => this.buildReport(),
+					saveReport: () => this.saveReport(),
+				}).open();
+			}),
+		});
+	}
+
+	/**
+	 * Un comando: se apunta que se ha ejecutado y su excepción no se escapa sin
+	 * registro. UN evento por comando, que es el trato del nivel `info`.
+	 */
+	private command<Args extends unknown[]>(
+		id: string,
+		run: (...args: Args) => unknown,
+	): (...args: Args) => void {
+		const wrapped = guarded(this.log, `comando ${id}`, (...args: Args) => {
+			this.log.info('Comando ejecutado', { command: id });
+			return run(...args);
+		});
+		return (...args: Args): void => {
+			wrapped(...args);
+		};
 	}
 
 	// ── BRL ──────────────────────────────────────────────────────────────────
@@ -322,9 +627,13 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	private async sendBrlEntry(text: string, kind: BrlKind): Promise<void> {
 		const operation = brlCreateOp(text, kind);
 		if (operation === null) {
+			this.log.warn('Entrada del BRL vacía, no se encola');
 			new Notice('La entrada necesita un texto.');
 			return;
 		}
+		// El TEXTO no se apunta: es lo que el usuario ha escrito. Solo el tipo y
+		// cuánto ocupa, que es lo que hace falta para seguir el rastro.
+		this.log.info('Acción del usuario', { action: 'anotar en el BRL', kind, length: text.length });
 
 		const file = this.app.workspace.getActiveFile();
 		const queued = await this.queue.enqueueBrl(operation.date, operation.entry, {
@@ -338,6 +647,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		await this.queue.flush();
 		const after = this.queue.pending().find((candidate) => candidate.id === queued.id);
 		if (after?.state === 'rejected') {
+			this.log.error('Lumbre rechazó la entrada del BRL', { id: queued.id, error: after.error });
 			new Notice(after.error ?? 'Lumbre rechazó la entrada del BRL.');
 		}
 		await this.refreshBrl();
@@ -354,14 +664,17 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		// ESCRIBE en la nota, y un texto de hace media hora pegado en el fichero ya
 		// no se distingue del de ahora. Si la lectura falla, no se pega nada.
 		if (read.error !== null || read.fetchedAt === null) {
+			this.log.warn('No se pega el BRL: la lectura falló', { error: read.error });
 			new Notice(read.error ?? 'No se pudo leer el BRL de hoy.');
 			return;
 		}
 		if (read.markdown.trim().length === 0) {
+			this.log.info('El registro de hoy está vacío, no se pega nada');
 			new Notice('El registro de hoy está vacío.');
 			return;
 		}
 		editor.replaceSelection(read.markdown.trimEnd().concat('\n'));
+		this.log.info('BRL de hoy pegado en la nota', { chars: read.markdown.length });
 		new Notice('BRL de hoy insertado en la nota');
 	}
 
@@ -374,12 +687,20 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	private openSoploModal(file: TFile | null, source: string): void {
 		const text = source.trim();
 		if (text.length === 0) {
+			this.log.info('Soplo sin texto que mandar');
 			new Notice('Selecciona un texto, o pon el cursor en un párrafo.');
 			return;
 		}
 
 		const truncated = text.length > MAX_AGENT_PROMPT_LENGTH;
 		const prompt = truncated ? text.slice(0, MAX_AGENT_PROMPT_LENGTH) : text;
+		// El texto que se manda a Soplo es contenido de la nota: se apunta cuánto
+		// ocupa y si hubo que recortarlo, nunca qué dice.
+		this.logger.child('modal').info('Soplo abierto', {
+			notePath: file?.path ?? null,
+			length: prompt.length,
+			truncated,
+		});
 
 		new SoploModal(this.app, {
 			text: prompt,
@@ -404,6 +725,14 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		file: TFile | null,
 	): Promise<void> {
 		const { ops, createdTaskIds, skipped } = planToOps(plan.plan, checked);
+		this.logger.child('modal').info('Plan de Soplo aplicado', {
+			notePath: file?.path ?? null,
+			proposed: plan.plan.length,
+			checked: checked.filter((flag) => flag).length,
+			ops: ops.length,
+			creates: createdTaskIds.length,
+			skipped,
+		});
 		if (ops.length === 0) {
 			new Notice(
 				skipped > 0
@@ -442,6 +771,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		await this.queue.flush();
 		const after = this.queue.pending().find((candidate) => candidate.id === operation.id);
 		if (after?.state === 'rejected') {
+			this.log.error('Lumbre rechazó parte del plan', { id: operation.id, error: after.error });
 			new Notice(after.error ?? 'Lumbre rechazó parte del plan.');
 		}
 		if (file !== null && navigator.onLine) await this.links.refresh(file.path, this.client);
@@ -464,12 +794,20 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	}
 
 	private async uploadAttachment(task: LumbreTask, file: TFile): Promise<void> {
+		const panel = this.logger.child('panel');
 		const size = checkUploadSize(file.stat.size);
 		if (!size.ok) {
+			panel.warn('Adjunto rechazado por tamaño', { taskId: task.id, bytes: file.stat.size });
 			new Notice(size.message);
 			return;
 		}
 
+		panel.info('Acción del usuario', {
+			action: 'adjuntar fichero',
+			taskId: task.id,
+			bytes: file.stat.size,
+			extension: file.extension,
+		});
 		new Notice(`Subiendo ${file.name} (${formatBytes(file.stat.size)})…`);
 		const bytes = await this.app.vault.readBinary(file);
 		const result = await this.client.uploadAttachment(
@@ -480,6 +818,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		);
 
 		if (result.ok) {
+			panel.info('Adjunto subido', { taskId: task.id, attachmentId: result.value.id });
 			new Notice(`${file.name} adjuntado a «${task.content}»`);
 			// El recuento de adjuntos sale de la tarea, así que hay que releerla.
 			for (const notePath of this.links.notesForTask(task.id)) {
@@ -488,6 +827,12 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			this.notifyDataChange();
 			return;
 		}
+
+		panel.error('No se pudo subir el adjunto', {
+			taskId: task.id,
+			reason: result.reason,
+			status: result.status,
+		});
 
 		// Un fallo de red se puede reintentar tal cual; un 404 significa que la
 		// tarea ya no está viva en Lumbre y reintentar no arreglaría nada.
@@ -512,6 +857,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 
 	/** Abre el panel en la barra lateral derecha y lo trae al frente. */
 	private async openNoteTasksView(): Promise<void> {
+		this.logger.child('panel').info('Panel de tareas abierto');
 		const existing = this.app.workspace.getLeavesOfType(NOTE_TASKS_VIEW_TYPE);
 		const leaf = existing[0] ?? this.app.workspace.getRightLeaf(false);
 		if (leaf === null) return;
@@ -550,6 +896,16 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			label: file?.basename ?? 'Sin nota',
 			excerpt,
 		};
+		this.logger.child('modal').info('Acción del usuario', {
+			action: 'enviar como tarea',
+			notePath: target.notePath,
+			listId: draft.listId ?? null,
+			subtasks: draft.subtasks?.length ?? 0,
+		});
+		// El título lo escribe el usuario: solo en `debug` y recortado a 80.
+		if (this.logger.enabled('debug')) {
+			this.logger.child('modal').debug('Tarea enviada', { title: shortTitle(draft.title) });
+		}
 		const operation = await this.queue.enqueueCreate(draft, target);
 
 		if (file !== null) {
@@ -569,6 +925,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		await this.queue.flush();
 		const after = this.queue.pending().find((candidate) => candidate.id === operation.id);
 		if (after?.state === 'rejected') {
+			this.log.error('Lumbre rechazó la tarea', { id: operation.id, error: after.error });
 			new Notice(after.error ?? 'Lumbre rechazó la tarea.');
 		}
 		if (file !== null && navigator.onLine) await this.links.refresh(file.path, this.client);
@@ -579,11 +936,16 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	private async linkNoteToList(file: TFile): Promise<void> {
 		const lists = await this.lists.get();
 		if (lists.length === 0) {
+			this.log.warn('No hay listas que enseñar para vincular la nota');
 			new Notice('No se han podido leer las listas de Lumbre.');
 			return;
 		}
 		new ListSuggestModal(this.app, lists, (list) => {
 			void writeNoteListId(this.app, file, list.id).then(() => {
+				this.logger.child('vault').info('Nota vinculada a una lista', {
+					notePath: file.path,
+					listId: list.id,
+				});
 				new Notice(`Nota vinculada a la lista ${list.name}`);
 				this.notifyDataChange();
 			});
@@ -592,6 +954,10 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 
 	private async unlinkNoteFromList(file: TFile): Promise<void> {
 		await writeNoteListId(this.app, file, null);
+		this.logger.child('vault').info('Quitado el vínculo de la nota con su lista', {
+			notePath: file.path,
+			property: NOTE_LIST_PROPERTY,
+		});
 		new Notice(`Quitada la propiedad ${NOTE_LIST_PROPERTY} de la nota`);
 		this.notifyDataChange();
 	}
@@ -613,6 +979,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 				this.dataListeners.add(listener);
 				return () => this.dataListeners.delete(listener);
 			},
+			logger: this.logger.child('block'),
 		};
 	}
 
@@ -624,6 +991,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 				this.dataListeners.add(listener);
 				return () => this.dataListeners.delete(listener);
 			},
+			logger: this.logger.child('block'),
 		};
 	}
 
@@ -633,6 +1001,11 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	 */
 	private async setTaskDone(task: LumbreTask, done: boolean, notePath: string): Promise<void> {
 		const file = notePath.length === 0 ? null : this.app.vault.getFileByPath(notePath);
+		this.logger.child('block').info('Acción del usuario', {
+			action: done ? 'completar tarea' : 'reabrir tarea',
+			taskId: task.id,
+			notePath,
+		});
 		const operation = await this.queue.enqueueStatus(task.id, done, {
 			notePath,
 			label: file?.basename ?? 'Sin nota',
@@ -643,6 +1016,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		await this.queue.flush();
 		const after = this.queue.pending().find((candidate) => candidate.id === operation.id);
 		if (after?.state === 'rejected') {
+			this.log.error('Lumbre rechazó la operación', { id: operation.id, error: after.error });
 			new Notice(after.error ?? 'Lumbre rechazó la operación.');
 		}
 		this.notifyDataChange();
@@ -684,6 +1058,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 				this.dataListeners.add(listener);
 				return () => this.dataListeners.delete(listener);
 			},
+			logger: this.logger.child('panel'),
 		};
 	}
 

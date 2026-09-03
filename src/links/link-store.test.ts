@@ -1,8 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { Logger } from '../diagnostics/logger';
 import type { LumbreResult } from '../lumbre/client';
 import type { LumbreTask } from '../lumbre/types';
-import { LinkStore, type LinkStorage, type LumbreTaskLink } from './link-store';
+import {
+	LinkStore,
+	MANY_LINKS_WARNING,
+	type LinkStorage,
+	type LumbreTaskLink,
+} from './link-store';
 
 function task(overrides: Partial<LumbreTask> = {}): LumbreTask {
 	return {
@@ -220,5 +226,113 @@ describe('LinkStore.refresh', () => {
 
 		expect(await store.refresh('Vacía.md', { getTasksByIds })).toEqual([]);
 		expect(getTasksByIds).not.toHaveBeenCalled();
+	});
+});
+
+describe('LinkStore: registro de diagnóstico', () => {
+	function loggedStore(storage: LinkStorage): { store: LinkStore; logger: Logger } {
+		const logger = Logger.create({ console: null, level: 'info' });
+		return { store: new LinkStore({ storage, logger: logger.child('links') }), logger };
+	}
+
+	it('apunta el vínculo creado con la ruta y el id de la tarea', async () => {
+		const { store, logger } = loggedStore(memoryStorage());
+
+		await store.link('Cocina.md', task(), TARGET);
+
+		expect(logger.recent()[0]).toMatchObject({ level: 'info', message: 'Vínculo creado' });
+		expect(logger.recent()[0]?.data).toMatchObject({
+			notePath: 'Cocina.md',
+			taskId: 'task-1',
+			inNote: 1,
+		});
+	});
+
+	it('en `info` NO apunta el título de la tarea, que lo escribe el usuario', async () => {
+		const { store, logger } = loggedStore(memoryStorage());
+
+		await store.link('Cocina.md', task({ content: 'Llamar al médico por lo del lunes' }), TARGET);
+
+		expect(JSON.stringify(logger.recent())).not.toContain('médico');
+	});
+
+	it('apunta el desvinculado y el renombrado con las dos rutas', async () => {
+		const storage = memoryStorage();
+		const { store, logger } = loggedStore(storage);
+		const link = await store.link('Cocina.md', task(), TARGET);
+
+		await store.renamePath('Cocina.md', 'Casa/Cocina.md');
+		await store.unlink(link.id);
+
+		const messages = logger.recent().map((event) => event.message);
+		expect(messages).toContain('Vínculos movidos por un renombrado');
+		expect(messages).toContain('Vínculo quitado');
+		const renamed = logger
+			.recent()
+			.find((event) => event.message === 'Vínculos movidos por un renombrado');
+		expect(renamed?.data).toMatchObject({
+			oldPath: 'Cocina.md',
+			newPath: 'Casa/Cocina.md',
+			moved: 1,
+		});
+	});
+
+	it('la relectura dice cuántos vínculos había y cuántos faltaron', async () => {
+		const storage = memoryStorage();
+		const { store, logger } = loggedStore(storage);
+		await store.link('Cocina.md', task(), TARGET);
+		await store.link('Cocina.md', task({ id: 'task-2' }), TARGET);
+
+		await store.refresh('Cocina.md', {
+			getTasksByIds: async (): Promise<LumbreResult<LumbreTask[]>> => ({
+				ok: true,
+				value: [task()],
+			}),
+		});
+
+		const refreshed = logger.recent().find((event) => event.message === 'Vínculos releídos');
+		expect(refreshed?.level).toBe('warn');
+		expect(refreshed?.data).toMatchObject({ links: 2, refreshed: 1, missing: 1 });
+	});
+
+	it('una relectura fallida sale como aviso con su motivo', async () => {
+		const { store, logger } = loggedStore(memoryStorage());
+		await store.link('Cocina.md', task(), TARGET);
+
+		await store.refresh('Cocina.md', {
+			getTasksByIds: async (): Promise<LumbreResult<LumbreTask[]>> => ({
+				ok: false,
+				reason: 'network',
+			}),
+		});
+
+		expect(
+			logger.recent().find((event) => event.message === 'Relectura de los vínculos fallida'),
+		).toMatchObject({ level: 'warn' });
+	});
+
+	it('avisa cuando una nota pasa de 50 vínculos', async () => {
+		const storage = memoryStorage();
+		const { store, logger } = loggedStore(storage);
+
+		for (let index = 0; index <= MANY_LINKS_WARNING; index += 1) {
+			await store.link('Cocina.md', task({ id: `task-${index}` }), TARGET);
+		}
+
+		const warning = logger
+			.recent()
+			.find((event) => event.message === 'Esa nota tiene muchísimos vínculos');
+		expect(warning?.data).toMatchObject({ links: MANY_LINKS_WARNING + 1 });
+	});
+
+	it('marcar huérfanos sale como aviso', async () => {
+		const { store, logger } = loggedStore(memoryStorage());
+		await store.link('Cocina.md', task(), TARGET);
+
+		await store.markDeleted('Cocina.md');
+
+		expect(
+			logger.recent().find((event) => event.message === 'Vínculos huérfanos: su nota ha desaparecido'),
+		).toMatchObject({ level: 'warn', data: { path: 'Cocina.md', marked: 1 } });
 	});
 });
