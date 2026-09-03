@@ -9,10 +9,13 @@ export interface TokenStore {
 	set(token: string | null): Promise<void>;
 }
 
-/** Lo que el store necesita del plugin: leer y escribir su data.json. */
-export interface PluginDataHost {
-	loadData(): Promise<unknown>;
-	saveData(data: unknown): Promise<void>;
+/**
+ * Lo que el store necesita del almacén del plugin. Lo cumple `PluginStore`, que
+ * es quien escribe `data.json` entero.
+ */
+export interface TokenHost {
+	readToken(): string | null;
+	writeToken(token: string | null): Promise<void>;
 }
 
 /**
@@ -22,26 +25,14 @@ export interface PluginDataHost {
  * Cambiar de almacén es cambiar esta implementación, no sus consumidores.
  */
 export class PluginDataTokenStore implements TokenStore {
-	constructor(private readonly host: PluginDataHost) {}
+	constructor(private readonly host: TokenHost) {}
 
-	async get(): Promise<string | null> {
-		const data = await this.readData();
-		const token = data['token'];
-		return typeof token === 'string' && token.length > 0 ? token : null;
+	get(): Promise<string | null> {
+		const token = this.host.readToken();
+		return Promise.resolve(token !== null && token.length > 0 ? token : null);
 	}
 
 	async set(token: string | null): Promise<void> {
-		const data = await this.readData();
-		if (token === null || token.length === 0) {
-			delete data['token'];
-		} else {
-			data['token'] = token;
-		}
-		await this.host.saveData(data);
-	}
-
-	private async readData(): Promise<Record<string, unknown>> {
-		const raw = await this.host.loadData();
-		return raw !== null && typeof raw === 'object' ? { ...(raw as Record<string, unknown>) } : {};
+		await this.host.writeToken(token !== null && token.length > 0 ? token : null);
 	}
 }
