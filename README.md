@@ -2,11 +2,38 @@
 
 Plugin de escritorio que conecta el vault de Obsidian con [Lumbre](https://lumbre.pro), el gestor de tareas.
 
+## Qué hace
+
+El plugin **proyecta** tareas de Lumbre dentro de Obsidian. Nunca las copia al Markdown: la tarea
+vive en Lumbre y la nota es tuya.
+
+**Tres comandos** (en la paleta salen con el prefijo «Lumbre:»):
+
+| Comando | Qué hace |
+| --- | --- |
+| **Enviar como tarea** | Abre un formulario con el título ya puesto (la selección, o la línea del cursor sin su marcador de lista), lista, fecha o «Algún día», hora, prioridad, fecha límite, notas y subtareas. También está en el menú contextual del editor, como «Enviar a Lumbre». |
+| **Vincular esta nota a una lista** | Escribe la propiedad `lumbre-list` en el frontmatter con el id de la lista elegida. |
+| **Quitar el vínculo con la lista** | Borra esa propiedad. |
+
+**Un panel lateral**, «Tareas de esta nota» (icono en la barra izquierda, o el comando **Abrir las
+tareas de esta nota**). Sigue a la nota abierta y enseña:
+
+- Las tareas de Lumbre vinculadas a esa nota, con checkbox para completarlas o reabrirlas, su lista y
+  su fecha, botón para abrirlas en Lumbre y para desvincularlas.
+- Un buscador para vincular una tarea que ya existe, por título o por nombre de lista.
+- Si la nota tiene `lumbre-list`, todas las tareas de esa lista agrupadas por sección.
+
+Completar una tarea no es inmediato: la escritura va por una cola durable y el chip dice «Enviando…»
+hasta que Lumbre la confirma al releerla. Sin conexión, la cabecera lo dice y se sigue enseñando lo
+último confirmado, nunca una caché disfrazada de dato fresco.
+
+`lumbre-list` es **lo único** que el plugin escribe dentro de una nota, y solo cuando lo pides con
+ese comando.
+
 ## Estado
 
-Base sin funciones de producto. Lo que hay: el esqueleto del plugin, una pestaña de ajustes con
-origen y token personal, un botón de prueba de conexión, un cliente HTTP mínimo con tests, el gate de
-CI y el pipeline de publicación para BRAT. Lo que falta está en la lista `lumbre-obsidian` de Lumbre.
+Lo que falta (la API pública para Dataview y js-engine, y dónde se guarda el token) está en la lista
+`lumbre-obsidian` de Lumbre. El detalle de lo construido, en `docs/ESTADO.md`.
 
 ## Instalación por BRAT
 

@@ -89,8 +89,17 @@ export class LinkStore {
 	 * Enlaza una tarea con una nota. Si esa pareja nota+tarea ya existe, se
 	 * actualiza en vez de duplicarse: enlazar dos veces lo mismo es un gesto
 	 * repetido del usuario, no dos enlaces.
+	 *
+	 * `syncState` es `materialized` cuando la tarea viene LEÍDA de Lumbre (vincular
+	 * una tarea existente). Al encolar una creación se pasa `pending_local`: ahí la
+	 * tarea todavía no existe en Lumbre y la caché es el borrador, no un hecho.
 	 */
-	async link(path: string, task: LumbreTask, target: LinkTargetInfo): Promise<LumbreTaskLink> {
+	async link(
+		path: string,
+		task: LumbreTask,
+		target: LinkTargetInfo,
+		syncState: OperationState = 'materialized',
+	): Promise<LumbreTaskLink> {
 		const links = this.all();
 		const existing = links.find(
 			(link) => link.notePath === path && link.taskId === task.id,
@@ -101,7 +110,7 @@ export class LinkStore {
 			existing.label = target.label;
 			existing.excerpt = target.excerpt;
 			existing.task = task;
-			existing.syncState = 'materialized';
+			existing.syncState = syncState;
 			existing.error = null;
 			existing.orphanedAt = null;
 			existing.updatedAt = stamp;
@@ -116,7 +125,7 @@ export class LinkStore {
 			label: target.label,
 			excerpt: target.excerpt,
 			task,
-			syncState: 'materialized',
+			syncState,
 			error: null,
 			updatedAt: stamp,
 			orphanedAt: null,

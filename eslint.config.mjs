@@ -44,12 +44,16 @@ export default defineConfig(
 	},
 	...obsidianmd.configs.recommended,
 	{
-		// Los scripts de scripts/ no son código del plugin: corren en Node, dentro
-		// del gate o de CI, y su salida por consola es justamente su producto.
-		files: ['scripts/**/*.mjs'],
+		// Los scripts de scripts/ y la config de vitest no son código del plugin:
+		// corren en Node, dentro del gate o de CI, y su salida por consola es
+		// justamente su producto. `no-nodejs-modules` existe porque el plugin corre
+		// también en móvil (isDesktopOnly: false) y ahí no hay Node; estos ficheros
+		// no se empaquetan en main.js, así que la regla no les aplica.
+		files: ['scripts/**/*.mjs', '*.config.mts'],
 		rules: {
 			'obsidianmd/rule-custom-message': 'off',
 			'obsidianmd/hardcoded-config-path': 'off',
+			'obsidianmd/no-nodejs-modules': 'off',
 		},
 	},
 	{

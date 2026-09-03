@@ -246,6 +246,39 @@ export function listsFromApi(raw: unknown): LumbreList[] {
 }
 
 /**
+ * La tarea PROVISIONAL de un borrador recién encolado, para poder pintar el
+ * vínculo antes de que Lumbre la materialice. El id es el `clientTaskId`, que es
+ * justo el que tendrá la tarea de verdad.
+ *
+ * Esto NO es una tarea de Lumbre: es lo que el usuario acaba de escribir. Vive
+ * siempre con el vínculo en un estado distinto de `materialized`, y la primera
+ * relectura buena la sustituye por la de verdad.
+ */
+export function taskFromDraft(
+	draft: TaskDraft,
+	clientTaskId: string,
+	list: LumbreRef | null = null,
+): LumbreTask {
+	return {
+		id: clientTaskId,
+		content: draft.title,
+		notes: draft.notes ?? null,
+		date: draft.date ?? null,
+		someday: draft.someday === true,
+		deadline: draft.deadline ?? null,
+		time: draft.time ?? null,
+		priority: draft.priority ?? 'p4',
+		done: false,
+		cancelledAt: null,
+		archivedAt: null,
+		list,
+		section: null,
+		rolloverCount: 0,
+		parentId: null,
+	};
+}
+
+/**
  * Un `TaskDraft` al cuerpo de `POST /api/ingest`. Solo se mandan las claves
  * informadas: el endpoint distingue "no dijo nada" de "dijo null" en `someday`
  * y en la lista destino, así que mandar `null` por rellenar cambia lo que hace.

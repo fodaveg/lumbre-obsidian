@@ -1,1 +1,295 @@
-/* Estilos del plugin Lumbre. Sin reglas todavía: la base no pinta nada propio. */
+/*
+ * Estilos del plugin Lumbre.
+ *
+ * Todo con prefijo `.lumbre-` y SOLO con variables de Obsidian: así el panel
+ * hereda el tema del usuario, claro u oscuro, sin un color propio que se salga.
+ * Nada de tamaños en píxeles sueltos salvo los mínimos táctiles, que son una
+ * medida de accesibilidad y no un valor de tema.
+ */
+
+.lumbre-panel {
+	/* El panel ES el contenedor de las consultas de más abajo: lo que se estrecha
+	   es el leaf, no la ventana. */
+	container-type: inline-size;
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-3);
+	padding: var(--size-4-2);
+	font-size: var(--font-ui-small);
+}
+
+/* ── Cabecera ─────────────────────────────────────────────────────────────── */
+
+.lumbre-panel__header {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--size-4-2);
+}
+
+.lumbre-panel__note {
+	flex: 1 1 auto;
+	min-width: 0;
+	font-weight: var(--font-semibold);
+	color: var(--text-normal);
+	overflow-wrap: anywhere;
+}
+
+.lumbre-panel__offline {
+	margin-right: var(--size-4-1);
+	color: var(--text-muted);
+	font-weight: var(--font-normal);
+}
+
+/* ── Secciones ────────────────────────────────────────────────────────────── */
+
+.lumbre-section {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+}
+
+.lumbre-section__title {
+	margin: 0;
+	font-size: var(--font-ui-smaller);
+	font-weight: var(--font-semibold);
+	color: var(--text-muted);
+	text-transform: uppercase;
+	letter-spacing: 0.05em;
+}
+
+.lumbre-list {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-1);
+}
+
+.lumbre-group__title {
+	margin-bottom: var(--size-4-1);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.lumbre-groups > .lumbre-group + .lumbre-group {
+	margin-top: var(--size-4-3);
+}
+
+.lumbre-empty {
+	padding: var(--size-4-2);
+	border: 1px dashed var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	color: var(--text-muted);
+}
+
+.lumbre-notice {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: var(--size-4-2);
+	padding: var(--size-4-2);
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+	color: var(--text-muted);
+}
+
+.lumbre-notice--error {
+	color: var(--text-error);
+}
+
+/* ── Una tarea ────────────────────────────────────────────────────────────── */
+
+.lumbre-task {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-1);
+	padding: var(--size-4-2);
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+}
+
+.lumbre-task:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.lumbre-task__main {
+	display: flex;
+	align-items: flex-start;
+	gap: var(--size-4-2);
+}
+
+.lumbre-task__check {
+	flex: 0 0 auto;
+	margin-top: 0.15em;
+}
+
+/* Hueco del checkbox en una tarea cancelada, para que las filas no bailen. */
+.lumbre-task__slot {
+	flex: 0 0 auto;
+	width: var(--size-4-4);
+}
+
+.lumbre-task__title {
+	flex: 1 1 auto;
+	min-width: 0;
+	color: var(--text-normal);
+	overflow-wrap: anywhere;
+}
+
+.lumbre-task__title--cancelled {
+	color: var(--text-muted);
+	text-decoration: line-through;
+}
+
+.lumbre-task__meta {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.lumbre-task__actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-1);
+}
+
+/* ── Chips de estado ──────────────────────────────────────────────────────── */
+
+.lumbre-chip {
+	flex: 0 0 auto;
+	padding: 0 var(--size-4-1);
+	border-radius: var(--radius-s);
+	background-color: var(--background-modifier-border);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	white-space: nowrap;
+	cursor: help;
+}
+
+.lumbre-chip--pending {
+	color: var(--text-accent);
+}
+
+.lumbre-chip--warning {
+	color: var(--text-warning, var(--text-muted));
+}
+
+.lumbre-chip--error {
+	color: var(--text-error);
+}
+
+/* ── Botones ──────────────────────────────────────────────────────────────── */
+
+.lumbre-button {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-4-1);
+	padding: var(--size-4-1) var(--size-4-2);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background-color: var(--interactive-normal);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	cursor: pointer;
+}
+
+.lumbre-button:hover:not(:disabled) {
+	background-color: var(--interactive-hover);
+}
+
+.lumbre-button:focus-visible {
+	outline: 2px solid var(--interactive-accent);
+	outline-offset: 2px;
+}
+
+.lumbre-button:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+.lumbre-button--cta {
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.lumbre-button--cta:hover:not(:disabled) {
+	background-color: var(--interactive-accent-hover);
+}
+
+.lumbre-button--danger {
+	color: var(--text-error);
+}
+
+.lumbre-button__icon {
+	display: inline-flex;
+	align-items: center;
+}
+
+.lumbre-button__icon .svg-icon {
+	width: var(--icon-s);
+	height: var(--icon-s);
+}
+
+/* ── Buscador ─────────────────────────────────────────────────────────────── */
+
+.lumbre-search {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+}
+
+.lumbre-search__input {
+	flex: 1 1 10em;
+	min-width: 0;
+}
+
+.lumbre-suggest__meta {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+/* ── Modal de enviar ──────────────────────────────────────────────────────── */
+
+.lumbre-send-modal .lumbre-send-modal__title {
+	width: 100%;
+}
+
+.lumbre-send-modal .setting-item {
+	flex-wrap: wrap;
+}
+
+/* ── Estrecho y móvil ─────────────────────────────────────────────────────── */
+
+/*
+ * Por debajo de unos 240 px de leaf no caben dos columnas: cada control ocupa su
+ * línea. Es `@container` y no `@media` a propósito, porque lo que se estrecha es
+ * el panel, no la ventana.
+ */
+@container (max-width: 260px) {
+	.lumbre-panel__header,
+	.lumbre-search {
+		flex-direction: column;
+		align-items: stretch;
+	}
+}
+
+.lumbre-panel--mobile .lumbre-button {
+	min-height: 44px;
+	padding: var(--size-4-2) var(--size-4-3);
+	font-size: var(--font-ui-small);
+}
+
+.lumbre-panel--mobile .lumbre-task {
+	padding: var(--size-4-3);
+}
+
+.lumbre-panel--mobile .lumbre-task__check {
+	width: 22px;
+	height: 22px;
+}
+
+.lumbre-panel--mobile .lumbre-search__input {
+	min-height: 44px;
+}
