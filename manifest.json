@@ -1,0 +1,10 @@
+{
+	"id": "lumbre",
+	"name": "Lumbre",
+	"version": "0.1.0",
+	"minAppVersion": "1.11.4",
+	"description": "Conecta el vault con Lumbre, el gestor de tareas.",
+	"author": "fodaveg",
+	"authorUrl": "https://lumbre.pro",
+	"isDesktopOnly": true
+}

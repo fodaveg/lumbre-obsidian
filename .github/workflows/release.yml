@@ -1,0 +1,69 @@
+name: Release
+
+# Este workflow es el dueño del camino del tag: pasa el gate, comprueba que el
+# tag es exactamente la versión del manifest, publica los tres assets sueltos
+# (BRAT los descarga por nombre, no en un zip) y vuelve a comprobar contra lo
+# que GitHub tiene de verdad, que es la mitad que se olvida.
+#
+# `contents: write` vive aquí y en ningún otro sitio. ci.yml corre en cada rama
+# y en cada pull request y se queda en `contents: read`: darle permiso de
+# escritura para poder publicar sería dárselo también a cualquier rama.
+
+on:
+  push:
+    tags: ['*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.20.0'
+          cache: npm
+      - run: npm ci
+
+      # El gate corre DENTRO del job de publicación a propósito: una corrida
+      # verde de ci.yml sobre el mismo commit es otro workflow con otro
+      # resultado, y nada de aquí puede depender de ella.
+      - name: Gate
+        run: npm run check
+
+      - name: Rechazar un tag que no sea la versión del manifest
+        run: node scripts/verify-release.mjs --tag "$GITHUB_REF_NAME"
+
+      - name: Publicar
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" main.js manifest.json styles.css \
+            --title "$TAG" \
+            --notes "Lumbre $TAG"
+
+      # Segunda pasada, ahora contra lo que GitHub tiene: prueba que la subida
+      # hizo lo que decía el plan, no solo que el comando salió con 0.
+      - name: Comprobar la release publicada
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${TAG}" > published.json
+          node scripts/verify-release.mjs --published published.json
+
+      - name: Informar del conjunto de assets publicado
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release view "$TAG" --json tagName,isDraft,assets

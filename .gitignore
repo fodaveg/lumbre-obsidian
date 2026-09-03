@@ -1,0 +1,12 @@
+node_modules/
+main.js
+*.map
+.DS_Store
+.idea/
+.vscode/
+coverage/
+.env
+.env.*
+*.pem
+*.key
+/.claude/
