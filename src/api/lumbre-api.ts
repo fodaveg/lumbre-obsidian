@@ -32,6 +32,7 @@ import type { LumbreTaskLink, LinkStore } from '../links/link-store';
 import { describeFailure, type LumbreClient } from '../lumbre/client';
 import type { ListCache } from '../lumbre/list-cache';
 import type { LinkTarget, OperationQueue } from '../lumbre/queue';
+import type { WeeklySnapshotOptions } from '../review/weekly-snapshot';
 import { taskDeepLinks, type LumbreList, type LumbreTask, type TaskDraft } from '../lumbre/types';
 
 /** El evento que se dispara en el workspace de Obsidian. Lo escucha Dataview. */
@@ -90,6 +91,11 @@ export interface LumbreApiDeps {
 	logger: Logger;
 	/** El informe de diagnóstico en texto plano. Lo compone `main.ts`. */
 	buildReport(): string;
+	/**
+	 * El Markdown de la foto semanal. Lo cablea `main.ts`, que es quien tiene el
+	 * cliente: aquí solo se expone, para que una plantilla pueda pedirlo.
+	 */
+	weeklySnapshot(options?: WeeklySnapshotOptions): Promise<string>;
 }
 
 /**
@@ -208,6 +214,20 @@ export class LumbreApi {
 	async reopenTask(id: string, target?: LumbreApiTarget): Promise<void> {
 		this.called('reopenTask', { id, notePath: target?.notePath ?? null });
 		await this.setDone(id, false, target);
+	}
+
+	/**
+	 * El Markdown de la foto semanal de la revisión, para pegarlo desde una
+	 * plantilla (Templater, js-engine). Es texto de SOLO LECTURA y de ese momento:
+	 * ni proyecta tareas ni escribe nada, lo escribe quien llama donde quiera.
+	 *
+	 * Gasta una petición por lista de Lumbre, en serie y con intervalo, así que
+	 * tarda del orden de segundos. NO va por la caché de los bloques: una foto es
+	 * de ahora, no de hace 30 segundos.
+	 */
+	async weeklySnapshot(options?: WeeklySnapshotOptions): Promise<string> {
+		this.called('weeklySnapshot', { seed: options?.seed ?? null });
+		return this.deps.weeklySnapshot(options);
 	}
 
 	/** Los vínculos nota ↔ tarea de una nota, por su ruta dentro del vault. */

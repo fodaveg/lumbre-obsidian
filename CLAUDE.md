@@ -44,6 +44,8 @@ guiones largos como inciso: coma, punto o paréntesis.
   relectura por id y el parseo del bloque. Sin red.
 - `src/soplo/plan-to-ops.ts`: el plan de Soplo a ops de `POST /api/batch`, solo lo MARCADO. Las
   mutaciones viajan verbatim (`mutateRaw`): el payload lo escribió Lumbre y es lo que se aprobó.
+- `src/review/weekly-snapshot.ts`: el texto de la foto semanal. FOTO FIJA de solo lectura, con la
+  fecha en la cabecera, y sus líneas NUNCA son casillas de Markdown. Sin red propia.
 - `src/attachments/upload.ts`: el tope de 25 MB, las cabeceras y el cuerpo de la subida. Sin red.
 - `src/api/lumbre-api.ts`: la API PÚBLICA (`app.plugins.plugins.lumbre.api`), documentada en
   `docs/API.md`. Superficie pequeña y estable; todo lo que muta pasa por la cola.

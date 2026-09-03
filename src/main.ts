@@ -44,11 +44,17 @@ import {
 	describeFailure,
 	LumbreClient,
 	MAX_AGENT_PROMPT_LENGTH,
+	type AgentConsentState,
 	type AgentPlan,
 	type LumbreResult,
 } from './lumbre/client';
 import { ListCache } from './lumbre/list-cache';
 import { OperationQueue, type LinkTarget } from './lumbre/queue';
+import {
+	collectWeeklySnapshot,
+	type WeeklySnapshotDeps,
+	type WeeklySnapshotOptions,
+} from './review/weekly-snapshot';
 import { planToOps } from './soplo/plan-to-ops';
 import { SoploModal } from './soplo/soplo-modal';
 import { taskFromDraft, type LumbreTask, type TaskDraft } from './lumbre/types';
@@ -207,6 +213,8 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			},
 			logger: this.logger.child('api'),
 			buildReport: () => this.buildReport(),
+			weeklySnapshot: (options?: WeeklySnapshotOptions) =>
+				this.weeklySnapshot(options).then((snapshot) => snapshot.markdown),
 		});
 
 		this.addSettingTab(new LumbreSettingTab(this.app, this));
@@ -577,6 +585,14 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		});
 
 		this.addCommand({
+			id: 'insert-weekly-snapshot',
+			name: 'Insertar la foto semanal',
+			editorCallback: this.command('insert-weekly-snapshot', (editor: Editor) => {
+				void this.insertWeeklySnapshot(editor);
+			}),
+		});
+
+		this.addCommand({
 			id: 'soplo-selection',
 			name: 'Soplo con la selección',
 			editorCallback: this.command(
@@ -678,6 +694,62 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		new Notice('BRL de hoy insertado en la nota');
 	}
 
+	// ── La foto semanal ──────────────────────────────────────────────────────
+
+	/**
+	 * Compone la foto semanal. Es la mitad de LEER de la revisión: texto de solo
+	 * lectura, sin estadística y sin estado nuevo. Lo llaman el comando y la API
+	 * pública (`api.weeklySnapshot()`), y por eso vive aquí y no en cada uno.
+	 */
+	private weeklySnapshot(options?: WeeklySnapshotOptions): ReturnType<typeof collectWeeklySnapshot> {
+		const deps: WeeklySnapshotDeps = {
+			client: this.client,
+			// El intervalo entre las peticiones por lista. `window.setTimeout` y no
+			// `setInterval` registrado: es una espera de una vez, no un latido.
+			wait: (ms: number) =>
+				new Promise<void>((done) => {
+					window.setTimeout(done, ms);
+				}),
+			logger: this.logger.child('main'),
+		};
+		return collectWeeklySnapshot(deps, options ?? {});
+	}
+
+	/**
+	 * Pega la foto semanal en el cursor. Foto FIJA, igual que la del BRL: desde
+	 * que se pega, el texto es del usuario y el plugin no vuelve a tocarlo.
+	 *
+	 * Con los TRES apartados en rojo no se pega nada, por lo mismo que el BRL: lo
+	 * que quedaría en la nota serían tres líneas de error, y eso no es una foto de
+	 * la semana. Con uno o dos sí se pega: la línea dice cuál falló, así que el
+	 * texto no miente sobre lo que no se pudo leer.
+	 */
+	private async insertWeeklySnapshot(editor: Editor): Promise<void> {
+		new Notice('Componiendo la foto semanal…');
+		const snapshot = await this.weeklySnapshot();
+
+		if (snapshot.failures === snapshot.sections) {
+			this.log.warn('No se pega la foto semanal: no se ha podido leer nada', {
+				sections: snapshot.sections,
+			});
+			new Notice('No se ha podido leer nada de Lumbre; no se pega nada.');
+			return;
+		}
+
+		editor.replaceSelection(snapshot.markdown);
+		this.log.info('Foto semanal pegada en la nota', {
+			chars: snapshot.markdown.length,
+			failures: snapshot.failures,
+		});
+		new Notice(
+			snapshot.failures === 0
+				? 'Foto semanal insertada'
+				: `Foto semanal insertada, con ${snapshot.failures} ${
+						snapshot.failures === 1 ? 'apartado' : 'apartados'
+					} sin leer`,
+		);
+	}
+
 	// ── Soplo ────────────────────────────────────────────────────────────────
 
 	/**
@@ -705,6 +777,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		new SoploModal(this.app, {
 			text: prompt,
 			truncated,
+			consent: (): Promise<AgentConsentState> => this.client.agentConsent(),
 			ask: (): Promise<LumbreResult<AgentPlan>> => this.client.agent(prompt),
 			apply: (plan: AgentPlan, checked: boolean[]) => this.applySoploPlan(plan, checked, file),
 			openUrl: (url: string) => {

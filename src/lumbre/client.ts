@@ -255,6 +255,15 @@ export interface AgentPlan {
 	truncated: boolean;
 }
 
+/**
+ * Estado del consentimiento de Soplo en la cuenta.
+ *
+ * `unknown` NO es un error que haya que enseñar: significa "no se ha podido
+ * saber", y quien pregunta sigue como si no hubiera preguntado. De los tres, es
+ * el único que no autoriza a cambiar lo que se hace.
+ */
+export type AgentConsentState = 'granted' | 'missing' | 'unknown';
+
 /** Un adjunto ya subido, tal y como lo devuelve `POST /api/attachments`. */
 export interface LumbreAttachment {
 	id: string;
@@ -483,6 +492,29 @@ export class LumbreClient {
 		const response = await this.send('POST', '/api/agent', { prompt: text });
 		if (!response.ok) return response;
 		return { ok: true, value: agentPlanFrom(response.value) };
+	}
+
+	/**
+	 * `GET /api/agent/consent`: si la cuenta ha dado ya el consentimiento de Soplo.
+	 *
+	 * Sirve para no mandarle a Lumbre el texto de una nota que va a rechazar. Nunca
+	 * falla: lo que no se sabe sale como `unknown`, y quien pregunta sigue como
+	 * hasta ahora (manda y trata el 403 del POST).
+	 *
+	 * El reparto de los status no es el general del cliente, y por eso está aquí:
+	 *
+	 * - 200 con `consentedAt` → `granted`; 200 sin él → `missing`.
+	 * - 403 → `missing`: el endpoint dice que no lo hay.
+	 * - 401 → `unknown`, NO "token malo". Un Lumbre anterior al Bearer en este
+	 *   endpoint (solo aceptaba la cookie de sesión) responde 401 a un token
+	 *   VÁLIDO, así que leerlo como token caducado sería un aviso falso.
+	 * - Red, 429 o 5xx → `unknown` por lo mismo: no se ha llegado a preguntar.
+	 */
+	async agentConsent(): Promise<AgentConsentState> {
+		const response = await this.send('GET', '/api/agent/consent');
+		if (response.ok) return consentFrom(response.value);
+		if (response.reason === 'unauthorized' && response.status === 403) return 'missing';
+		return 'unknown';
 	}
 
 	/**
@@ -852,6 +884,16 @@ function agentPlanFrom(raw: unknown): AgentPlan {
 		summary: typeof row?.['summary'] === 'string' ? row['summary'] : null,
 		truncated: row?.['truncated'] === true,
 	};
+}
+
+/**
+ * El JSON de `GET /api/agent/consent` a su estado. El cuerpo es
+ * `{ consentedAt, version }` y lo que decide es `consentedAt`: una fecha
+ * significa dado, `null` significa que la cuenta todavía no lo ha dado.
+ */
+function consentFrom(raw: unknown): AgentConsentState {
+	const consentedAt = asRow(raw)?.['consentedAt'];
+	return typeof consentedAt === 'string' && consentedAt.length > 0 ? 'granted' : 'missing';
 }
 
 /** El JSON de `POST /api/attachments` a `LumbreAttachment`. */

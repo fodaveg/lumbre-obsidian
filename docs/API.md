@@ -32,6 +32,7 @@ Dos reglas que explican por qué la API hace lo que hace:
 | `reopenTask(id): Promise<void>` | Encola reabrirla. |
 | `linksForNote(path): LumbreTaskLink[]` | Los vínculos nota ↔ tarea de una nota, por su ruta en el vault. |
 | `openInLumbre(id): void` | Abre la tarea: la app de escritorio si la hay, la web en móvil. |
+| `weeklySnapshot(options?): Promise<string>` | El Markdown de la foto semanal de la revisión, para pegarlo desde una plantilla. Ver «La foto semanal». |
 | `on(evento, handler): () => void` | Se apunta a un evento. Devuelve cómo darse de baja. |
 | `diagnostics.report(): string` | El informe de diagnóstico en texto plano, el mismo que copia el botón de los ajustes. |
 | `diagnostics.events(n?): LogEvent[]` | Los últimos `n` eventos del registro (300 por defecto), del más viejo al más nuevo. |
@@ -41,11 +42,13 @@ Dos reglas que explican por qué la API hace lo que hace:
 cuando el servidor los cuenta, `attachmentCount`.
 
 `someday`, `time` y `rolloverCount` los **sirve** Lumbre desde su SHA `861cfb4d`. Contra un servidor
-anterior salen en su valor por defecto (`false`, `null` y `0`), y ahí no los leas como «no tiene
-hora»: significan «el servidor no lo dice».
+anterior, los dos primeros salen en su valor por defecto (`false` y `null`), y ahí no los leas como
+«no tiene hora»: significan «el servidor no lo dice».
 
-`attachmentCount` es **opcional a propósito**: ausente significa que la respuesta no traía el array
-`attachments`, no que la tarea no tenga ninguno. `0` sí es un dato.
+`rolloverCount` y `attachmentCount` son **opcionales a propósito**: ausentes significan que la fila
+no traía el campo (`rolloverCount`) o el array `attachments`, no que la tarea no haya rodado nunca ni
+que no tenga adjuntos. Un `0` presente sí es un dato. De ahí que sea `task.rolloverCount === undefined`
+lo que hay que mirar para saber si tu Lumbre cuenta los arrastres, nunca `=== 0`.
 
 `LumbreList` lleva `id`, `name`, `icon`, `color`, `parentListId`, `pinned` y `taskCount`. Mismo
 criterio: los cuatro de en medio los sirve Lumbre desde ese SHA, y sus valores por defecto (`null`
@@ -108,6 +111,39 @@ Las consultas van por la **misma caché** que los bloques: TTL de 30 segundos, p
 deduplicadas y una sola llamada por consulta distinta, aunque la pidan a la vez cinco bloques y un
 script. La API de Lumbre admite 120 llamadas por minuto y esto es lo que las cuida: un script que se
 repinte cada segundo no gasta una petición por repintado.
+
+## La foto semanal
+
+`weeklySnapshot()` devuelve el mismo Markdown que pega el comando **Lumbre: Insertar la foto
+semanal**: vencidas y arrastradas, listas sin próxima acción y una muestra de «Algún día». Es texto
+de **solo lectura** y de ese momento, con su fecha en la cabecera; no proyecta tareas, no lleva
+casillas de Markdown y no escribe nada por su cuenta. Dónde acaba lo decide quien llama.
+
+```js
+await lumbre.weeklySnapshot();
+await lumbre.weeklySnapshot({ somedaySample: 3, seed: '2026-09-03' });
+```
+
+| Opción | Qué hace | Por defecto |
+| --- | --- | --- |
+| `now` | `Date` de la foto, el que sale en la cabecera. | ahora |
+| `somedaySample` | Cuántas tareas de «Algún día» se enseñan. | 5 |
+| `seed` | Semilla de esa muestra. La misma semilla da la misma muestra. | el día de `now` |
+| `rolloverThreshold` | Veces rodada a partir de las cuales una tarea sale como arrastrada. | 3 |
+
+Nunca lanza: el apartado que no se ha podido leer lo dice en su línea, en vez de salir vacío.
+
+Ojo con el coste, que aquí sí importa: gasta **una petición por lista** de Lumbre, en serie y con un
+intervalo entre medias para no pasarse de las 120 llamadas por minuto. Con muchas listas tarda
+segundos, y no va por la caché de 30 segundos de los bloques: una foto es de ahora.
+
+### Ejemplo: Templater
+
+En una plantilla de nota semanal:
+
+```
+<%* tR += await app.plugins.plugins['lumbre'].api.weeklySnapshot() %>
+```
 
 ## Eventos
 

@@ -14,6 +14,7 @@ vive en Lumbre y la nota es tuya.
 | **Enviar como tarea** | Abre un formulario con el título ya puesto (la selección, o la línea del cursor sin su marcador de lista), lista, fecha o «Algún día», hora, prioridad, fecha límite, notas y subtareas. También está en el menú contextual del editor, como «Enviar a Lumbre». |
 | **Anotar en el BRL** | Un campo de texto (prefijado con la selección) y dos botones, «Nota» y «Pensamiento». La entrada va al registro de HOY por la misma cola durable que las tareas. |
 | **Insertar el BRL de hoy como texto** | Pega el Markdown del registro de hoy en el cursor. Es una **foto fija**: la única vez que el BRL entra en un fichero del vault, y solo porque lo pides a mano. |
+| **Insertar la foto semanal** | Pega en el cursor el texto de la revisión: vencidas y arrastradas, listas sin próxima acción y cinco de «Algún día». También es una **foto fija**. Ver «La foto semanal». |
 | **Soplo con la selección** | Manda la selección (o el párrafo del cursor) a Soplo y enseña lo que HARÍA, con una casilla por acción. Nada se aplica sin pulsar «Aplicar». También está en el menú contextual del editor. |
 | **Vincular esta nota a una lista** | Escribe la propiedad `lumbre-list` en el frontmatter con el id de la lista elegida. |
 | **Quitar el vínculo con la lista** | Borra esa propiedad. |
@@ -94,6 +95,30 @@ toca el Markdown, dice de qué hora son los datos y comparte una caché de 30 se
 
 Necesita el add-on **BRL** activado en tu cuenta de Lumbre; si está apagado, el bloque lo dice.
 
+## La foto semanal
+
+**Lumbre: Insertar la foto semanal** pega en el cursor un bloque de texto con tres apartados, para
+que la revisión de la semana empiece con lo que hay delante:
+
+| Apartado | Qué trae |
+| --- | --- |
+| **Vencidas y arrastradas** | Lo vencido, más lo que lleva rodando tres días o más sin completarse. |
+| **Listas sin próxima acción** | Listas con tareas pendientes y ninguna con fecha. |
+| **Muestra de Algún día** | Cinco tareas al azar de «Algún día», las mismas durante todo el día. |
+
+Es una **foto fija**, no un bloque en vivo: la cabecera dice de qué momento es («Foto del …») y desde
+que se pega, el texto es tuyo. Las líneas son texto con un enlace para abrir la tarea en Lumbre y
+**nunca** casillas de Markdown: una casilla en el vault sería una tarea del vault, y la tarea vive en
+Lumbre. Un apartado sin nada que decir pone «Nada», y el que no se haya podido leer lo dice; si no se
+puede leer ninguno de los tres, no se pega nada.
+
+Si tu Lumbre es anterior al que cuenta los arrastres, el apartado dice «arrastradas: este Lumbre no
+lo informa» en vez de dar un cero que parecería un dato.
+
+Gasta una petición por lista, en serie y con un intervalo entre medias para no pasarse del límite de
+Lumbre, así que en un vault con muchas listas tarda unos segundos. Lo mismo, desde una plantilla:
+`api.weeklySnapshot()`, documentado en [`docs/API.md`](docs/API.md).
+
 ## Soplo desde una nota
 
 **Lumbre: Soplo con la selección** manda ese texto a Soplo, el agente de Lumbre, y abre un modal con
@@ -102,7 +127,10 @@ tú confirmas**: hasta que pulsas «Aplicar» no se ha encolado nada, y solo se 
 marcado. Las tareas que nazcan de ahí quedan vinculadas a la nota desde la que lo pediste.
 
 El texto se recorta a 4000 caracteres, que es el tope del servidor, y el modal avisa cuando lo hace.
-Soplo exige tu consentimiento en Lumbre; si falta, el modal lo dice y lleva a los ajustes de la web.
+Soplo exige tu consentimiento en Lumbre: el plugin lo pregunta **antes** de mandar nada, y si falta,
+el texto de tu nota no sale del dispositivo. El modal lo dice y lleva a los ajustes de la web. Contra
+un Lumbre que todavía no responde a esa pregunta con tu token, se manda como hasta ahora y el aviso
+sale igual, con la respuesta de Soplo.
 
 ## Cuando algo falla
 

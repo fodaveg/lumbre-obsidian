@@ -1,6 +1,6 @@
 # Estado
 
-- **Versión**: 0.1.4 (publicada para BRAT).
+- **Versión**: 0.1.5 (publicada para BRAT).
 - **Qué hay**: esqueleto del plugin, ajustes (origen + token), botón de prueba de conexión, gate
   `npm run check`, CI y workflow de release para BRAT con los tres assets sueltos.
 - **Qué hay (lote A)**: cliente HTTP completo (`listTasks`, `getTask`, `getTasksByIds`, `listLists`,
@@ -75,7 +75,9 @@
     `Content-Type` sea uno de los cuatro que trata como formulario, y `text/plain` es uno de ellos.
   - La falta de consentimiento de Soplo se detecta por el **403 de `POST /api/agent`**, no por
     `GET /api/agent/consent`: ese endpoint es solo por cookie de sesión y responde 401 a un token
-    Bearer, así que un plugin no puede consultarlo.
+    Bearer, así que un plugin no puede consultarlo. **Corregido en el lote E**: Lumbre acepta ahí el
+    Bearer, se pregunta antes de mandar, y el 403 del POST se queda como red de seguridad para un
+    servidor anterior al cambio.
   - `BrlCache` va aparte de `QueryCache` y comparte con ella la constante del TTL: lo que guardan es
     distinto (Markdown de un día contra `LumbreTask[]` de una consulta).
   - «Insertar el BRL de hoy» NO sirve una lectura vieja si la relectura falla, a diferencia del
@@ -129,6 +131,47 @@
     de qué versión venía para poder apuntarlo al arrancar.
   - El nombre del fichero de informe lleva la hora como `HHMMSS`, sin dos puntos: un `:` en un
     nombre dentro del vault mete a Obsidian Sync en bucle.
+- **Qué hay (lote E, la foto semanal)**:
+  - `src/review/weekly-snapshot.ts`: `buildWeeklySnapshot(deps, options)` compone el Markdown de la
+    revisión con tres apartados. **Vencidas y arrastradas** (`scope: overdue` más lo que tenga
+    `rolloverCount >= 3`), **Listas sin próxima acción** (listas con pendientes y ninguna con fecha,
+    agrupado en cliente) y **Muestra de Algún día** (5 tareas, semilla del día). Sin red propia: el
+    cliente entra por inyección. Módulo puro con tests.
+  - Comando **Insertar la foto semanal**: pega ese texto en el cursor. Foto FIJA, como la del BRL.
+  - API pública: `api.weeklySnapshot(options?)`, documentada en `docs/API.md` con el ejemplo de
+    Templater.
+  - `client.agentConsent()`: `GET /api/agent/consent` con el token Bearer, que Lumbre va a aceptar.
+    Devuelve `granted | missing | unknown`. El modal de Soplo lo consulta ANTES de mandar el texto:
+    con `missing` enseña el aviso con el enlace a `<origen>/settings` y no manda nada.
+  - `LumbreTask.rolloverCount` pasa a OPCIONAL, como `attachmentCount`: ausente es "la fila cruda no
+    lo traía", que es lo que hace posible distinguirlo de un cero de verdad.
+- **Decisiones del lote E**:
+  - `rolloverCount` ausente contra cero. Sin esa distinción, un Lumbre anterior al SHA `861cfb4d`
+    haría que la foto dijera "0 arrastradas", que es una mentira con forma de dato. Ahora el
+    apartado dice «arrastradas: este Lumbre no lo informa» cuando NINGUNA tarea viva trae el campo.
+    Esto cambia el tipo público: `taskFromDraft` ya no pone `0` y `taskFromApi` solo lo copia si
+    viene.
+  - Las arrastradas se buscan en una lectura de `scope: all`, no en un scope propio: ningún scope
+    del servidor filtra por `rolloverCount`, así que el filtro es de aquí. Son dos peticiones para
+    ese apartado, no una.
+  - Las listas se recorren ENTERAS, sin saltarse las de `taskCount: 0`: ese contador también sale en
+    cero contra un servidor que no lo manda, y usarlo para ahorrar peticiones vaciaría el apartado
+    justo en el caso que interesa.
+  - El intervalo entre peticiones por lista sale de `REQUESTS_PER_MINUTE_WARN` del cliente
+    (`60_000 / 100` = 600 ms), no de un número a ojo: el apartado gasta una petición por lista y el
+    límite del servidor es 120/min.
+  - La muestra de «Algún día» se ordena por el hash de `semilla + id` y se cortan las cinco
+    primeras, en vez de barajar: así depende SOLO de la semilla y de los ids, no del orden de
+    llegada. La semilla por defecto es el día local, así que la foto de la mañana y la de la tarde
+    coinciden.
+  - Con los TRES apartados en rojo, el comando no pega nada (lo que quedaría en la nota serían tres
+    líneas de error). Con uno o dos sí pega: la línea dice cuál falló y el texto no miente.
+  - `weeklySnapshot` NO va por la caché de consultas: una foto es de ahora, no de hace 30 segundos.
+    Y `notes: 'none'` en todas sus lecturas, que las notas largas no hacen falta para esto.
+  - `agentConsent()` trata el 401 como `unknown`, no como token malo: un Lumbre anterior al cambio
+    responde 401 a un token VÁLIDO porque ese endpoint solo aceptaba la cookie de sesión. Esto
+    corrige la decisión del lote D, que daba el endpoint por inconsultable desde el plugin; el 403
+    del `POST /api/agent` sigue detectándose igual, y es lo que cubre a ese Lumbre anterior.
 - **Qué falta**: la decisión de dónde vive el token; las tareas están en la lista `lumbre-obsidian`
   de Lumbre, no aquí.
 - **Decisiones del lote B**: las listas se cachean en memoria cinco minutos (`ListCache`), no en

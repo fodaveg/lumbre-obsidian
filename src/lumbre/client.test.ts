@@ -181,8 +181,14 @@ describe('LumbreClient.listTasks', () => {
 			done: false,
 			cancelledAt: null,
 		});
-		// Campos que la API todavía no manda: valor por defecto, no invención.
-		expect(result.value[0]).toMatchObject({ someday: false, time: null, rolloverCount: 0 });
+		// Campos que la fila cruda no traía: valor por defecto, no invención.
+		expect(result.value[0]).toMatchObject({ someday: false, time: null });
+		// `rolloverCount` no cae a cero: AUSENTE es "este Lumbre no lo informa", y un
+		// cero se leería como "no ha rodado nunca", que es otra cosa.
+		expect(result.value[0]).not.toHaveProperty('rolloverCount');
+
+		const conCampo = await clientWith(respondWith(200, [apiTask({ rolloverCount: 0 })])).listTasks();
+		expect(conCampo.ok && conCampo.value[0]?.rolloverCount).toBe(0);
 		expect(result.value[1]?.priority).toBe('p4');
 	});
 
@@ -569,6 +575,53 @@ describe('LumbreClient.agent', () => {
 			reason: 'unauthorized',
 			status: 403,
 		});
+	});
+});
+
+describe('LumbreClient.agentConsent', () => {
+	it('pide GET /api/agent/consent con el Bearer', async () => {
+		const { client, calls } = recordingClient({ consentedAt: null, version: 1 });
+
+		await client.agentConsent();
+
+		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/agent/consent');
+		expect(calls[0]?.method).toBe('GET');
+		expect(calls[0]?.headers['Authorization']).toBe('Bearer tok-123');
+	});
+
+	it('un 200 con consentedAt es granted', async () => {
+		const respuesta = { consentedAt: '2026-09-01T10:00:00.000Z', version: 1 };
+
+		expect(await clientWith(respondWith(200, respuesta)).agentConsent()).toBe('granted');
+	});
+
+	it('un 200 sin consentedAt, y un 403, son los dos missing', async () => {
+		expect(await clientWith(respondWith(200, { consentedAt: null })).agentConsent()).toBe('missing');
+		expect(await clientWith(respondWith(403)).agentConsent()).toBe('missing');
+	});
+
+	it('un 401 es unknown, NO token malo: un Lumbre viejo lo devuelve a un token VÁLIDO', async () => {
+		// Antes de aceptar el Bearer, este endpoint iba solo por cookie de sesión y
+		// respondía 401 a cualquier token. Leerlo como "token caducado" sacaría un
+		// aviso falso justo en la cuenta que sí lo tiene bien.
+		expect(await clientWith(respondWith(401)).agentConsent()).toBe('unknown');
+	});
+
+	it('la red caída, un 429 y un 5xx también son unknown', async () => {
+		const caida = clientWith(async () => {
+			throw new Error('sin red');
+		});
+
+		expect(await caida.agentConsent()).toBe('unknown');
+		expect(await clientWith(respondWith(429)).agentConsent()).toBe('unknown');
+		expect(await clientWith(respondWith(503)).agentConsent()).toBe('unknown');
+	});
+
+	it('sin token es unknown y no se gasta la petición', async () => {
+		const request = vi.fn(respondWith(200));
+
+		expect(await clientWith(request, null).agentConsent()).toBe('unknown');
+		expect(request).not.toHaveBeenCalled();
 	});
 });
 

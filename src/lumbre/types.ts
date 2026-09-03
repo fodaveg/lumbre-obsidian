@@ -30,9 +30,9 @@ export interface LumbreRef {
  *
  * `someday`, `time` y `rolloverCount` los SIRVE Lumbre desde su SHA `861cfb4d`
  * (`serializeTask` los pasa tal cual). Los valores por defecto que pone
- * `taskFromApi` (`false`, `null` y `0`) siguen ahí para cubrir un servidor
- * anterior a ese SHA: contra uno viejo significan "el servidor no lo dice", no
- * "la tarea no es de algún día" ni "no tiene hora".
+ * `taskFromApi` (`false` y `null`) siguen ahí para cubrir un servidor anterior a
+ * ese SHA: contra uno viejo significan "el servidor no lo dice", no "la tarea no
+ * es de algún día" ni "no tiene hora".
  */
 export interface LumbreTask {
 	id: string;
@@ -57,8 +57,14 @@ export interface LumbreTask {
 	archivedAt: string | null;
 	list: LumbreRef | null;
 	section: LumbreRef | null;
-	/** Veces que ha rodado sin completarse. Lo sirve Lumbre; ver el JSDoc de la interfaz. */
-	rolloverCount: number;
+	/**
+	 * Veces que ha rodado sin completarse. AUSENTE si la fila cruda no traía el
+	 * campo, igual que `attachmentCount`: eso es "este Lumbre no lo informa", no
+	 * "no ha rodado nunca". Un `0` presente sí es un dato. La foto semanal
+	 * (`src/review/weekly-snapshot.ts`) distingue los dos casos por aquí, que es lo
+	 * único que impide decir "0 arrastradas" contra un servidor que no las cuenta.
+	 */
+	rolloverCount?: number;
 	/**
 	 * Cuántos adjuntos tiene la tarea. AUSENTE si la respuesta no traía el array
 	 * `attachments`: eso es "el servidor no lo dice", no "no tiene ninguno", y por
@@ -207,7 +213,9 @@ export function taskFromApi(raw: unknown): LumbreTask | null {
 		archivedAt: asString(row['archivedAt']),
 		list: refFrom(row['somedayListId'], row['list']),
 		section: refFrom(row['sectionId'], row['section']),
-		rolloverCount: typeof row['rolloverCount'] === 'number' ? row['rolloverCount'] : 0,
+		...(typeof row['rolloverCount'] === 'number'
+			? { rolloverCount: row['rolloverCount'] }
+			: {}),
 		...(Array.isArray(attachments) ? { attachmentCount: attachments.length } : {}),
 		...(subtasks !== undefined ? { subtasks } : {}),
 		parentId: asString(row['parentId']),
@@ -282,7 +290,9 @@ export function taskFromDraft(
 		archivedAt: null,
 		list,
 		section: null,
-		rolloverCount: 0,
+		// `rolloverCount` va AUSENTE: esta tarea no viene del servidor, así que
+		// nadie ha contado todavía cuántas veces ha rodado. Un `0` aquí se leería
+		// como un dato de Lumbre y no lo es.
 		parentId: null,
 	};
 }

@@ -103,6 +103,8 @@ function harness(overrides: Partial<LumbreApiDeps> = {}): {
 		// que es lo que se afirma.
 		logger: Logger.create({ console: null }).child('api'),
 		buildReport: () => 'informe de prueba',
+		weeklySnapshot: async (options): Promise<string> =>
+			`## Foto de prueba (${options?.seed ?? 'sin semilla'})`,
 		...overrides,
 	};
 
@@ -279,6 +281,24 @@ describe('LumbreApi', () => {
 		const mobile = harness({ isDesktopApp: () => false });
 		mobile.api.openInLumbre('task-1');
 		expect(mobile.opened).toEqual(['https://app.lumbre.pro/?tarea=task-1']);
+	});
+});
+
+describe('LumbreApi: la foto semanal', () => {
+	it('devuelve el Markdown que compone el plugin y le pasa las opciones', async () => {
+		const { api } = harness();
+
+		expect(await api.weeklySnapshot()).toBe('## Foto de prueba (sin semilla)');
+		expect(await api.weeklySnapshot({ seed: '2026-09-03' })).toBe('## Foto de prueba (2026-09-03)');
+	});
+
+	it('se apunta como una llamada más de la API', async () => {
+		const { api, logger } = harness();
+
+		await api.weeklySnapshot();
+
+		const calls = logger.recent().filter((event) => event.message === 'Llamada a la API pública');
+		expect(calls.map((event) => event.data)).toEqual([{ method: 'weeklySnapshot' }]);
 	});
 });
 

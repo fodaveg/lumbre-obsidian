@@ -11,7 +11,9 @@
  * Tres estados y los tres se ven:
  *
  * - Cargando: Soplo tarda (es una llamada a un modelo), así que el modal se abre
- *   YA, con el texto arriba y «Preguntando a Soplo…» debajo.
+ *   YA, con el texto arriba y «Preguntando a Soplo…» debajo. Antes de mandar el
+ *   texto se pregunta por el consentimiento: si Lumbre dice que falta, el texto
+ *   de la nota NO sale del dispositivo.
  * - Error: se pinta DENTRO del modal, no en un Notice que se va solo. Si el
  *   fallo es la falta de consentimiento, con el enlace a los ajustes de la web.
  * - Enviando: los botones se deshabilitan mientras se encola.
@@ -22,7 +24,7 @@
 
 import { Modal, setIcon, type App } from 'obsidian';
 
-import type { AgentPlan, LumbreResult } from '../lumbre/client';
+import type { AgentConsentState, AgentPlan, LumbreResult } from '../lumbre/client';
 
 /** Dónde se retira o se da el consentimiento de Soplo, en la web de Lumbre. */
 export const SOPLO_SETTINGS_PATH = '/settings';
@@ -32,6 +34,11 @@ export interface SoploModalOptions {
 	text: string;
 	/** `true` si hubo que recortarlo: se avisa arriba, no en silencio. */
 	truncated: boolean;
+	/**
+	 * Si la cuenta ha dado ya el consentimiento de Soplo. Se consulta ANTES de
+	 * mandar nada; `unknown` significa "no se ha podido saber" y se sigue igual.
+	 */
+	consent(): Promise<AgentConsentState>;
 	/** Pregunta a Soplo. Se llama una vez al abrir, y otra por cada «Reintentar». */
 	ask(): Promise<LumbreResult<AgentPlan>>;
 	/** Aplica las acciones marcadas, por sus índices dentro del plan. */
@@ -91,14 +98,28 @@ export class SoploModal extends Modal {
 		this.needsConsent = false;
 		this.render();
 
+		// Con el consentimiento sabido que FALTA, el texto de la nota no se manda:
+		// la respuesta ya se conoce (un 403) y mandarlo sería sacar del dispositivo
+		// algo que Lumbre va a rechazar. Con `unknown` se sigue como siempre, que es
+		// mandar y tratar el 403 del POST: `unknown` no autoriza a decidir nada.
+		const consent = await this.options.consent();
+		if (this.closed) return;
+		if (consent === 'missing') {
+			this.state = 'error';
+			this.needsConsent = true;
+			this.error = 'Soplo necesita tu consentimiento antes de mandarle texto.';
+			this.render();
+			return;
+		}
+
 		const result = await this.options.ask();
 		if (this.closed) return;
 
 		if (!result.ok) {
 			this.state = 'error';
-			// El endpoint de consentimiento va por cookie de sesión, así que un
-			// plugin con token Bearer no puede consultarlo: el 403 de la propia
-			// llamada ES la señal de que falta.
+			// El 403 de la propia llamada sigue siendo señal de que falta: es lo que
+			// cubre a un Lumbre que todavía no acepta el Bearer en `/api/agent/consent`
+			// y por tanto devuelve `unknown` ahí arriba.
 			this.needsConsent = result.reason === 'unauthorized' && result.status === 403;
 			this.error = this.needsConsent
 				? 'Soplo necesita tu consentimiento antes de mandarle texto.'
