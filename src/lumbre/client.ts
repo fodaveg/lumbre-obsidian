@@ -12,8 +12,16 @@
  * un 200 significa "aceptada", no "ya existe". Quien necesite certeza llama a
  * `flush()` y RELEE (eso es lo que hace `OperationQueue`, en `queue.ts`).
  *
- * Límite de la API: 120 llamadas por minuto (60/min en `/api/mutations` y en
- * `/api/sync/flush`), así que un 429 es esperable y sale como `rate_limited`.
+ * La API NO tiene un límite global: cada endpoint tiene su propio cubo, con su
+ * propia ventana de 60 s (ver `RATE_LIMITS`), así que un 429 es esperable y
+ * sale como `rate_limited`.
+ *
+ * Las LECTURAS llevan además un pestillo compartido: un 401 en cualquiera de
+ * ellas apaga las lecturas de todo el cliente hasta que el usuario cambia el
+ * token o pide un reintento a mano (ver `readsLocked` y `unlockReads`). Existe
+ * porque el servidor aplica un cubo de 20 peticiones/min POR IP a un token
+ * inválido ANTES de devolver el 401, y ese cubo lo comparten `/api/tasks`,
+ * `/api/sync/flush` y la autenticación del agente.
  *
  * El logger también entra por inyección y es OPCIONAL: sin él el cliente
  * funciona igual, que es lo que hace que los tests que no miran el registro no
@@ -326,13 +334,63 @@ export const MAX_AGENT_PROMPT_LENGTH = 4000;
 export const SLOW_REQUEST_MS = 3000;
 
 /**
- * Peticiones por minuto a partir de las cuales se avisa. El límite del servidor
- * es 120, así que el aviso sale con margen para poder mirar qué las dispara.
+ * Límite de `GET /api/tasks`: peticiones por minuto, POR TOKEN. Medido por la
+ * sesión del servidor (lumbre-3a) en el código de Lumbre el 3 sep 2026.
  */
-export const REQUESTS_PER_MINUTE_WARN = 100;
+export const TASKS_RATE_LIMIT = 120;
+
+/** Límite de `POST /api/mutations`: independiente del de lecturas. */
+export const MUTATIONS_RATE_LIMIT = 60;
+
+/** Límite de `POST /api/sync/flush`: su propio cubo, no el de mutaciones. */
+export const SYNC_FLUSH_RATE_LIMIT = 60;
+
+/**
+ * Límite de `POST /api/agent`. El servidor tiene dos: 30/min en modo normal y
+ * 45/min en modo "live". Este plugin no manda el modo live, así que aquí
+ * siempre aplica el conservador (30): usar el de 45 avisaría tarde de un
+ * límite que el plugin nunca tiene disponible.
+ */
+export const AGENT_RATE_LIMIT = 30;
+
+/**
+ * Límite para un endpoint que no está en `RATE_LIMITS` (adjuntos, BRL,
+ * consentimiento…): no se ha medido su cubo real, así que se usa el mismo
+ * número que tenía el contador global de antes, en vez de inventar uno menor
+ * que avisaría sin motivo.
+ */
+export const DEFAULT_RATE_LIMIT = 120;
+
+/**
+ * Proporción del límite de un cubo a partir de la que se avisa. Con el cubo
+ * único de antes era 100 de 120 (5/6); se mantiene la misma proporción por
+ * endpoint, así que el de `/api/agent` (30) avisa a partir de 25 y no espera a
+ * un número absoluto pensado para un cubo seis veces más grande.
+ */
+export const RATE_WARN_RATIO = 5 / 6;
+
+/** El aviso de un cubo sale a partir de esta cuenta, redondeada. */
+export function warnThreshold(limit: number): number {
+	return Math.round(limit * RATE_WARN_RATIO);
+}
+
+/** El cubo de cada endpoint, por `MÉTODO RUTA` (la ruta ya sin query). */
+const RATE_LIMITS: ReadonlyMap<string, number> = new Map([
+	['GET /api/tasks', TASKS_RATE_LIMIT],
+	['POST /api/mutations', MUTATIONS_RATE_LIMIT],
+	['POST /api/sync/flush', SYNC_FLUSH_RATE_LIMIT],
+	['POST /api/agent', AGENT_RATE_LIMIT],
+]);
 
 /** Ventana del contador de peticiones. */
 const RATE_WINDOW_MS = 60_000;
+
+/** Un cubo de peticiones por minuto, con su propia ventana y su propio aviso. */
+interface RateBucket {
+	start: number;
+	count: number;
+	warned: boolean;
+}
 
 export class LumbreClient {
 	/**
@@ -346,11 +404,17 @@ export class LumbreClient {
 	/** Última prueba de conexión, para el informe de diagnóstico. */
 	private ping_: PingRecord | null = null;
 
-	/** Contador de peticiones de la ventana en curso. */
-	private windowStart = 0;
-	private windowCount = 0;
-	/** El aviso de ritmo sale UNA vez por ventana, no una por petición. */
-	private windowWarned = false;
+	/** Un cubo por endpoint (`MÉTODO RUTA`), cada uno con su propia ventana. */
+	private readonly windows = new Map<string, RateBucket>();
+
+	/**
+	 * Pestillo de lecturas: en cuanto una LECTURA recibe un 401 se pone a
+	 * `true` y todas las lecturas siguientes (de cualquier superficie, porque
+	 * comparten este mismo cliente) fallan sin gastar petición. Un 403 no lo
+	 * toca: aquí significa "falta el consentimiento de Soplo", no "token
+	 * malo" (ver `agentConsent`). Solo lo apaga `unlockReads`.
+	 */
+	private readsLocked = false;
 
 	private readonly log: Logger | null;
 	private readonly clock: () => number;
@@ -394,7 +458,8 @@ export class LumbreClient {
 		if (params.today !== undefined) query.set('today', params.today);
 
 		const suffix = query.toString();
-		const response = await this.send('GET', `/api/tasks${suffix ? `?${suffix}` : ''}`);
+		const path = `/api/tasks${suffix ? `?${suffix}` : ''}`;
+		const response = await this.gated('GET', path, () => this.send('GET', path));
 		if (!response.ok) return response;
 		return { ok: true, value: tasksFromApi(response.value) };
 	}
@@ -413,7 +478,8 @@ export class LumbreClient {
 		for (let i = 0; i < ids.length; i += MAX_IDS_PER_REQUEST) {
 			const chunk = ids.slice(i, i + MAX_IDS_PER_REQUEST);
 			const query = new URLSearchParams({ ids: chunk.join(','), includeArchived: 'true' });
-			const response = await this.send('GET', `/api/tasks?${query.toString()}`);
+			const path = `/api/tasks?${query.toString()}`;
+			const response = await this.gated('GET', path, () => this.send('GET', path));
 			if (!response.ok) return response;
 			out.push(...tasksFromApi(response.value));
 		}
@@ -431,7 +497,8 @@ export class LumbreClient {
 	 */
 	async getTask(id: string): Promise<LumbreResult<LumbreTask | null>> {
 		const query = new URLSearchParams({ id, includeArchived: 'true' });
-		const response = await this.send('GET', `/api/tasks?${query.toString()}`);
+		const path = `/api/tasks?${query.toString()}`;
+		const response = await this.gated('GET', path, () => this.send('GET', path));
 		if (!response.ok) return response;
 		const [first] = tasksFromApi(response.value);
 		return { ok: true, value: first ?? null };
@@ -439,7 +506,8 @@ export class LumbreClient {
 
 	/** `GET /api/tasks?includeLists=1`: todas las listas vivas, incluidas las vacías. */
 	async listLists(): Promise<LumbreResult<LumbreList[]>> {
-		const response = await this.send('GET', '/api/tasks?includeLists=1');
+		const path = '/api/tasks?includeLists=1';
+		const response = await this.gated('GET', path, () => this.send('GET', path));
 		if (!response.ok) return response;
 		return { ok: true, value: listsFromApi(response.value) };
 	}
@@ -491,7 +559,8 @@ export class LumbreClient {
 	 * `unauthorized` con `status: 403`, y quien llama lo distingue por el status.
 	 */
 	async brl(date: string): Promise<LumbreResult<string>> {
-		const response = await this.request('GET', `/api/brl/${encodeURIComponent(date)}`);
+		const path = `/api/brl/${encodeURIComponent(date)}`;
+		const response = await this.gated('GET', path, () => this.request('GET', path));
 		if (!response.ok) return response;
 		return { ok: true, value: readText(response.value) };
 	}
@@ -502,10 +571,8 @@ export class LumbreClient {
 	 * esta vista no habría forma de confirmar que la entrada existe.
 	 */
 	async brlJson(date: string): Promise<LumbreResult<BrlDay>> {
-		const response = await this.send(
-			'GET',
-			`/api/brl/${encodeURIComponent(date)}?format=json`,
-		);
+		const path = `/api/brl/${encodeURIComponent(date)}?format=json`;
+		const response = await this.gated('GET', path, () => this.send('GET', path));
 		if (!response.ok) return response;
 		return { ok: true, value: brlDayFrom(response.value, date) };
 	}
@@ -611,6 +678,54 @@ export class LumbreClient {
 		return { ok: true, value: undefined };
 	}
 
+	/** `true` mientras el pestillo de lecturas está echado. Lo consultan el panel y los bloques para pintar el motivo. */
+	get readsAreLocked(): boolean {
+		return this.readsLocked;
+	}
+
+	/**
+	 * Vuelve a permitir lecturas. La llaman los dos sitios que ya existían para
+	 * decirle al plugin "prueba otra vez": los ajustes al cambiar el token
+	 * (`src/settings.ts`) y el botón "Reintentar" del panel de la nota
+	 * (`src/ui/note-tasks-view.ts`). No hace ninguna petición por sí sola: la
+	 * siguiente lectura es la que decide si el token vale ahora.
+	 */
+	unlockReads(source: string): void {
+		if (!this.readsLocked) return;
+		this.readsLocked = false;
+		this.log?.info('Lecturas encendidas de nuevo', { source });
+	}
+
+	/**
+	 * Envuelve una LECTURA con el pestillo: si está echado, falla sin gastar
+	 * petición; si la lectura devuelve un 401, lo echa para todo el cliente. Un
+	 * 403 no lo toca, así que `agentConsent` (que trata el 401 de otra forma, ver
+	 * su comentario) NO pasa por aquí y llama a `send`/`request` directamente.
+	 */
+	private async gated<T>(
+		method: string,
+		path: string,
+		run: () => Promise<LumbreResult<T>>,
+	): Promise<LumbreResult<T>> {
+		if (this.readsLocked) {
+			this.log?.debug('Lectura no enviada: el pestillo está echado', {
+				method,
+				path: routeOf(path),
+			});
+			return { ok: false, reason: 'unauthorized', status: 401 };
+		}
+
+		const result = await run();
+		if (!result.ok && result.reason === 'unauthorized' && result.status === 401) {
+			this.readsLocked = true;
+			this.log?.warn('Lecturas apagadas: el token no vale', {
+				method,
+				path: routeOf(path),
+			});
+		}
+		return result;
+	}
+
 	/**
 	 * Una petición autenticada. Devuelve el cuerpo ya parseado, o el fallo ya
 	 * clasificado. El error de red se traga a propósito: puede llevar la URL y no
@@ -709,27 +824,35 @@ export class LumbreClient {
 	}
 
 	/**
-	 * Cuenta las peticiones por minuto y avisa al pasar de `REQUESTS_PER_MINUTE_WARN`.
-	 * El límite del servidor es 120, así que este aviso es lo que da tiempo a ver
-	 * qué las está disparando antes de comerse los 429.
+	 * Cuenta las peticiones por minuto DE ESTE ENDPOINT y avisa al pasar de su
+	 * `warnThreshold`. El servidor no tiene un cubo global (cada endpoint tiene
+	 * el suyo, ver `RATE_LIMITS`), así que un cubo de 120 no puede prestarle
+	 * margen a uno de 30: contarlos juntos escondía un 429 de `/api/agent` bajo
+	 * un contador que aún parecía lejos del aviso.
 	 */
 	private countRequest(method: string, path: string): void {
-		const now = this.clock();
-		if (now - this.windowStart >= RATE_WINDOW_MS) {
-			this.windowStart = now;
-			this.windowCount = 0;
-			this.windowWarned = false;
-		}
-		this.windowCount += 1;
-		if (this.windowCount <= REQUESTS_PER_MINUTE_WARN || this.windowWarned) return;
+		const route = routeOf(path);
+		const key = `${method} ${route}`;
+		const limit = RATE_LIMITS.get(key) ?? DEFAULT_RATE_LIMIT;
 
-		this.windowWarned = true;
+		const now = this.clock();
+		let bucket = this.windows.get(key);
+		if (bucket === undefined || now - bucket.start >= RATE_WINDOW_MS) {
+			bucket = { start: now, count: 0, warned: false };
+			this.windows.set(key, bucket);
+		}
+		bucket.count += 1;
+
+		const threshold = warnThreshold(limit);
+		if (bucket.count <= threshold || bucket.warned) return;
+
+		bucket.warned = true;
 		this.log?.warn('Muchas peticiones en un minuto', {
-			count: this.windowCount,
-			limit: REQUESTS_PER_MINUTE_WARN,
-			serverLimit: 120,
+			count: bucket.count,
+			limit: threshold,
+			serverLimit: limit,
 			method,
-			path: routeOf(path),
+			path: route,
 		});
 	}
 
@@ -982,7 +1105,7 @@ export function describeFailure(reason: FailureReason, status?: number): string 
 		case 'no_token':
 			return 'Falta el token personal.';
 		case 'unauthorized':
-			return 'El token no vale o ha caducado.';
+			return 'El token no vale o ha caducado. Cámbialo en Ajustes → Token personal.';
 		case 'bad_request':
 			return 'Lumbre rechazó la petición por su contenido.';
 		case 'rate_limited':

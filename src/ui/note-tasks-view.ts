@@ -492,6 +492,11 @@ export class NoteTasksView extends ItemView {
 				text: 'Reintentar',
 				icon: 'rotate-ccw',
 				onClick: () => {
+					// El "Reintentar" es la acción manual que reabre el pestillo de
+					// lecturas si un 401 lo había echado (ver `LumbreClient.readsLocked`):
+					// sin esto, un solo error de token dejaría la lista bloqueada aunque el
+					// usuario ya lo hubiera arreglado.
+					this.host.client.unlockReads('panel');
 					void this.loadProject(true);
 				},
 			});

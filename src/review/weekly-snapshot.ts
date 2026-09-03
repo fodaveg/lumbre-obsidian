@@ -17,9 +17,17 @@
  * no toca el vault y no escribe nada. Se prueba entero con Vitest.
  */
 
-import { describeFailure, MAX_TASKS_LIMIT, REQUESTS_PER_MINUTE_WARN, type LumbreClient } from '../lumbre/client';
+import {
+	describeFailure,
+	isPartialRead,
+	MAX_TASKS_LIMIT,
+	TASKS_RATE_LIMIT,
+	warnThreshold,
+	type LumbreClient,
+	type LumbreResult,
+} from '../lumbre/client';
 import type { Logger } from '../diagnostics/logger';
-import { taskDeepLinks, type LumbreTask } from '../lumbre/types';
+import { taskDeepLinks, type LumbreList, type LumbreTask } from '../lumbre/types';
 
 export interface WeeklySnapshotDeps {
 	client: Pick<LumbreClient, 'listTasks' | 'listLists'>;
@@ -64,12 +72,13 @@ export const SOMEDAY_SAMPLE_SIZE = 5;
 export const ROLLOVER_THRESHOLD = 3;
 
 /**
- * Espera entre las peticiones por lista. Sale del aviso de ritmo del cliente
- * (`REQUESTS_PER_MINUTE_WARN`, hoy 100), no de un número a ojo: el límite del
- * servidor es 120/min y este apartado gasta una petición por lista, así que sin
- * intervalo un vault con 40 listas se comería los 429 de golpe.
+ * Espera entre las peticiones por lista. Sale del aviso de ritmo del cubo de
+ * `GET /api/tasks` (`warnThreshold(TASKS_RATE_LIMIT)`, hoy 100), no de un
+ * número a ojo: el límite de ESE cubo es 120/min y este apartado gasta una
+ * petición por lista, así que sin intervalo un vault con 40 listas se comería
+ * los 429 de golpe.
  */
-export const LIST_REQUEST_INTERVAL_MS = Math.ceil(60_000 / REQUESTS_PER_MINUTE_WARN);
+export const LIST_REQUEST_INTERVAL_MS = Math.ceil(60_000 / warnThreshold(TASKS_RATE_LIMIT));
 
 /** Lo que se pinta cuando un apartado no tiene nada que decir. */
 const EMPTY_SECTION = 'Nada';
@@ -96,9 +105,17 @@ export async function collectWeeklySnapshot(
 	options: WeeklySnapshotOptions = {},
 ): Promise<WeeklySnapshot> {
 	const now = options.now ?? new Date();
+
+	// UNA lectura de "todo lo vivo", compartida entre dos apartados: vencidas y
+	// arrastradas la necesita para el rollover, y listas sin próxima acción
+	// puede derivar de ella el desglose por lista SIN gastar una petición por
+	// lista (ver `listsWithoutNextActionSection`). Se pide UNA vez aquí y se
+	// reparte, en vez de que cada apartado la pida por su cuenta.
+	const pool = await deps.client.listTasks({ scope: 'all', notes: 'none', limit: MAX_TASKS_LIMIT });
+
 	const sections = [
-		await staleSection(deps, options),
-		await listsWithoutNextActionSection(deps),
+		await staleSection(deps, options, pool),
+		await listsWithoutNextActionSection(deps, pool),
 		await somedaySection(deps, options, now),
 	];
 
@@ -133,18 +150,21 @@ interface Section {
 
 /**
  * Lo vencido más lo que lleva rodando. Son dos lecturas: `scope: overdue`, que
- * la resuelve el servidor con la zona horaria de la cuenta, y `scope: all` para
- * mirar el `rolloverCount` de todo lo vivo, que ningún scope filtra por él.
+ * la resuelve el servidor con la zona horaria de la cuenta, y el `pool` de
+ * `scope: all` (compartido con `listsWithoutNextActionSection`, ver
+ * `collectWeeklySnapshot`) para mirar el `rolloverCount` de todo lo vivo, que
+ * ningún scope filtra por él.
  *
- * Si NINGUNA tarea de esa segunda lectura trae el campo, el apartado lo DICE en
- * vez de contar cero arrastradas: contra un Lumbre anterior al SHA `861cfb4d`
- * "no viene el campo" y "no ha rodado nunca" se verían igual, y el segundo es
+ * Si NINGUNA tarea del pool trae el campo, el apartado lo DICE en vez de
+ * contar cero arrastradas: contra un Lumbre anterior al SHA `861cfb4d` "no
+ * viene el campo" y "no ha rodado nunca" se verían igual, y el segundo es
  * mentira. La distinción la sostiene `LumbreTask.rolloverCount`, que va ausente
  * cuando la fila cruda no lo traía.
  */
 async function staleSection(
 	deps: WeeklySnapshotDeps,
 	options: WeeklySnapshotOptions,
+	pool: LumbreResult<LumbreTask[]>,
 ): Promise<Section> {
 	const title = 'Vencidas y arrastradas';
 	const threshold = options.rolloverThreshold ?? ROLLOVER_THRESHOLD;
@@ -161,7 +181,6 @@ async function staleSection(
 		lines.push(taskLine(task, threshold));
 	}
 
-	const pool = await deps.client.listTasks({ scope: 'all', notes: 'none', limit: MAX_TASKS_LIMIT });
 	if (!pool.ok) {
 		lines.push(`Arrastradas: ${describeFailure(pool.reason, pool.status)}`);
 		return { title, lines, failed: false };
@@ -185,20 +204,36 @@ async function staleSection(
 // ── Listas sin próxima acción ──────────────────────────────────────────────
 
 /**
- * Las listas con tareas pendientes y NINGUNA con fecha. Una petición por lista y
- * en serie, con `LIST_REQUEST_INTERVAL_MS` entre medias: el endpoint no sabe
- * agrupar por lista, así que el agrupado es de aquí.
+ * Las listas con tareas pendientes y NINGUNA con fecha.
+ *
+ * Si el `pool` de `scope: all` (compartido con `staleSection`, ver
+ * `collectWeeklySnapshot`) trajo TODO lo vivo de la cuenta sin recortar por el
+ * tope del servidor, el desglose por lista se agrupa en memoria a partir de
+ * ÉL: cero peticiones nuevas, y el mismo resultado exacto que pedirlas una a
+ * una (mismos filtros, mismo `scope: all`, mismo id de lista). Si el pool
+ * falló o llegó recortado (`isPartialRead`), no hay garantía de que contenga
+ * TODAS las tareas de TODAS las listas, así que se cae al camino de antes:
+ * una petición por lista y en serie, con `LIST_REQUEST_INTERVAL_MS` entre
+ * medias (el endpoint no sabe agrupar por lista, así que ese agrupado es de
+ * aquí también).
  *
  * No se saltan las listas con `taskCount: 0`: ese campo también sale en cero
  * contra un servidor que no lo manda, y usarlo para ahorrar peticiones dejaría
  * el apartado vacío justo donde más falta hace.
  */
-async function listsWithoutNextActionSection(deps: WeeklySnapshotDeps): Promise<Section> {
+async function listsWithoutNextActionSection(
+	deps: WeeklySnapshotDeps,
+	pool: LumbreResult<LumbreTask[]>,
+): Promise<Section> {
 	const title = 'Listas sin próxima acción';
 
 	const lists = await deps.client.listLists();
 	if (!lists.ok) {
 		return failedSection(title, 'las listas', describeFailure(lists.reason, lists.status));
+	}
+
+	if (pool.ok && !isPartialRead(pool.value.length)) {
+		return listsWithoutNextActionFromPool(title, lists.value, pool.value);
 	}
 
 	const lines: string[] = [];
@@ -218,6 +253,35 @@ async function listsWithoutNextActionSection(deps: WeeklySnapshotDeps): Promise<
 	}
 
 	if (unreadable.length > 0) lines.push(`No se han podido leer: ${unreadable.join(', ')}.`);
+	return { title, lines, failed: false };
+}
+
+/**
+ * El mismo apartado que el camino lento, pero agrupando el `pool` en memoria
+ * por el ID de la lista (nunca por el nombre: dos listas pueden llamarse
+ * igual, y agrupar por nombre las fundiría en una).
+ */
+function listsWithoutNextActionFromPool(
+	title: string,
+	lists: readonly LumbreList[],
+	pool: readonly LumbreTask[],
+): Section {
+	const byListId = new Map<string, LumbreTask[]>();
+	for (const task of pool.filter(isPending)) {
+		if (task.list === null) continue;
+		const group = byListId.get(task.list.id);
+		if (group === undefined) byListId.set(task.list.id, [task]);
+		else group.push(task);
+	}
+
+	const lines: string[] = [];
+	for (const list of lists) {
+		const pending = byListId.get(list.id) ?? [];
+		if (pending.length === 0 || pending.some((task) => task.date !== null)) continue;
+		lines.push(
+			`- ${oneLine(list.name)} · ${pending.length} ${pending.length === 1 ? 'pendiente' : 'pendientes'}`,
+		);
+	}
 	return { title, lines, failed: false };
 }
 
@@ -259,7 +323,7 @@ async function somedaySection(
  */
 export function sampleTasks(tasks: LumbreTask[], seed: string, size: number): LumbreTask[] {
 	return tasks
-		.map((task) => ({ task, key: hash(`${seed} ${task.id}`) }))
+		.map((task) => ({ task, key: hash(`${seed}\x1f${task.id}`) }))
 		.sort((left, right) => left.key - right.key || compareText(left.task.id, right.task.id))
 		.slice(0, Math.max(0, size))
 		.map((entry) => entry.task);

@@ -2,10 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { Logger, type LogLevel } from '../diagnostics/logger';
 import {
+	AGENT_RATE_LIMIT,
 	LumbreClient,
 	MAX_ATTACHMENT_BYTES,
-	REQUESTS_PER_MINUTE_WARN,
+	MUTATIONS_RATE_LIMIT,
 	SLOW_REQUEST_MS,
+	TASKS_RATE_LIMIT,
+	warnThreshold,
 	type LumbreRequestInit,
 	type LumbreRequestFn,
 	type MutationOp,
@@ -807,16 +810,63 @@ describe('LumbreClient: registro de diagnóstico', () => {
 		expect(logger.recent().some((event) => event.message === 'Petición lenta')).toBe(true);
 	});
 
-	it('avisa UNA vez al pasar de las 100 peticiones en un minuto', async () => {
+	it('avisa UNA vez al pasar de las 100 peticiones en un minuto en el cubo de /api/tasks', async () => {
 		const { client, logger } = loggedClient({ now: () => 1000 });
+		const threshold = warnThreshold(TASKS_RATE_LIMIT);
 
-		for (let index = 0; index < REQUESTS_PER_MINUTE_WARN + 5; index += 1) await client.ping();
+		for (let index = 0; index < threshold + 5; index += 1) await client.ping();
 
 		const warnings = logger
 			.recent()
 			.filter((event) => event.message === 'Muchas peticiones en un minuto');
 		expect(warnings).toHaveLength(1);
-		expect(warnings[0]?.data).toMatchObject({ limit: REQUESTS_PER_MINUTE_WARN });
+		expect(warnings[0]?.data).toMatchObject({
+			limit: threshold,
+			serverLimit: TASKS_RATE_LIMIT,
+			method: 'GET',
+			path: '/api/tasks',
+		});
+	});
+
+	it('CADA ENDPOINT lleva su propio cubo: 26 peticiones a /api/agent avisan aunque /api/tasks no llegue a las 100', async () => {
+		// Este es el bug que midió lumbre-3a: con un cubo GLOBAL, Soplo se comía
+		// un 429 en `/api/agent` a la petición 30 sin que el registro dijera nada,
+		// porque el contador único todavía marcaba muy por debajo del aviso.
+		const { client, logger } = loggedClient({ now: () => 1000 });
+
+		for (let index = 0; index < warnThreshold(AGENT_RATE_LIMIT) + 1; index += 1) {
+			await client.agent('hola');
+		}
+
+		const warnings = logger
+			.recent()
+			.filter((event) => event.message === 'Muchas peticiones en un minuto');
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.data).toMatchObject({
+			limit: warnThreshold(AGENT_RATE_LIMIT),
+			serverLimit: AGENT_RATE_LIMIT,
+			method: 'POST',
+			path: '/api/agent',
+		});
+	});
+
+	it('gastar el cubo de /api/agent no afecta al de /api/mutations, y viceversa', async () => {
+		const { client, logger } = loggedClient({ now: () => 1000 });
+
+		// Se gasta el cubo entero de /api/agent (avisa una vez) sin tocar mutaciones.
+		for (let index = 0; index < warnThreshold(AGENT_RATE_LIMIT) + 1; index += 1) {
+			await client.agent('hola');
+		}
+		// Y unas pocas mutaciones, muy por debajo de SU propio aviso.
+		const fewMutations = warnThreshold(MUTATIONS_RATE_LIMIT) - 1;
+		for (let index = 0; index < fewMutations; index += 1) await client.mutate({ op: 'restore', taskId: 't1' });
+
+		const warnings = logger
+			.recent()
+			.filter((event) => event.message === 'Muchas peticiones en un minuto');
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.data).toMatchObject({ path: '/api/agent' });
+		expect(warnings.some((event) => event.data?.['path'] === '/api/mutations')).toBe(false);
 	});
 
 	it('sin token no se gasta petición y queda apuntado en `debug`', async () => {
@@ -849,5 +899,122 @@ describe('LumbreClient: registro de diagnóstico', () => {
 		await client.listTasks();
 
 		expect(JSON.stringify(logger.recent())).not.toContain(secret);
+	});
+});
+
+describe('LumbreClient: pestillo de lecturas ante un 401', () => {
+	/**
+	 * Cliente cuya red se puede aseverar: cada llamada consume el siguiente
+	 * status de la lista (el último se repite si se piden más peticiones).
+	 */
+	function gateClient(statuses: number[]): { client: LumbreClient; request: ReturnType<typeof vi.fn> } {
+		let index = 0;
+		const request = vi.fn(async () => {
+			const status = statuses[Math.min(index, statuses.length - 1)] ?? 200;
+			index += 1;
+			return { status, json: [] };
+		});
+		return { client: clientWith(request), request };
+	}
+
+	it('un 401 en una lectura apaga las lecturas de TODAS las superficies, aunque sean métodos distintos', async () => {
+		const { client, request } = gateClient([401, 200, 200]);
+
+		const first = await client.listTasks();
+		expect(first).toEqual({ ok: false, reason: 'unauthorized', status: 401 });
+		expect(request).toHaveBeenCalledTimes(1);
+
+		// listLists() es OTRA superficie (el catálogo de listas) y OTRO método: no
+		// gasta petición, aunque el servidor de mentira respondería 200 si llegara.
+		const second = await client.listLists();
+		expect(second).toEqual({ ok: false, reason: 'unauthorized', status: 401 });
+		expect(request).toHaveBeenCalledTimes(1);
+
+		// Y una tercera, getTask(), tampoco.
+		const third = await client.getTask('t1');
+		expect(third).toEqual({ ok: false, reason: 'unauthorized', status: 401 });
+		expect(request).toHaveBeenCalledTimes(1);
+	});
+
+	it('un 403 NO apaga las lecturas: en este plugin es "falta el consentimiento de Soplo", no token malo', async () => {
+		const { client, request } = gateClient([403, 200]);
+
+		await client.listTasks();
+		expect(request).toHaveBeenCalledTimes(1);
+
+		const second = await client.listLists();
+		expect(second.ok).toBe(true);
+		expect(request).toHaveBeenCalledTimes(2);
+	});
+
+	it('agentConsent con un 401 NO apaga las lecturas: ahí un 401 es "unknown", no token malo (ver su comentario)', async () => {
+		const { client, request } = gateClient([401, 200]);
+
+		const consent = await client.agentConsent();
+		expect(consent).toBe('unknown');
+		expect(client.readsAreLocked).toBe(false);
+
+		const second = await client.listTasks();
+		expect(second.ok).toBe(true);
+		expect(request).toHaveBeenCalledTimes(2);
+	});
+
+	it('las ESCRITURAS no se ven afectadas por el pestillo: mutate() sigue pidiendo con el pestillo echado', async () => {
+		const { client, request } = gateClient([401, 200]);
+
+		await client.listTasks();
+		expect(client.readsAreLocked).toBe(true);
+
+		const write = await client.mutate({ op: 'restore', taskId: 't1' });
+		expect(write.ok).toBe(true);
+		expect(request).toHaveBeenCalledTimes(2);
+	});
+
+	it('unlockReads vuelve a permitir lecturas y apunta quién lo pidió', async () => {
+		const logger = Logger.create({ console: null, level: 'info' });
+		const request = vi.fn(async () => ({ status: 401, json: [] }));
+		const client = new LumbreClient({
+			apiOrigin: ORIGIN,
+			getToken: async () => 'tok-123',
+			request,
+			logger: logger.child('http'),
+		});
+
+		await client.listTasks();
+		expect(client.readsAreLocked).toBe(true);
+
+		client.unlockReads('settings');
+		expect(client.readsAreLocked).toBe(false);
+		expect(
+			logger
+				.recent()
+				.some(
+					(event) =>
+						event.message === 'Lecturas encendidas de nuevo' && event.data?.['source'] === 'settings',
+				),
+		).toBe(true);
+
+		request.mockResolvedValueOnce({ status: 200, json: [] });
+		const result = await client.listTasks();
+		expect(result.ok).toBe(true);
+		expect(request).toHaveBeenCalledTimes(2);
+	});
+
+	it('sin unlockReads, un segundo 401 no vuelve a apuntar el aviso (ya está echado)', async () => {
+		const logger = Logger.create({ console: null, level: 'info' });
+		const client = new LumbreClient({
+			apiOrigin: ORIGIN,
+			getToken: async () => 'tok-123',
+			request: async () => ({ status: 401, json: [] }),
+			logger: logger.child('http'),
+		});
+
+		await client.listTasks();
+		await client.listLists();
+
+		const warnings = logger.recent().filter((event) => event.message === 'Lecturas apagadas: el token no vale');
+		// La segunda lectura ni siquiera llega a la red (el pestillo ya está
+		// echado), así que solo hay UN aviso de apagado, no dos.
+		expect(warnings).toHaveLength(1);
 	});
 });

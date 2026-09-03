@@ -128,6 +128,10 @@ export class LumbreSettingTab extends PluginSettingTab {
 					this.log.info(
 						trimmed.length > 0 ? 'Token cambiado' : 'Token borrado',
 					);
+					// Un token nuevo merece una oportunidad limpia: si el anterior había
+					// echado el pestillo de lecturas (ver `LumbreClient.readsLocked`), este
+					// cambio lo vuelve a abrir para TODAS las superficies de golpe.
+					this.host.createClient().unlockReads('settings');
 				});
 			});
 

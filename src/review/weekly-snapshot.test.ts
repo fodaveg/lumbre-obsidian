@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { ListTasksParams, LumbreResult } from '../lumbre/client';
+import { MAX_TASKS_LIMIT, type ListTasksParams, type LumbreResult } from '../lumbre/client';
 import type { LumbreList, LumbreTask } from '../lumbre/types';
 import {
 	buildWeeklySnapshot,
@@ -163,10 +163,74 @@ describe('buildWeeklySnapshot: vencidas y arrastradas', () => {
 	});
 });
 
-describe('buildWeeklySnapshot: listas sin próxima acción', () => {
-	it('solo las listas con pendientes y NINGUNA con fecha', async () => {
-		const { deps, calls } = harness({
+describe('buildWeeklySnapshot: listas sin próxima acción (camino rápido: agrupa el pool compartido)', () => {
+	it('solo las listas con pendientes y NINGUNA con fecha, y CERO peticiones por lista', async () => {
+		const casa = { id: 'l1', name: 'Casa' };
+		const trabajo = { id: 'l2', name: 'Trabajo' };
+		const { deps, calls, waits } = harness({
 			lists: [list('l1', 'Casa'), list('l2', 'Trabajo'), list('l3', 'Vacía')],
+			all: [
+				task({ id: 'a', list: casa }),
+				task({ id: 'b', list: casa }),
+				task({ id: 'c', list: trabajo }),
+				task({ id: 'd', list: trabajo, date: '2026-09-10' }),
+			],
+		});
+
+		const body = section(await buildWeeklySnapshot(deps, { now: NOW }), 'Listas sin próxima acción');
+
+		expect(body).toEqual(['- Casa · 2 pendientes']);
+		// El desglose sale del pool que ya se pidió para "vencidas y arrastradas":
+		// ni una petición CON `list`, ni una espera entre medias.
+		expect(calls.filter((params) => params.list !== undefined)).toEqual([]);
+		expect(waits).toEqual([]);
+	});
+
+	it('las completadas y canceladas no cuentan como pendientes', async () => {
+		const casa = { id: 'l1', name: 'Casa' };
+		const { deps } = harness({
+			lists: [list('l1', 'Casa')],
+			all: [
+				task({ id: 'a', list: casa, done: true }),
+				task({ id: 'b', list: casa, done: true, cancelledAt: '2026-09-01T10:00:00.000Z' }),
+				task({ id: 'c', list: casa }),
+			],
+		});
+
+		const body = section(await buildWeeklySnapshot(deps, { now: NOW }), 'Listas sin próxima acción');
+
+		expect(body).toEqual(['- Casa · 1 pendiente']);
+	});
+
+	it('dos listas con el MISMO nombre no se funden: se agrupa por id, no por nombre', async () => {
+		const casaUno = { id: 'l1', name: 'Casa' };
+		const casaDos = { id: 'l1b', name: 'Casa' };
+		const { deps } = harness({
+			lists: [list('l1', 'Casa'), list('l1b', 'Casa')],
+			all: [task({ id: 'a', list: casaUno }), task({ id: 'b', list: casaDos })],
+		});
+
+		const body = section(await buildWeeklySnapshot(deps, { now: NOW }), 'Listas sin próxima acción');
+
+		expect(body).toEqual(['- Casa · 1 pendiente', '- Casa · 1 pendiente']);
+	});
+
+	it('sin listas, el apartado dice Nada', async () => {
+		const { deps } = harness();
+
+		const body = section(await buildWeeklySnapshot(deps, { now: NOW }), 'Listas sin próxima acción');
+
+		expect(body).toEqual(['Nada']);
+	});
+});
+
+describe('buildWeeklySnapshot: listas sin próxima acción (camino de antes, cuando el pool no sirve)', () => {
+	it('el pool RECORTADO (llega justo al tope) no se usa para el desglose: una petición por lista, en serie y con intervalo', async () => {
+		const { deps, calls, waits } = harness({
+			lists: [list('l1', 'Casa'), list('l2', 'Trabajo'), list('l3', 'Vacía')],
+			// Llega exactamente a MAX_TASKS_LIMIT: puede estar recortado, así que no
+			// es fiable para saber qué tareas tiene cada lista.
+			all: Array.from({ length: MAX_TASKS_LIMIT }, (_, index) => task({ id: `x-${index}` })),
 			byList: {
 				Casa: [task({ id: 'a' }), task({ id: 'b' })],
 				Trabajo: [task({ id: 'c' }), task({ id: 'd', date: '2026-09-10' })],
@@ -182,54 +246,35 @@ describe('buildWeeklySnapshot: listas sin próxima acción', () => {
 			{ list: 'Trabajo', scope: 'all', notes: 'none', limit: 500 },
 			{ list: 'Vacía', scope: 'all', notes: 'none', limit: 500 },
 		]);
+		// Tres listas, dos esperas: la primera petición no espera a nada.
+		expect(waits).toEqual([LIST_REQUEST_INTERVAL_MS, LIST_REQUEST_INTERVAL_MS]);
 	});
 
-	it('las completadas y canceladas no cuentan como pendientes', async () => {
-		const { deps } = harness({
+	it('si el pool falla, también cae al camino de antes', async () => {
+		const { deps, calls } = harness({
 			lists: [list('l1', 'Casa')],
-			byList: {
-				Casa: [
-					task({ id: 'a', done: true }),
-					task({ id: 'b', done: true, cancelledAt: '2026-09-01T10:00:00.000Z' }),
-					task({ id: 'c' }),
-				],
-			},
+			byList: { Casa: [task({ id: 'a' })] },
+			fails: { all: 'network' },
 		});
 
 		const body = section(await buildWeeklySnapshot(deps, { now: NOW }), 'Listas sin próxima acción');
 
 		expect(body).toEqual(['- Casa · 1 pendiente']);
-	});
-
-	it('una petición por lista, en serie y con intervalo entre medias', async () => {
-		const { deps, waits } = harness({
-			lists: [list('l1', 'Casa'), list('l2', 'Trabajo'), list('l3', 'Ocio')],
-		});
-
-		await buildWeeklySnapshot(deps, { now: NOW });
-
-		// Tres listas, dos esperas: la primera petición no espera a nada.
-		expect(waits).toEqual([LIST_REQUEST_INTERVAL_MS, LIST_REQUEST_INTERVAL_MS]);
+		expect(calls.filter((params) => params.list !== undefined)).toHaveLength(1);
 	});
 
 	it('una lista que no se puede leer se nombra, y las demás siguen', async () => {
 		const { deps } = harness({
 			lists: [list('l1', 'Casa'), list('l2', 'Trabajo')],
 			byList: { Trabajo: [task({ id: 'c' })] },
-			fails: { Casa: 'network' },
+			// El pool también falla: si no, el camino rápido ni siquiera pediría cada
+			// lista, y esta prueba dejaría de ejercitar lo que quiere comprobar.
+			fails: { Casa: 'network', all: 'network' },
 		});
 
 		const body = section(await buildWeeklySnapshot(deps, { now: NOW }), 'Listas sin próxima acción');
 
 		expect(body).toEqual(['- Trabajo · 1 pendiente', 'No se han podido leer: Casa.']);
-	});
-
-	it('sin listas, el apartado dice Nada', async () => {
-		const { deps } = harness();
-
-		const body = section(await buildWeeklySnapshot(deps, { now: NOW }), 'Listas sin próxima acción');
-
-		expect(body).toEqual(['Nada']);
 	});
 });
 
