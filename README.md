@@ -38,17 +38,15 @@ OBSIDIAN_VAULT=/ruta/al/vault npm run install:dev   # copia main.js, manifest.js
 ## Cómo se publica
 
 ```sh
-npm version patch --tag-version-prefix=""    # o minor
+npm version patch    # o minor
 git push --follow-tags
 ```
 
 `npm version` dispara `version-bump.mjs`, que sincroniza `manifest.json` y `versions.json`, y crea el
-tag **sin prefijo `v`**. Ese detalle no es cosmético: BRAT y el instalador de Obsidian buscan la
+tag **sin prefijo `v`** (lo fija `.npmrc` con `tag-version-prefix=""`). Ese detalle no es cosmético: BRAT y el instalador de Obsidian buscan la
 release cuyo tag es exactamente `manifest.version`, y `scripts/verify-release.mjs --tag` falla si
 alguien publica `v0.1.0`.
 
-> Pendiente: falta el `.npmrc` del repositorio con `tag-version-prefix=""` (y `engine-strict=true`).
-> Mientras no exista, el prefijo vacío hay que pasarlo en la línea de comando como arriba.
 
 Al llegar el tag, `.github/workflows/release.yml` pasa el gate, comprueba el tag contra el manifest,
 crea la release con los tres assets sueltos y vuelve a comprobarla contra lo que GitHub tiene
