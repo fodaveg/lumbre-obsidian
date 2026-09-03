@@ -1,6 +1,6 @@
 # Estado
 
-- **Versión**: 0.1.5 (publicada para BRAT).
+- **Versión**: 0.1.9 (publicada para BRAT).
 - **Qué hay**: esqueleto del plugin, ajustes (origen + token), botón de prueba de conexión, gate
   `npm run check`, CI y workflow de release para BRAT con los tres assets sueltos.
 - **Qué hay (lote A)**: cliente HTTP completo (`listTasks`, `getTask`, `getTasksByIds`, `listLists`,
@@ -262,6 +262,55 @@
     pintado hasta que se cierra, porque Obsidian solo los suelta al descargar el `Component`. Se acepta
     a cambio de que no quede ni un listener sin dueño; los modales no lo pagan porque descargan su
     `Component` al cerrarse.
+- **Lote I: los cupos reales de la API y el pestillo del token** (los tres límites nuevos los midió
+  la sesión de Lumbre en su código, con fichero y línea; cada arreglo con su test):
+  - **I1** El contador de peticiones deja de ser UN cubo global de 120 y pasa a un cubo POR ENDPOINT
+    (`src/lumbre/client.ts`), con el techo real de cada uno: `GET /api/tasks` 120/min,
+    `POST /api/mutations` 60/min, `POST /api/sync/flush` 60/min y `POST /api/agent` 30/min. Los cubos
+    del servidor son por token y con clave distinta por endpoint, o sea INDEPENDIENTES: gastar las 120
+    de lecturas no resta ni una de las 60 de mutaciones. Constantes nuevas `TASKS_RATE_LIMIT`,
+    `MUTATIONS_RATE_LIMIT`, `SYNC_FLUSH_RATE_LIMIT`, `AGENT_RATE_LIMIT`, `DEFAULT_RATE_LIMIT` y
+    `RATE_WARN_RATIO` (5/6, la proporción que ya había) con `warnThreshold(limit)`; desaparece
+    `REQUESTS_PER_MINUTE_WARN`. Con el cubo global, Soplo se comía un 429 en `/api/agent` a la
+    petición 30 con el contador marcando 30, muy por debajo del aviso, y el registro no decía nada.
+  - **I2** Un 401 en cualquier lectura echa un pestillo que apaga las lecturas de TODAS las
+    superficies a la vez, no una por una: campo `readsLocked`, método privado `gated`, getter
+    `readsAreLocked` y `unlockReads(source)`. Envuelve `listTasks`, `getTasksByIds`, `getTask`,
+    `listLists`, `brl` y `brlJson`; quedan fuera `ping()` y `agentConsent()` (este por su semántica
+    documentada de 401 → `unknown`). Las escrituras NO pasan por el pestillo: la cola tiene su propia
+    clasificación y su reintento manual, y enredarlos dejaría una operación pendiente sin reintentar.
+    Un 403 tampoco lo dispara, porque aquí significa que falta el consentimiento de Soplo.
+    El motivo es lo que lo hizo urgente: Lumbre tiene un cubo aparte de 20 peticiones/min POR IP para
+    token inválido, aplicado ANTES del 401 y compartido entre `/api/tasks`, `/api/sync/flush` y la
+    autenticación del agente. Cuenta por IP, no por token, así que varias superficies reintentando con
+    el token caducado llegan a 20 enseguida y a partir de ahí la IP entera come 429, incluidas las
+    peticiones con el token BUENO cuando el usuario lo renueva. Era un fallo que sobrevivía a que el
+    usuario arreglara su token.
+  - **I2b** Reabren el pestillo el cambio de token en Ajustes (`src/settings.ts`) y el botón
+    «Reintentar» del panel (`src/ui/note-tasks-view.ts`). `createClient()` devuelve la instancia
+    COMPARTIDA (`src/main.ts:386`), comprobado, así que el desbloqueo llega a todas las superficies y
+    no a una copia suelta.
+  - **I3** `listsWithoutNextActionSection` (`src/review/weekly-snapshot.ts`) reutiliza el pool de
+    `scope: all, limit: 500` que la foto semanal ya pedía, agrupando en memoria por ID de lista, en
+    vez de una petición por lista. Si ese pool falló o llegó justo al tope, cae al camino anterior.
+    `?ids=` (200 ids por petición y coste 1 del cubo) NO aplicaba: la consulta no es por ids conocidos.
+  - **I4** El separador del hash de la muestra de «Algún día» (`src/review/weekly-snapshot.ts`) era un
+    byte NUL CRUDO dentro del template literal, y eso hacía BINARIO el fichero entero para las
+    herramientas de texto: `grep` respondía «Binary file matches» sin las líneas y `file` lo llamaba
+    `application/octet-stream`. Ahora es el escape `\x1f`.
+- **Decisiones del lote I**:
+  - Para `/api/agent` se usa el límite de 30 y no el de 45 del modo live, porque el plugin no manda
+    ese modo. Si algún día lo mandara, el techo sube; equivocarse por abajo solo cuesta un aviso de
+    más, y por arriba cuesta un 429 sin avisar.
+  - El pestillo de I2 es del CLIENTE y no de cada caché o cada vista, precisamente porque el cubo que
+    lo motiva se cuenta por IP: un pestillo por superficie no habría arreglado nada.
+  - Agrupar por ID de lista y nunca por nombre, para no fundir dos listas homónimas en una.
+  - Cambiar el separador de I4 CAMBIA el hash, y por tanto qué tareas concretas salen en la muestra de
+    «Algún día». Se acepta: lo que importa es que sea determinista por día, y lo sigue siendo. Los
+    tests aseveran esa propiedad y no ids concretos, así que ninguno hubo que tocarlo.
+  - Los dos arreglos se verificaron ROMPIÉNDOLOS: al sustituir el pestillo compartido por un flag
+    local caen dos tests (uno recibe `{ok: true}` donde esperaba el 401 y otro cuenta dos avisos donde
+    esperaba uno); al volver a un cubo único caen los dos de independencia de cubos.
 - **Qué falta**: la decisión de dónde vive el token; las tareas están en la lista `lumbre-obsidian`
   de Lumbre, no aquí.
 - **Decisiones del lote B**: las listas se cachean en memoria cinco minutos (`ListCache`), no en
