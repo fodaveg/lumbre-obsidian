@@ -10,13 +10,10 @@ CI y el pipeline de publicación para BRAT. Lo que falta está en la lista `lumb
 
 ## Instalación por BRAT
 
-El repositorio es privado, así que BRAT necesita credenciales antes de poder verlo:
+El repositorio es público, así que BRAT no necesita ningún token:
 
 1. Instala el plugin **BRAT** desde la tienda de plugins de Obsidian.
-2. Crea un token personal de GitHub con permiso de **lectura** sobre este repositorio (un
-   fine-grained token con `Contents: Read-only` sobre `fodaveg/lumbre-obsidian` basta).
-3. En los ajustes de BRAT, usa **Add Personal Access Token** y pega ese token.
-4. Ejecuta **Add beta plugin** y escribe `fodaveg/lumbre-obsidian`.
+2. Ejecuta **Add beta plugin** y escribe `fodaveg/lumbre-obsidian`.
 
 BRAT descarga los tres ficheros de la última release (`main.js`, `manifest.json`, `styles.css`) y
 actualiza el plugin cuando salga una versión nueva.
