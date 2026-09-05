@@ -484,4 +484,21 @@ describe('QueryCache', () => {
 		await cache.get(query(''));
 		expect(onRefresh).toHaveBeenCalledTimes(1);
 	});
+
+	it('hasSubscribers es false sin ninguna consulta suscrita', async () => {
+		const cache = new QueryCache({ client: okClient(), now: () => 0 });
+
+		await cache.get(query(''));
+		expect(cache.hasSubscribers()).toBe(false);
+	});
+
+	it('hasSubscribers es true con al menos un bloque montado', () => {
+		const cache = new QueryCache({ client: okClient(), now: () => 0 });
+
+		const unsubscribe = cache.subscribe(query(''), () => undefined);
+		expect(cache.hasSubscribers()).toBe(true);
+
+		unsubscribe();
+		expect(cache.hasSubscribers()).toBe(false);
+	});
 });

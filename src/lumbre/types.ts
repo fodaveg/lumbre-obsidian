@@ -75,6 +75,19 @@ export interface LumbreTask {
 	subtasks?: LumbreSubtask[];
 	/** Id de la tarea padre si esta ES una subtarea; `null` si es de primer nivel. */
 	parentId: string | null;
+	/**
+	 * ISO 8601 de la última vez que la tarea cambió DE VERDAD. AUSENTE si la fila
+	 * cruda no lo trae, igual que `rolloverCount`. Sale del HLC del CRDT y solo se
+	 * mueve cuando la celda cambia de valor; reenviar la misma mutación (un
+	 * no-op, como completar lo ya completado) la deja quieta. Medido en el JSDoc
+	 * de `?updatedSince=` de `src/routes/api/tasks/+server.ts` (repo de Lumbre,
+	 * `origin/main`, entorno a la línea 195, 5 sep 2026): `done` la mueve si
+	 * cambia; `date` la mueve al cambiar de día (al mismo día, solo si el índice
+	 * fraccionario u otro campo acaba distinto); `list`, `section` y `priority`
+	 * la mueven si el valor difiere, no en el no-op. Es lo que usa
+	 * `ChangeFeed` (`src/lumbre/change-feed.ts`) para pedir solo lo que cambió.
+	 */
+	updatedAt?: string;
 }
 
 /**
@@ -220,6 +233,7 @@ export function taskFromApi(raw: unknown): LumbreTask | null {
 		...(Array.isArray(attachments) ? { attachmentCount: attachments.length } : {}),
 		...(subtasks !== undefined ? { subtasks } : {}),
 		parentId: asString(row['parentId']),
+		...(typeof row['updatedAt'] === 'string' ? { updatedAt: row['updatedAt'] } : {}),
 	};
 }
 

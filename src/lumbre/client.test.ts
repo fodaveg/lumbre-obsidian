@@ -204,6 +204,48 @@ describe('LumbreClient.listTasks', () => {
 	});
 });
 
+describe('LumbreClient.tasksUpdatedSince', () => {
+	it('monta updatedSince, limit y notes; ignora scope/list/section/includeDone', async () => {
+		const { client, calls } = recordingClient([]);
+
+		await client.tasksUpdatedSince({
+			since: '2026-09-05T10:00:00.000Z',
+			limit: 500,
+			notes: 'none',
+		});
+
+		expect(calls[0]?.url).toBe(
+			'https://app.lumbre.pro/api/tasks?updatedSince=2026-09-05T10%3A00%3A00.000Z&limit=500&notes=none',
+		);
+	});
+
+	it('sin limit ni notes, solo updatedSince', async () => {
+		const { client, calls } = recordingClient([]);
+
+		await client.tasksUpdatedSince({ since: '2026-09-05' });
+
+		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/tasks?updatedSince=2026-09-05');
+	});
+
+	it('trae el updatedAt de cada tarea', async () => {
+		const { client } = recordingClient([apiTask({ updatedAt: '2026-09-05T10:00:00.001Z' })]);
+
+		const result = await client.tasksUpdatedSince({ since: '2026-09-05' });
+
+		expect(result.ok && result.value[0]?.updatedAt).toBe('2026-09-05T10:00:00.001Z');
+	});
+
+	it('comparte el pestillo de lecturas con listTasks: un 401 apaga las dos', async () => {
+		const client = clientWith(respondWith(401));
+
+		const first = await client.tasksUpdatedSince({ since: '2026-09-05' });
+		expect(first).toEqual({ ok: false, reason: 'unauthorized', status: 401 });
+
+		const second = await client.listTasks();
+		expect(second).toEqual({ ok: false, reason: 'unauthorized', status: 401 });
+	});
+});
+
 describe('LumbreClient.getTask y getTasksByIds', () => {
 	it('getTask pide ?id= con includeArchived y devuelve la primera tarea', async () => {
 		const { client, calls } = recordingClient([apiTask()]);

@@ -296,6 +296,19 @@ export class QueryCache {
 		return this.entries.size;
 	}
 
+	/**
+	 * `true` si alguna consulta tiene al menos un bloque montado. Lo usa el
+	 * sondeo de cambios (`ChangeFeed`, `src/lumbre/change-feed.ts`) para no
+	 * pedir nada cuando no hay quien lo necesite: una entrada huérfana (ver
+	 * `IDLE_ENTRY_TTL_MS`) no cuenta como "hay quien lo necesite".
+	 */
+	hasSubscribers(): boolean {
+		for (const entry of this.entries.values()) {
+			if (entry.listeners.size > 0) return true;
+		}
+		return false;
+	}
+
 	private entryFor(query: ResolvedQuery): CacheEntry {
 		const key = queryKey(query);
 		const existing = this.entries.get(key);

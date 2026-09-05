@@ -55,6 +55,7 @@ import {
 	type AgentPlan,
 	type LumbreResult,
 } from './lumbre/client';
+import { ChangeFeed, startChangeFeedPoll } from './lumbre/change-feed';
 import { ListCache } from './lumbre/list-cache';
 import {
 	describeFailedItems,
@@ -116,6 +117,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	lists!: ListCache;
 	queries!: QueryCache;
 	brl!: BrlCache;
+	changeFeed!: ChangeFeed;
 
 	/**
 	 * API PÚBLICA del plugin, alcanzable como `app.plugins.plugins.lumbre.api` y
@@ -218,6 +220,14 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			logger: this.logger.child('cache'),
 		});
 		this.brl = new BrlCache({ client: this.client, logger: this.logger.child('cache') });
+		// El cursor arranca en ESTE instante, en memoria: al cargar ya se hace una
+		// lectura completa (bloques y panel piden lo suyo), y uno persistido en
+		// `data.json` traería deltas de otro dispositivo si ese fichero llega por
+		// Obsidian Sync.
+		this.changeFeed = new ChangeFeed(
+			{ client: this.client, logger: this.logger.child('cache') },
+			new Date().toISOString(),
+		);
 		this.api = new LumbreApi({
 			version: this.manifest.version,
 			client: this.client,
@@ -368,6 +378,31 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 				this.registerInterval(window.setInterval(handler, ms));
 			},
 			logger: this.logger.child('queue'),
+		});
+		// Sondeo barato de lo que ha cambiado FUERA de Obsidian (completada,
+		// archivada o movida desde la app o el móvil): solo pide si hay algo
+		// montado que lo necesite, con conexión, con la pestaña visible y con el
+		// pestillo de lecturas suelto.
+		startChangeFeedPoll({
+			feed: this.changeFeed,
+			isNeeded: () =>
+				this.queries.hasSubscribers() ||
+				this.app.workspace.getLeavesOfType(NOTE_TASKS_VIEW_TYPE).length > 0,
+			isOnline: () => navigator.onLine,
+			isHidden: () => document.hidden,
+			isReadsLocked: () => this.client.readsAreLocked,
+			refreshQueries: () => this.queries.refreshSoon('sondeo de cambios'),
+			notesForTask: (taskId: string) => this.links.notesForTask(taskId),
+			refreshLinksForNote: async (notePath: string) => {
+				await this.links.refresh(notePath, this.client);
+			},
+			notifyDataChange: () => {
+				this.notifyDataChange();
+			},
+			register: (handler: () => void, ms: number) => {
+				this.registerInterval(window.setInterval(handler, ms));
+			},
+			logger: this.logger.child('cache'),
 		});
 		// Mismo intervalo que el drenaje de la cola, con su propio temporizador
 		// porque no es una operación de la cola: es un candidato a ENCOLAR (el

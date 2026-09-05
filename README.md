@@ -39,6 +39,10 @@ hasta que Lumbre la confirma al releerla. Sin conexión, la cabecera lo dice y s
 último confirmado, nunca una caché disfrazada de dato fresco. La cola se repasa sola cada minuto,
 así que lo que se encoló sin red sale en cuanto la haya, sin tener que tocar nada.
 
+El panel y los bloques también se enteran solos de lo que cambia FUERA de Obsidian (una tarea
+completada, archivada o movida desde la app o el móvil): un sondeo barato cada minuto pregunta solo
+por lo que ha cambiado desde la última vez, y solo si hay algo abierto que lo necesite.
+
 `lumbre-list` es **lo único** que el plugin escribe dentro de una nota por su cuenta. Lo otro que
 puede acabar en un fichero es el BRL de hoy, y solo con el comando que lo pega a mano.
 
