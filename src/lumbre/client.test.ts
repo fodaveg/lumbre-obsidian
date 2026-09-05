@@ -543,6 +543,86 @@ describe('LumbreClient.mutate con createBrlEntry', () => {
 	});
 });
 
+describe('LumbreClient.listLink, listUnlink y listLinks', () => {
+	it('listLink manda type link con el target completo', async () => {
+		const { client, calls } = recordingClient({ ok: true, type: 'link', listId: 'list-1', deleted: false });
+
+		const result = await client.listLink({
+			listId: 'list-1',
+			url: 'obsidian://open?vault=v&file=Cocina',
+			label: 'Cocina',
+		});
+
+		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/list-links');
+		expect(calls[0]?.method).toBe('POST');
+		expect(jsonBody(calls[0])).toEqual({
+			type: 'link',
+			listId: 'list-1',
+			target: { kind: 'obsidian', url: 'obsidian://open?vault=v&file=Cocina', label: 'Cocina' },
+		});
+		expect(result).toEqual({ ok: true, value: undefined });
+	});
+
+	it('listUnlink manda type unlink, con el MISMO label que se guardó', async () => {
+		const { client, calls } = recordingClient({ ok: true, type: 'unlink', listId: 'list-1', removed: true });
+
+		await client.listUnlink({ listId: 'list-1', url: 'obsidian://open?vault=v&file=Cocina', label: 'Cocina' });
+
+		expect(jsonBody(calls[0])).toMatchObject({ type: 'unlink' });
+	});
+
+	it('un unlink con removed:false en el cuerpo sigue siendo ok: no es un fallo', async () => {
+		const client = clientWith(async () => ({
+			status: 200,
+			json: { ok: true, type: 'unlink', listId: 'list-1', removed: false },
+		}));
+
+		const result = await client.listUnlink({ listId: 'list-1', url: 'url', label: 'Cocina' });
+
+		expect(result).toEqual({ ok: true, value: undefined });
+	});
+
+	it('listLinks pide GET con listId y lee las filas', async () => {
+		const { client, calls } = recordingClient({
+			links: [
+				{
+					id: 'row-1',
+					listId: 'list-1',
+					kind: 'obsidian',
+					targetKey: 'obsidian://open?vault=v&file=Cocina',
+					url: 'obsidian://open?vault=v&file=Cocina',
+					label: 'Cocina',
+					updatedAt: '2026-09-05T10:00:00.000Z',
+				},
+			],
+		});
+
+		const result = await client.listLinks('list-1');
+
+		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/list-links?listId=list-1');
+		expect(calls[0]?.method).toBe('GET');
+		expect(result.ok && result.value).toEqual([
+			{
+				id: 'row-1',
+				listId: 'list-1',
+				kind: 'obsidian',
+				targetKey: 'obsidian://open?vault=v&file=Cocina',
+				url: 'obsidian://open?vault=v&file=Cocina',
+				label: 'Cocina',
+				updatedAt: '2026-09-05T10:00:00.000Z',
+			},
+		]);
+	});
+
+	it('un 404 (lista de otra cuenta o borrada) sale como not_found, no reintentable', async () => {
+		expect(await clientWith(respondWith(404)).listLink({ listId: 'x', url: 'u', label: 'l' })).toEqual({
+			ok: false,
+			reason: 'not_found',
+			status: 404,
+		});
+	});
+});
+
 describe('LumbreClient.agent', () => {
 	it('manda el texto como prompt y empareja plan con preview por índice', async () => {
 		const { client, calls } = recordingClient({

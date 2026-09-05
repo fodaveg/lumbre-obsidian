@@ -47,6 +47,12 @@ export type FailureReason =
 	| 'no_token'
 	| 'unauthorized'
 	| 'bad_request'
+	/**
+	 * 404: lo que se pedía no existe, o es de otra cuenta. Los dos casos
+	 * responden IGUAL a propósito (el servidor no delata qué ids existen en
+	 * cuentas ajenas), y ninguno se arregla reintentando solo.
+	 */
+	| 'not_found'
 	| 'rate_limited'
 	| 'network'
 	| 'server'
@@ -289,6 +295,29 @@ export interface LumbreAttachment {
 	size: number;
 }
 
+/**
+ * Destino de `POST /api/list-links`: el enlace de vuelta de una nota del vault
+ * hacia una lista de Lumbre. `url` viaja TAL CUAL: el servidor la guarda con un
+ * simple `trim`, sin normalizar, así que un `unlink` tiene que mandar la MISMA
+ * cadena que mandó el `link` correspondiente.
+ */
+export interface ListLinkTarget {
+	listId: string;
+	url: string;
+	label: string;
+}
+
+/** Una fila de `GET /api/list-links`. Hoy el plugin solo produce las de `kind: 'obsidian'`. */
+export interface ListLinkRow {
+	id: string;
+	listId: string;
+	kind: string;
+	targetKey: string;
+	url: string;
+	label: string;
+	updatedAt: string;
+}
+
 /** Cuerpo que NO es JSON, con las cabeceras que le tocan. */
 interface RawBody {
 	body: ArrayBuffer;
@@ -361,6 +390,12 @@ export const AGENT_RATE_LIMIT = 30;
  */
 export const DEFAULT_RATE_LIMIT = 120;
 
+/** Límite de escrituras en `POST /api/list-links`: cubo PROPIO, no el de `/api/mutations`. */
+export const LIST_LINKS_WRITE_RATE_LIMIT = 60;
+
+/** Límite de lecturas en `GET /api/list-links`. */
+export const LIST_LINKS_READ_RATE_LIMIT = 120;
+
 /**
  * Proporción del límite de un cubo a partir de la que se avisa. Con el cubo
  * único de antes era 100 de 120 (5/6); se mantiene la misma proporción por
@@ -380,6 +415,8 @@ const RATE_LIMITS: ReadonlyMap<string, number> = new Map([
 	['POST /api/mutations', MUTATIONS_RATE_LIMIT],
 	['POST /api/sync/flush', SYNC_FLUSH_RATE_LIMIT],
 	['POST /api/agent', AGENT_RATE_LIMIT],
+	['POST /api/list-links', LIST_LINKS_WRITE_RATE_LIMIT],
+	['GET /api/list-links', LIST_LINKS_READ_RATE_LIMIT],
 ]);
 
 /** Ventana del contador de peticiones. */
@@ -653,6 +690,42 @@ export class LumbreClient {
 		});
 		if (!response.ok) return response;
 		return { ok: true, value: attachmentFrom(response.value) };
+	}
+
+	/**
+	 * `POST /api/list-links` con `type: 'link'`: registra en Lumbre el enlace de
+	 * vuelta a la nota, para que la vista de proyecto lo enseñe en «Notas
+	 * vinculadas». Idempotente: mandar el mismo `url` dos veces no duplica.
+	 */
+	async listLink(target: ListLinkTarget): Promise<LumbreResult<void>> {
+		const response = await this.send('POST', '/api/list-links', listLinkBody('link', target));
+		if (!response.ok) return response;
+		return { ok: true, value: undefined };
+	}
+
+	/**
+	 * `POST /api/list-links` con `type: 'unlink'`. `label` viaja igual que en
+	 * `listLink` porque el servidor lo valida en los DOS tipos, aunque no lo use
+	 * para retirar el vínculo. Un destino que ya no estaba registrado responde
+	 * 200 con `removed: false`: es ÉXITO, no motivo para reintentar.
+	 */
+	async listUnlink(target: ListLinkTarget): Promise<LumbreResult<void>> {
+		const response = await this.send('POST', '/api/list-links', listLinkBody('unlink', target));
+		if (!response.ok) return response;
+		return { ok: true, value: undefined };
+	}
+
+	/**
+	 * `GET /api/list-links?listId=`: todos los vínculos de esa lista, de
+	 * cualquier origen. Es la relectura de `listLink`/`listUnlink`: tras un
+	 * `link` la url mandada debe estar; tras un `unlink`, no.
+	 */
+	async listLinks(listId: string): Promise<LumbreResult<ListLinkRow[]>> {
+		const query = new URLSearchParams({ listId });
+		const path = `/api/list-links?${query.toString()}`;
+		const response = await this.gated('GET', path, () => this.send('GET', path));
+		if (!response.ok) return response;
+		return { ok: true, value: listLinksFrom(response.value) };
 	}
 
 	/**
@@ -940,6 +1013,7 @@ function failureForStatus(
 	if (status >= 200 && status < 300) return null;
 	if (status === 400) return { ok: false, reason: 'bad_request', status };
 	if (status === 401 || status === 403) return { ok: false, reason: 'unauthorized', status };
+	if (status === 404) return { ok: false, reason: 'not_found', status };
 	if (status === 429) {
 		const wait = retryAfterOf(headers);
 		return {
@@ -1088,6 +1162,42 @@ function attachmentFrom(raw: unknown): LumbreAttachment {
 	};
 }
 
+/** El cuerpo de `POST /api/list-links`. `label` va SIEMPRE, incluso en `unlink`: el servidor lo valida en los dos tipos. */
+function listLinkBody(type: 'link' | 'unlink', target: ListLinkTarget): Record<string, unknown> {
+	return {
+		type,
+		listId: target.listId,
+		target: { kind: 'obsidian', url: target.url, label: target.label },
+	};
+}
+
+/** El JSON de `GET /api/list-links` a la lista de filas, descartando lo que no tenga forma de vínculo. */
+function listLinksFrom(raw: unknown): ListLinkRow[] {
+	const row = asRow(raw);
+	const rawLinks = row?.['links'];
+	if (!Array.isArray(rawLinks)) return [];
+
+	const links: ListLinkRow[] = [];
+	for (const item of rawLinks) {
+		const link = asRow(item);
+		if (link === null) continue;
+		const id = link['id'];
+		const listId = link['listId'];
+		const url = link['url'];
+		if (typeof id !== 'string' || typeof listId !== 'string' || typeof url !== 'string') continue;
+		links.push({
+			id,
+			listId,
+			kind: typeof link['kind'] === 'string' ? link['kind'] : '',
+			targetKey: typeof link['targetKey'] === 'string' ? link['targetKey'] : '',
+			url,
+			label: typeof link['label'] === 'string' ? link['label'] : '',
+			updatedAt: typeof link['updatedAt'] === 'string' ? link['updatedAt'] : '',
+		});
+	}
+	return links;
+}
+
 function batchResultsFrom(raw: unknown): BatchResultItem[] {
 	if (raw === null || typeof raw !== 'object') return [];
 	const results = (raw as { results?: unknown }).results;
@@ -1108,6 +1218,8 @@ export function describeFailure(reason: FailureReason, status?: number): string 
 			return 'El token no vale o ha caducado. Cámbialo en Ajustes → Token personal.';
 		case 'bad_request':
 			return 'Lumbre rechazó la petición por su contenido.';
+		case 'not_found':
+			return 'Eso ya no existe en Lumbre.';
 		case 'rate_limited':
 			return 'Demasiadas peticiones a Lumbre; espera un momento.';
 		case 'network':

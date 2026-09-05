@@ -313,6 +313,26 @@
     esperaba uno); al volver a un cubo único caen los dos de independencia de cubos.
 - **Qué falta**: la decisión de dónde vive el token; las tareas están en la lista `lumbre-obsidian`
   de Lumbre, no aquí.
+- **Lote J: vínculos nota ↔ lista por `/api/list-links`** (paso 1 de 4 de la tarea `5800b32a`):
+  - **Qué hay**: `linkNoteToList`/`unlinkNoteFromList` (`src/main.ts`) siguen escribiendo `lumbre-list`
+    en el frontmatter, la ÚNICA escritura del plugin en la nota, y además encolan un `link`/`unlink`
+    contra `POST /api/list-links` (kind nuevo `listLink` en `src/lumbre/queue.ts`, métodos
+    `listLink`/`listUnlink`/`listLinks` en `src/lumbre/client.ts`). Solo viaja la RUTA de la nota
+    (por su `obsidian://open?vault=&file=`, `src/links/deep-link.ts`), nunca el contenido. Un
+    renombrado (nota o carpeta) reemite `unlink` de la url vieja → `link` con la nueva, en ese orden
+    (`renameListLinkChanges`, `src/links/note-list-link-store.ts`); un borrado encola el `unlink` y
+    quita la entrada.
+  - **Por qué un almacén nuevo**: el servidor guarda la url TAL CUAL llega (solo `trim`, sin
+    normalizar), así que un `unlink` tiene que mandar la MISMA cadena que mandó el `link`, byte a
+    byte, o responde 200 con `removed: false` sin haber quitado nada (fallo MUDO). `NoteListLinkStore`
+    guarda esa url exacta por nota (`data.json` versión 3, campo `noteListLinks`; migración desde la
+    2 arranca con el registro vacío).
+  - **Decisión**: 404 (lista de otra cuenta o borrada) es un `FailureReason` nuevo, `not_found`, y
+    ENTRA en `PERMANENT_REASONS` de la cola: no se reintenta solo, igual que `bad_request` y
+    `unauthorized`. Antes de este lote un 404 cualquiera caía en `server` (recuperable) porque ningún
+    endpoint lo devolvía en un caso legítimo.
+  - **Qué falta**: los pasos 2 a 4 de la tarea (mostrar el vínculo en el panel, tareas de otro agente
+    en paralelo sobre `src/blocks/*` y `src/ui/note-tasks-view.ts`); ver la lista `lumbre-obsidian`.
 - **Decisiones del lote B**: las listas se cachean en memoria cinco minutos (`ListCache`), no en
   `data.json`; las secciones de la lista de proyecto se agrupan en cliente por el `section` que ya
   trae cada tarea, sin usar `includeSections=1`, que el cliente todavía no soporta.

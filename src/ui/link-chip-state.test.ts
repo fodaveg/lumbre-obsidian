@@ -28,6 +28,11 @@ function statusOp(state: OperationState): StatusOperation {
 	return { ...rest, kind: 'status', taskId: 'task-2', done: true };
 }
 
+function listLinkOp(state: OperationState): QueuedOperation {
+	const { clientTaskId: _clientTaskId, draft: _draft, ...rest } = base(state);
+	return { ...rest, kind: 'listLink', type: 'link', listId: 'list-1', url: 'obsidian://open?vault=v&file=x', label: 'x' };
+}
+
 describe('pendingOperationFor', () => {
 	it('un create se busca por su clientTaskId, que ES el id de la tarea', () => {
 		const operations: QueuedOperation[] = [createOp('sent')];
@@ -37,6 +42,10 @@ describe('pendingOperationFor', () => {
 
 	it('un status se busca por su taskId', () => {
 		expect(pendingOperationFor([statusOp('sent')], 'task-2')?.kind).toBe('status');
+	});
+
+	it('un listLink no afecta a NINGUNA tarea: liga una nota con una lista, no con una tarea', () => {
+		expect(pendingOperationFor([listLinkOp('sent')], 'task-1')).toBeUndefined();
 	});
 
 	it('con varias sobre la misma tarea gana la MÁS RECIENTE', () => {

@@ -38,7 +38,7 @@ export interface ChipState {
  * «Rechazada» para siempre, tapando la que se acaba de encolar encima.
  *
  * Una operación de BRL no afecta a ninguna tarea: una entrada del registro no
- * lo es.
+ * lo es. Tampoco un `listLink`: liga una nota con una LISTA, no con una tarea.
  */
 export function pendingOperationFor(
 	operations: readonly QueuedOperation[],
@@ -61,6 +61,7 @@ function affectsTask(operation: QueuedOperation, taskId: string): boolean {
 		case 'batch':
 			return operation.createdTaskIds.includes(taskId);
 		case 'brl':
+		case 'listLink':
 			return false;
 	}
 }

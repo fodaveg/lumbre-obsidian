@@ -30,6 +30,7 @@ import type {
 	BatchOperation,
 	LumbreClient,
 	FailureReason,
+	ListLinkTarget,
 	LumbreFailure,
 	LumbreResult,
 } from './client';
@@ -158,11 +159,31 @@ export type BatchQueuedOperation = OperationBase & {
 	failedItems?: BatchFailedItem[];
 };
 
+/**
+ * Un enlace de vuelta nota ↔ lista por `POST /api/list-links`: registrarlo
+ * (`type: 'link'`) o retirarlo (`type: 'unlink'`).
+ *
+ * `url` es la EXACTA que se mandó (o se va a mandar): el servidor la guarda tal
+ * cual llega, así que un `unlink` con una url reconstruida de otra forma no
+ * casaría con la registrada y respondería 200 con `removed: false` sin haber
+ * quitado nada. `main.ts` guarda esa misma cadena en `NoteListLinkStore` y es
+ * de ahí de donde sale para encolar el `unlink`.
+ */
+export type ListLinkQueuedOperation = OperationBase & {
+	kind: 'listLink';
+	type: 'link' | 'unlink';
+	listId: string;
+	url: string;
+	label: string;
+	target: LinkTarget;
+};
+
 export type QueuedOperation =
 	| CreateOperation
 	| StatusOperation
 	| BrlOperation
-	| BatchQueuedOperation;
+	| BatchQueuedOperation
+	| ListLinkQueuedOperation;
 
 /** Lo que la cola necesita del almacén del plugin. Lo cumple `PluginStore`. */
 export interface QueueStorage {
@@ -175,7 +196,16 @@ export interface QueueStorage {
 export interface OperationQueueOptions {
 	client: Pick<
 		LumbreClient,
-		'createTask' | 'mutate' | 'flush' | 'getTask' | 'getTasksByIds' | 'batch' | 'brlJson'
+		| 'createTask'
+		| 'mutate'
+		| 'flush'
+		| 'getTask'
+		| 'getTasksByIds'
+		| 'batch'
+		| 'brlJson'
+		| 'listLink'
+		| 'listUnlink'
+		| 'listLinks'
 	>;
 	storage: QueueStorage;
 	/** Espera entre la primera relectura vacía y la segunda. Inyectable para los tests. */
@@ -222,10 +252,23 @@ export const MATERIALIZED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Y cuántas se conservan como mucho, por recientes que sean. */
 export const MAX_MATERIALIZED = 50;
 
-/** Motivos que NO se reintentan: el servidor ya ha dicho que no. */
+/**
+ * Motivos que NO se reintentan: el servidor ya ha dicho que no.
+ *
+ * `not_found` (404) es de la COLA, no de un endpoint: cualquier operación de
+ * cualquier `kind` que reciba un 404 se queda `rejected` sin reintento. Hoy el
+ * único endpoint de escritura de la cola que de verdad puede devolver 404 es
+ * `POST /api/list-links` (lista de otra cuenta o borrada; medido endpoint por
+ * endpoint en el repo de Lumbre: `/api/ingest`, `/api/mutations` y
+ * `/api/batch` no lo emiten en ningún caso legítimo). Si algún día se añade un
+ * `kind` nuevo cuyo endpoint pueda dar un 404 TRANSITORIO (por ejemplo, una
+ * carrera donde el recurso aún no se ha propagado), esa operación quedaría
+ * `rejected` sin más intentos: revisar aquí antes de asumir lo contrario.
+ */
 const PERMANENT_REASONS: ReadonlySet<FailureReason> = new Set<FailureReason>([
 	'unauthorized',
 	'bad_request',
+	'not_found',
 ]);
 
 export class OperationQueue {
@@ -316,6 +359,33 @@ export class OperationQueue {
 		};
 		await this.append(operation);
 		this.logEnqueued(operation, { ops: ops.length, creates: createdTaskIds.length });
+		return operation;
+	}
+
+	/**
+	 * Encola un enlace de vuelta nota ↔ lista (`type: 'link'`) o su retirada
+	 * (`type: 'unlink'`). `url` y `label` viajan tal cual: es lo que se manda a
+	 * `POST /api/list-links`, y en un `unlink` tienen que ser la MISMA cadena que
+	 * se mandó en el `link` (ver el JSDoc de `ListLinkQueuedOperation`).
+	 */
+	async enqueueListLink(
+		type: 'link' | 'unlink',
+		listId: string,
+		url: string,
+		label: string,
+		target: LinkTarget,
+	): Promise<ListLinkQueuedOperation> {
+		const operation: ListLinkQueuedOperation = {
+			...this.newBase(),
+			kind: 'listLink',
+			type,
+			listId,
+			url,
+			label,
+			target,
+		};
+		await this.append(operation);
+		this.logEnqueued(operation, { type, listId });
 		return operation;
 	}
 
@@ -557,6 +627,16 @@ export class OperationQueue {
 					.map((item) => ({ index: item.index, error: item.error ?? null }));
 				return { ok: true, value: undefined };
 			}
+			case 'listLink': {
+				const target: ListLinkTarget = {
+					listId: operation.listId,
+					url: operation.url,
+					label: operation.label,
+				};
+				return operation.type === 'link'
+					? this.options.client.listLink(target)
+					: this.options.client.listUnlink(target);
+			}
 		}
 	}
 
@@ -618,6 +698,17 @@ export class OperationQueue {
 			const read = await this.options.client.getTasksByIds(ids);
 			if (!read.ok) return read;
 			return read.value.length < ids.length ? 'missing' : 'confirmed';
+		}
+
+		if (operation.kind === 'listLink') {
+			// Tras un `link` la url mandada debe ESTAR; tras un `unlink`, no debe
+			// estar. `removed: false` de la respuesta del `unlink` (el destino ya no
+			// estaba registrado) no cambia nada aquí: la ausencia se confirma igual.
+			const read = await this.options.client.listLinks(operation.listId);
+			if (!read.ok) return read;
+			const present = read.value.some((link) => link.url === operation.url);
+			const wanted = operation.type === 'link';
+			return present === wanted ? 'confirmed' : 'missing';
 		}
 
 		const id = operation.kind === 'create' ? operation.clientTaskId : operation.taskId;
@@ -863,6 +954,8 @@ function failureText(failure: LumbreFailure): string {
 			return `El token no vale o ha caducado${status}.`;
 		case 'bad_request':
 			return `Lumbre rechazó la operación por su contenido${status}.`;
+		case 'not_found':
+			return `Eso ya no existe en Lumbre${status}.`;
 		case 'rate_limited':
 			return `Demasiadas peticiones a Lumbre${status}.`;
 		case 'network':
