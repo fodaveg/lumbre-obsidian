@@ -178,12 +178,42 @@ export type ListLinkQueuedOperation = OperationBase & {
 	target: LinkTarget;
 };
 
+/**
+ * La foto de una nota (o de su selección) guardada dentro de `notes` de una
+ * tarea ya existente. `notes` es el texto FINAL que hay que mandar (lo
+ * existente más la foto nueva, ya compuesto por
+ * `src/notes/note-snapshot.ts`): `POST /api/mutations` con `op: 'update'`
+ * REEMPLAZA el campo entero, así que no hay delta que mandar, solo el
+ * resultado.
+ *
+ * No va por `enqueueBatch`: un lote sin altas se confirma SOLO con el informe
+ * del `POST /api/batch` (ver `expectedTaskIds`, que con `createdTaskIds: []`
+ * da `'confirmed'` sin releer nada), y aquí hace falta la garantía fuerte de
+ * la cola, releer de verdad y comprobar que la cabecera de la foto llegó.
+ *
+ * `notes` SÍ se guarda en la operación pendiente (a diferencia de lo RELEÍDO,
+ * que nunca se guarda): es lo que hay que mandar, igual que `draft` en un
+ * `create` o `entry` en un `brl`. Viaja por `data.json` (Obsidian Sync) solo
+ * mientras está sin materializar; la poda (`pruneQueue`) se la lleva igual que
+ * a cualquier otra operación terminada.
+ */
+export type NotesQueuedOperation = OperationBase & {
+	kind: 'notes';
+	taskId: string;
+	/** El texto FINAL de `notes`, ya compuesto. */
+	notes: string;
+	/** La cabecera de ESTA foto, para reconocerla al releer sin guardar el texto. */
+	header: string;
+	target: LinkTarget;
+};
+
 export type QueuedOperation =
 	| CreateOperation
 	| StatusOperation
 	| BrlOperation
 	| BatchQueuedOperation
-	| ListLinkQueuedOperation;
+	| ListLinkQueuedOperation
+	| NotesQueuedOperation;
 
 /** Lo que la cola necesita del almacén del plugin. Lo cumple `PluginStore`. */
 export interface QueueStorage {
@@ -386,6 +416,33 @@ export class OperationQueue {
 		};
 		await this.append(operation);
 		this.logEnqueued(operation, { type, listId });
+		return operation;
+	}
+
+	/**
+	 * Encola la foto de una nota dentro de `notes` de una tarea que ya existe.
+	 * `notes` es el texto FINAL (lo existente más la foto), y `header` es la
+	 * cabecera de ESTA foto para poder reconocerla al releer. No lleva id propio
+	 * que la haga idempotente: es una mutación sobre un campo, no una creación, y
+	 * reenviarla manda el mismo `notes` de nuevo, sin duplicar nada.
+	 */
+	async enqueueNotes(
+		taskId: string,
+		notes: string,
+		header: string,
+		target: LinkTarget,
+	): Promise<NotesQueuedOperation> {
+		const operation: NotesQueuedOperation = {
+			...this.newBase(),
+			kind: 'notes',
+			taskId,
+			notes,
+			header,
+			target,
+		};
+		await this.append(operation);
+		// El TEXTO no se apunta: es el contenido de la nota. Solo cuánto ocupa.
+		this.logEnqueued(operation, { taskId, length: notes.length });
 		return operation;
 	}
 
@@ -637,6 +694,12 @@ export class OperationQueue {
 					? this.options.client.listLink(target)
 					: this.options.client.listUnlink(target);
 			}
+			case 'notes':
+				return this.options.client.mutate({
+					op: 'update',
+					taskId: operation.taskId,
+					notes: operation.notes,
+				});
 		}
 	}
 
@@ -709,6 +772,17 @@ export class OperationQueue {
 			const present = read.value.some((link) => link.url === operation.url);
 			const wanted = operation.type === 'link';
 			return present === wanted ? 'confirmed' : 'missing';
+		}
+
+		if (operation.kind === 'notes') {
+			// Se confirma por CONTENIDO, no por existencia: la tarea ya existía antes
+			// de esta operación, así que lo único que dice si la foto llegó es que
+			// las `notes` releídas lleven su cabecera.
+			const read = await this.options.client.getTask(operation.taskId);
+			if (!read.ok) return read;
+			const task = read.value;
+			if (task === null) return 'missing';
+			return (task.notes ?? '').includes(operation.header) ? 'confirmed' : 'missing';
 		}
 
 		const id = operation.kind === 'create' ? operation.clientTaskId : operation.taskId;

@@ -16,6 +16,7 @@ vive en Lumbre y la nota es tuya.
 | **Anotar en el BRL** | Un campo de texto (prefijado con la selección) y dos botones, «Nota» y «Pensamiento». La entrada va al registro de HOY por la misma cola durable que las tareas. |
 | **Insertar el BRL de hoy como texto** | Pega el Markdown del registro de hoy en el cursor. Es una **foto fija**: la única vez que el BRL entra en un fichero del vault, y solo porque lo pides a mano. |
 | **Insertar la foto semanal** | Pega en el cursor el texto de la revisión: vencidas y arrastradas, listas sin próxima acción y cinco de «Algún día». También es una **foto fija**. Ver «La foto semanal». |
+| **Guardar esta nota en la tarea** | En sentido CONTRARIO al BRL o a la foto semanal: copia el texto de la nota (o solo la selección) dentro de las notas de una tarea vinculada, como una **foto fija** fechada. Pide confirmación antes de mandar nada. Ver «Guardar la nota en la tarea». |
 | **Soplo con la selección** | Manda la selección (o el párrafo del cursor) a Soplo y enseña lo que HARÍA, con una casilla por acción. Nada se aplica sin pulsar «Aplicar». También está en el menú contextual del editor. |
 | **Vincular esta nota a una lista** | Escribe la propiedad `lumbre-list` en el frontmatter con el id de la lista elegida, y registra en Lumbre el enlace de vuelta a la nota (solo la RUTA, nunca el contenido): la vista de proyecto lo enseña en «Notas vinculadas». |
 | **Quitar el vínculo con la lista** | Borra esa propiedad y retira el enlace de vuelta en Lumbre. |
@@ -140,6 +141,23 @@ lo informa» en vez de dar un cero que parecería un dato.
 Gasta una petición por lista, en serie y con un intervalo entre medias para no pasarse del límite de
 Lumbre, así que en un vault con muchas listas tarda unos segundos. Lo mismo, desde una plantilla:
 `api.weeklySnapshot()`, documentado en [`docs/API.md`](docs/API.md).
+
+## Guardar la nota en la tarea
+
+**Lumbre: Guardar esta nota en la tarea** va en sentido CONTRARIO al BRL o a la foto semanal: en vez
+de traer texto de Lumbre a la nota, saca texto de la nota hacia Lumbre. Es la única forma en la que el
+texto de una nota sale de la bóveda, y SOLO por este comando ejecutado a mano (nunca solo, nunca en
+segundo plano).
+
+Con la nota vinculada a varias tareas, se pregunta a cuál; sin ninguna, un aviso y nada más. Antes de
+mandar nada se enseña un modal con a qué tarea va, si es la selección o la nota entera y cuántos
+caracteres, y cuántas fotos anteriores tiene ya esa tarea: **nada se guarda sin pulsar «Guardar»**.
+
+El texto se AÑADE debajo de lo que hubiera en las notas de la tarea, nunca lo sustituye: sustituir
+pisaría lo que hubieras escrito desde Lumbre. Cada foto lleva su propia cabecera, con la ruta de la
+nota y la fecha y hora en las que se tomó, así que varias fotos de la misma nota conviven sin
+confundirse. Si el texto no cabe en el tope de las notas de Lumbre, el modal lo dice y ofrece recortar
+(con la cabecera intacta y una marca de recorte) o cancelar; nunca se recorta en silencio.
 
 ## Soplo desde una nota
 

@@ -567,6 +567,30 @@
 	font-size: var(--font-ui-smaller);
 }
 
+/* ── Modal de «Guardar esta nota en la tarea» ─────────────────────────────── */
+
+.lumbre-save-note-modal__info {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-1);
+	margin-bottom: var(--size-4-3);
+}
+
+.lumbre-save-note-modal__task {
+	font-weight: var(--font-medium);
+}
+
+.lumbre-save-note-modal__warning {
+	color: var(--text-warning, var(--text-muted));
+	font-size: var(--font-ui-smaller);
+}
+
+.lumbre-save-note-modal__actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+}
+
 /* ── Modal de Soplo ───────────────────────────────────────────────────────── */
 
 .lumbre-soplo__content {
@@ -654,7 +678,8 @@
 /* En móvil el modal es casi la pantalla entera: los controles crecen al mínimo
    táctil y los botones ocupan su línea. */
 .is-mobile .lumbre-soplo .lumbre-button,
-.is-mobile .lumbre-brl-modal .lumbre-button {
+.is-mobile .lumbre-brl-modal .lumbre-button,
+.is-mobile .lumbre-save-note-modal .lumbre-button {
 	min-height: 44px;
 	flex: 1 1 10em;
 	justify-content: center;

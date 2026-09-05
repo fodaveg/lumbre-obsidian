@@ -39,6 +39,8 @@ export interface ChipState {
  *
  * Una operación de BRL no afecta a ninguna tarea: una entrada del registro no
  * lo es. Tampoco un `listLink`: liga una nota con una LISTA, no con una tarea.
+ * Una foto de nota (`notes`) SÍ afecta, igual que un `status`: muta una tarea
+ * que ya existe, por su `taskId`.
  */
 export function pendingOperationFor(
 	operations: readonly QueuedOperation[],
@@ -57,6 +59,7 @@ function affectsTask(operation: QueuedOperation, taskId: string): boolean {
 		case 'create':
 			return operation.clientTaskId === taskId;
 		case 'status':
+		case 'notes':
 			return operation.taskId === taskId;
 		case 'batch':
 			return operation.createdTaskIds.includes(taskId);
