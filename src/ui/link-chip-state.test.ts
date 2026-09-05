@@ -33,6 +33,11 @@ function listLinkOp(state: OperationState): QueuedOperation {
 	return { ...rest, kind: 'listLink', type: 'link', listId: 'list-1', url: 'obsidian://open?vault=v&file=x', label: 'x' };
 }
 
+function notesOp(state: OperationState): QueuedOperation {
+	const { clientTaskId: _clientTaskId, draft: _draft, ...rest } = base(state);
+	return { ...rest, kind: 'notes', taskId: 'task-2', notes: 'da igual', header: '=== Foto ===' };
+}
+
 describe('pendingOperationFor', () => {
 	it('un create se busca por su clientTaskId, que ES el id de la tarea', () => {
 		const operations: QueuedOperation[] = [createOp('sent')];
@@ -46,6 +51,10 @@ describe('pendingOperationFor', () => {
 
 	it('un listLink no afecta a NINGUNA tarea: liga una nota con una lista, no con una tarea', () => {
 		expect(pendingOperationFor([listLinkOp('sent')], 'task-1')).toBeUndefined();
+	});
+
+	it('una foto de nota se busca por su taskId, igual que un status', () => {
+		expect(pendingOperationFor([notesOp('sent')], 'task-2')?.kind).toBe('notes');
 	});
 
 	it('con varias sobre la misma tarea gana la MÁS RECIENTE', () => {

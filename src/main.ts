@@ -40,7 +40,7 @@ import { formatEvent, Logger, shortTitle, type LogEvent, type LogLevel } from '.
 import { buildReport, DEFAULT_REPORT_EVENTS, type CacheStats } from './diagnostics/report';
 import { guarded, unhandledEvent } from './diagnostics/unhandled';
 import { buildObsidianDeepLink, noteLinkLabel } from './links/deep-link';
-import { LinkStore } from './links/link-store';
+import { LinkStore, type LumbreTaskLink } from './links/link-store';
 import { NOTE_LIST_PROPERTY, readNoteListId, writeNoteListId } from './links/note-list';
 import {
 	applyRenameListLinks,
@@ -64,6 +64,8 @@ import {
 	type LinkTarget,
 } from './lumbre/queue';
 import { QUEUE_DRAIN_INTERVAL_MS, startQueueDrain } from './lumbre/queue-drain';
+import { NoteTaskSuggestModal } from './notes/note-task-suggest-modal';
+import { SaveNoteModal } from './notes/save-note-modal';
 import {
 	collectWeeklySnapshot,
 	type WeeklySnapshotDeps,
@@ -701,6 +703,17 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		});
 
 		this.addCommand({
+			id: 'save-note-to-task',
+			name: 'Guardar esta nota en la tarea',
+			editorCallback: this.command(
+				'save-note-to-task',
+				(editor: Editor, context: MarkdownView | MarkdownFileInfo) => {
+					void this.saveNoteToTask(context.file ?? null, editor);
+				},
+			),
+		});
+
+		this.addCommand({
 			id: 'soplo-selection',
 			name: 'Soplo con la selección',
 			editorCallback: this.command(
@@ -856,6 +869,108 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 						snapshot.failures === 1 ? 'apartado' : 'apartados'
 					} sin leer`,
 		);
+	}
+
+	// ── Guardar la nota en la tarea ───────────────────────────────────────────
+
+	/**
+	 * «Guardar esta nota en la tarea»: en sentido CONTRARIO al BRL o a la foto
+	 * semanal, aquí el texto SALE de la bóveda hacia Lumbre. Lo habilita la
+	 * decisión de David del 4 sep 2026: el texto de una nota puede salir del
+	 * vault, pero SOLO por un comando ejecutado a mano. Es una FOTO FIJA: no
+	 * hay proceso en segundo plano y no se repite sola.
+	 *
+	 * Con varias tareas vinculadas se pregunta cuál; con ninguna, un Notice y
+	 * nada más. La tarea se relee ENTERA (con sus notas) antes de abrir el
+	 * modal: el conteo de fotos anteriores y el hueco que queda dependen de lo
+	 * que YA hay, y una caché podría estar desactualizada.
+	 */
+	private async saveNoteToTask(file: TFile | null, editor: Editor): Promise<void> {
+		if (file === null) return;
+		const links = this.links.linksForNote(file.path);
+		if (links.length === 0) {
+			new Notice('Esta nota no tiene ninguna tarea vinculada.');
+			return;
+		}
+
+		const proceed = (link: LumbreTaskLink): void => {
+			void this.openSaveNoteModal(link.taskId, file, editor);
+		};
+
+		if (links.length === 1 && links[0] !== undefined) {
+			proceed(links[0]);
+			return;
+		}
+		new NoteTaskSuggestModal(this.app, links, proceed).open();
+	}
+
+	/** Relee la tarea y abre el modal de confirmación con sus `notes` de verdad. */
+	private async openSaveNoteModal(taskId: string, file: TFile, editor: Editor): Promise<void> {
+		const selection = editor.getSelection();
+		const scope: 'selection' | 'note' = selection.trim().length > 0 ? 'selection' : 'note';
+		const text = scope === 'selection' ? selection : editor.getValue();
+		if (text.trim().length === 0) {
+			new Notice('La nota está vacía.');
+			return;
+		}
+
+		const read = await this.client.getTask(taskId);
+		if (!read.ok) {
+			new Notice(`No se pudo leer la tarea: ${describeFailure(read.reason, read.status)}`);
+			return;
+		}
+		const task = read.value;
+		if (task === null) {
+			new Notice('Esa tarea ya no existe en Lumbre.');
+			return;
+		}
+
+		new SaveNoteModal(this.app, {
+			notePath: file.path,
+			scope,
+			text,
+			taskTitle: shortTitle(task.content),
+			existingNotes: task.notes,
+			onSave: ({ notes, header }) =>
+				this.saveNoteSnapshot(task.id, shortTitle(task.content), notes, header, file),
+		}).open();
+	}
+
+	/** Encola la foto por la cola durable, avisa y drena. */
+	private async saveNoteSnapshot(
+		taskId: string,
+		taskTitle: string,
+		notes: string,
+		header: string,
+		file: TFile,
+	): Promise<void> {
+		// El TEXTO no se apunta: es el contenido de la nota. Solo cuánto ocupa.
+		this.logger.child('modal').info('Acción del usuario', {
+			action: 'guardar la nota en la tarea',
+			taskId,
+			notePath: file.path,
+			length: notes.length,
+		});
+		// El título de la tarea: solo en `debug` y ya recortado (ver `shortTitle`).
+		if (this.logger.enabled('debug')) {
+			this.logger.child('modal').debug('Tarea de la foto', { title: taskTitle });
+		}
+
+		const operation = await this.queue.enqueueNotes(taskId, notes, header, {
+			notePath: file.path,
+			label: file.basename,
+			excerpt: null,
+		});
+		new Notice(`Foto guardada en la tarea «${taskTitle}»`);
+		this.notifyDataChange();
+
+		await this.queue.flush();
+		const after = this.queue.pending().find((candidate) => candidate.id === operation.id);
+		if (after?.state === 'rejected') {
+			this.log.error('Lumbre rechazó la foto de la nota', { id: operation.id, error: after.error });
+			new Notice(after.error ?? 'Lumbre rechazó la foto de la nota.');
+		}
+		this.notifyDataChange();
 	}
 
 	// ── Soplo ────────────────────────────────────────────────────────────────

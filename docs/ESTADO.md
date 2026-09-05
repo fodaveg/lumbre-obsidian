@@ -424,3 +424,40 @@
     `notifyDataChange`. Con delta vacío, nada: es lo que ahorra las lecturas. El registro apunta el
     tamaño del delta y las páginas, nunca títulos.
   - Cableado en `main.ts` junto al drenaje periódico de la cola. Sin interruptor nuevo en Ajustes.
+- **Lote M: foto de la nota en la tarea** (tarea `761599d2` de Lumbre): comando **Guardar esta nota
+  en la tarea**, en sentido CONTRARIO al BRL o a la foto semanal (el texto sale de la bóveda hacia
+  Lumbre, no al revés). Lo habilita la decisión de David del 4 sep 2026: el texto de una nota SÍ
+  puede salir del vault, pero SOLO por un comando ejecutado a mano.
+  - **Qué hay**: `src/notes/note-snapshot.ts` (módulo puro, con tests): compone la cabecera
+    (`=== Foto de la nota <ruta> · YYYY-MM-DD HH:MM ===`, sin guiones largos), cuenta cuántas fotos
+    anteriores hay ya en unas `notes` (por su cabecera, `countSnapshots`) y une lo existente con la
+    foto nueva (`joinSnapshot`/`composeSnapshot`). AÑADE siempre, nunca sustituye: `POST /api/mutations`
+    con `op: 'update'` REEMPLAZA `notes` entero, así que el texto que se manda ya lleva delante lo que
+    hubiera. `src/notes/save-note-modal.ts`: modal de confirmación con a qué tarea va, si es la
+    selección o la nota entera y cuántos caracteres, y cuántas fotos anteriores tiene ya esa tarea;
+    nada se manda sin el clic en «Guardar». `src/notes/note-task-suggest-modal.ts`: `SuggestModal`
+    para elegir tarea cuando la nota tiene varios vínculos (`LinkStore.linksForNote`).
+  - **El tope, medido en el repo de Lumbre el 5 sep 2026**: `MAX_NOTES_LEN = 10000`
+    (`src/lib/ingest-structured.ts:29`). Por encima de eso el servidor NO rechaza: recorta el campo en
+    SILENCIO (`src/lib/server/repos/mutations.ts:357`, `out.notes = body.notes.trim().slice(0,
+    MAX_NOTES_LEN)`), así que el plugin decide el recorte ANTES de mandar nada. Si la foto no cabe, el
+    modal lo dice y ofrece recortar (el TEXTO de la foto, nunca lo existente ni la cabecera, con una
+    marca `TRUNCATION_MARK`) o cancelar. El cuerpo de `POST /api/mutations` tiene además un tope de
+    64 KiB (`src/routes/api/mutations/+server.ts:106`), pero en caracteres de `notes` el de arriba se
+    alcanza siempre antes.
+  - **La cola**: kind nuevo `notes` en `src/lumbre/queue.ts` (`enqueueNotes`), NO por `enqueueBatch`:
+    un lote sin altas se confirma solo con el informe de `POST /api/batch` (`expectedTaskIds` con
+    `createdTaskIds: []` da `'confirmed'` sin releer nada), y aquí hace falta la garantía fuerte de la
+    cola, releer de verdad. La relectura es por CONTENIDO: `getTask(taskId)` y comprobar que las
+    `notes` releídas CONTIENEN la cabecera de ESTA foto, no solo que la tarea exista. `notes` SÍ se
+    guarda en la operación pendiente (como `draft` en un `create` o `entry` en un `brl`); de lo
+    RELEÍDO no se guarda nada.
+  - **Carrera aceptada y documentada**: entre la lectura de la tarea (para el modal) y la escritura,
+    alguien puede editar `notes` desde Lumbre. Son segundos; la relectura confirma que la foto está,
+    no que no se perdió nada de en medio.
+  - **Registro**: solo la longitud del texto y cuántas fotos anteriores había, nunca el contenido de
+    la nota. El comando solo aparece con una nota Markdown activa (`editorCallback`, igual que
+    «Enviar como tarea» o «Soplo con la selección»: Obsidian ya restringe estos a cuando hay un editor
+    activo).
+  - **Qué falta**: nada pendiente de este lote; ver la lista `lumbre-obsidian` de Lumbre por si hay
+    deuda nueva.

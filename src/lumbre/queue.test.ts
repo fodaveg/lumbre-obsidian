@@ -535,6 +535,66 @@ describe('OperationQueue: un vínculo nota↔lista', () => {
 	});
 });
 
+describe('OperationQueue: la foto de una nota en las notes de una tarea', () => {
+	it('manda update notes y confirma releyendo que la cabecera está dentro de notes', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		const header = '=== Foto de la nota Casa.md · 2026-09-05 13:20 ===';
+		const notes = `Nota vieja.\n\n${header}\n\nTexto de la nota`;
+		await queue.enqueueNotes('task-1', notes, header, TARGET);
+		client.getTask.mockResolvedValue({ ok: true, value: task({ notes }) });
+
+		await queue.flush();
+
+		expect(client.mutate).toHaveBeenCalledWith({ op: 'update', taskId: 'task-1', notes });
+		expect(client.getTask).toHaveBeenCalledWith('task-1');
+		expect(storage.operations[0]?.state).toBe('materialized');
+		// De lo RELEÍDO no se guarda nada: la tarea entera no aparece en la operación.
+		expect(storage.operations[0]).not.toHaveProperty('task');
+	});
+
+	it('si la relectura no trae la cabecera todavía, se queda en sent con un intento más', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		const header = '=== Foto de la nota Casa.md · 2026-09-05 13:20 ===';
+		await queue.enqueueNotes('task-1', `${header}\n\nTexto`, header, TARGET);
+		// La tarea releída todavía no lleva la cabecera de esta foto.
+		client.getTask.mockResolvedValue({ ok: true, value: task({ notes: 'Otra cosa' }) });
+
+		await queue.flush();
+
+		expect(storage.operations[0]).toMatchObject({ state: 'sent', attempts: 1 });
+	});
+
+	it('una tarea que ya no existe deja la foto sin confirmar, sin gastar intentos de más', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		const header = '=== Foto de la nota Casa.md · 2026-09-05 13:20 ===';
+		client.getTask.mockResolvedValue({ ok: true, value: null });
+		await queue.enqueueNotes('task-1', `${header}\n\nTexto`, header, TARGET);
+
+		await queue.flush();
+
+		expect(storage.operations[0]?.state).toBe('sent');
+	});
+
+	it('el texto de la nota no entra en el registro, solo cuánto ocupa', async () => {
+		const storage = memoryStorage();
+		const logger = Logger.create({ console: null, level: 'info' });
+		const queue = new OperationQueue({ client: fakeClient(), storage, logger: logger.child('queue') });
+		const header = '=== Foto de la nota Casa.md · 2026-09-05 13:20 ===';
+		const notes = `${header}\n\nUn párrafo bastante privado`;
+
+		await queue.enqueueNotes('task-1', notes, header, TARGET);
+
+		expect(JSON.stringify(logger.recent())).not.toContain('bastante privado');
+		expect(logger.recent()[0]?.data).toMatchObject({ kind: 'notes', taskId: 'task-1', length: notes.length });
+	});
+});
+
 describe('OperationQueue: un lote aprobado', () => {
 	const OPS: BatchOperation[] = [
 		{ type: 'create', clientTaskId: 'nueva-1', draft: { title: 'Uno' } },
