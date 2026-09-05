@@ -39,6 +39,9 @@ export interface ChipState {
  *
  * Una operación de BRL no afecta a ninguna tarea: una entrada del registro no
  * lo es. Tampoco un `listLink`: liga una nota con una LISTA, no con una tarea.
+ * Y tampoco un `taskLink`: aunque SÍ liga con una tarea, es un registro de
+ * trazabilidad hacia Lumbre, no un cambio de la tarea en sí, así que no debe
+ * tapar su chip de "Enviando…"/"Rechazada" con el estado de ese registro.
  */
 export function pendingOperationFor(
 	operations: readonly QueuedOperation[],
@@ -62,6 +65,7 @@ function affectsTask(operation: QueuedOperation, taskId: string): boolean {
 			return operation.createdTaskIds.includes(taskId);
 		case 'brl':
 		case 'listLink':
+		case 'taskLink':
 			return false;
 	}
 }

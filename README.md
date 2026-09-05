@@ -25,7 +25,9 @@ vive en Lumbre y la nota es tuya.
 tareas de esta nota**). Sigue a la nota abierta y enseña:
 
 - Las tareas de Lumbre vinculadas a esa nota, con checkbox para completarlas o reabrirlas, su lista,
-  su fecha, cuántos adjuntos tiene, botón para abrirlas en Lumbre y para desvincularlas.
+  su fecha, cuántos adjuntos tiene, botón para abrirlas en Lumbre y para desvincularlas. Vincular
+  (desde el buscador o al crear una tarea desde la nota) registra en Lumbre el enlace de vuelta por
+  `POST /api/task-links`, para el detalle de tarea («Abrir en Obsidian»); desvincular lo retira.
 - **Adjuntar fichero…** en cada tarea: elige un fichero del vault que no sea una nota y lo sube a esa
   tarea de Lumbre. Tope de 25 MB, que se comprueba antes de subir nada.
 - **Reintentar** y **Descartar** en las escrituras que se han quedado paradas (un rechazo de Lumbre,

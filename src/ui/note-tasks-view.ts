@@ -59,6 +59,17 @@ export interface NoteTasksHost {
 	attachFile(task: LumbreTask): void;
 	/** El `lumbre-list` de la nota, o `null`. */
 	noteListId(file: TFile): string | null;
+	/**
+	 * Vincula una tarea que YA existe: guarda el mapa local Y registra el deep
+	 * link en Lumbre por `POST /api/task-links` (la tarea ya existe, así que el
+	 * `link` se manda ya, sin esperar a ninguna materialización).
+	 */
+	linkExistingTask(file: TFile, task: LumbreTask): Promise<void>;
+	/**
+	 * Desvincula: quita el mapa local y, si había un deep link registrado,
+	 * encola su retirada con la MISMA url que se mandó al vincular.
+	 */
+	unlinkTask(link: LumbreTaskLink): Promise<void>;
 	/** Avisa cuando cambian la cola o los vínculos. Devuelve cómo desuscribirse. */
 	onDataChange(listener: () => void): () => void;
 	/** Registro de diagnóstico, ya etiquetado como `panel`. */
@@ -311,7 +322,7 @@ export class NoteTasksView extends ItemView {
 				text: 'Confirmar',
 				cls: 'lumbre-button--danger',
 				onClick: () => {
-					void this.unlink(link.id);
+					void this.unlink(link);
 				},
 			});
 			this.button(row.actions, {
@@ -569,9 +580,9 @@ export class NoteTasksView extends ItemView {
 		this.render();
 	}
 
-	private async unlink(linkId: string): Promise<void> {
-		this.host.logger.info('Acción del usuario', { action: 'desvincular', id: linkId });
-		await this.host.links.unlink(linkId);
+	private async unlink(link: LumbreTaskLink): Promise<void> {
+		this.host.logger.info('Acción del usuario', { action: 'desvincular', id: link.id });
+		await this.host.unlinkTask(link);
 		this.confirmingUnlink = null;
 		this.render();
 	}
@@ -612,7 +623,10 @@ export class NoteTasksView extends ItemView {
 		this.render();
 	}
 
-	/** Vincula una tarea que YA existe: no se encola nada, solo se guarda el mapa. */
+	/**
+	 * Vincula una tarea que YA existe: guarda el mapa local y registra el deep
+	 * link en Lumbre (ver `NoteTasksHost.linkExistingTask`).
+	 */
 	private async linkExisting(task: LumbreTask): Promise<void> {
 		const file = this.file;
 		if (file === null) return;
@@ -621,7 +635,7 @@ export class NoteTasksView extends ItemView {
 			taskId: task.id,
 			notePath: file.path,
 		});
-		await this.host.links.link(file.path, task, { label: file.basename, excerpt: null });
+		await this.host.linkExistingTask(file, task);
 		new Notice('Tarea vinculada a esta nota');
 		this.searchResults = null;
 		this.render();

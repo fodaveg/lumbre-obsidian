@@ -128,6 +128,35 @@ describe('PluginStore: migración desde el data.json viejo', () => {
 		expect(data.noteListLinks).toEqual([]);
 	});
 
+	it('un data.json de la versión 3 (vínculos sin deepLink) migra sin tocarlos', async () => {
+		const oldLink = {
+			id: 'link-1',
+			taskId: 'task-1',
+			notePath: 'Cocina.md',
+			label: 'Cocina',
+			excerpt: null,
+			task: { id: 'task-1' },
+			syncState: 'materialized',
+			error: null,
+			updatedAt: '2026-09-01T10:00:00.000Z',
+			orphanedAt: null,
+		};
+		const host = memoryHost({
+			version: 3,
+			settings: {},
+			token: null,
+			queue: [],
+			links: [oldLink],
+			noteListLinks: [],
+		});
+		const store = new PluginStore(host);
+
+		const data = await store.load();
+
+		expect(data.version).toBe(PLUGIN_DATA_VERSION);
+		expect(data.links[0]?.deepLink).toBeUndefined();
+	});
+
 	it('el token que ya estaba sigue llegando al TokenStore tras migrar', async () => {
 		const store = new PluginStore(memoryHost({ apiOrigin: 'https://lumbre.casa', token: 'tok-viejo' }));
 		await store.load();

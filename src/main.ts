@@ -40,7 +40,13 @@ import { formatEvent, Logger, shortTitle, type LogEvent, type LogLevel } from '.
 import { buildReport, DEFAULT_REPORT_EVENTS, type CacheStats } from './diagnostics/report';
 import { guarded, unhandledEvent } from './diagnostics/unhandled';
 import { buildObsidianDeepLink, noteLinkLabel } from './links/deep-link';
-import { LinkStore } from './links/link-store';
+import {
+	LinkStore,
+	movedPath,
+	renameTaskLinkChanges,
+	taskLinksPastGrace,
+	type LumbreTaskLink,
+} from './links/link-store';
 import { NOTE_LIST_PROPERTY, readNoteListId, writeNoteListId } from './links/note-list';
 import {
 	applyRenameListLinks,
@@ -61,6 +67,7 @@ import {
 	OperationQueue,
 	type BatchQueuedOperation,
 	type LinkTarget,
+	type QueuedOperation,
 } from './lumbre/queue';
 import { QUEUE_DRAIN_INTERVAL_MS, startQueueDrain } from './lumbre/queue-drain';
 import {
@@ -92,6 +99,15 @@ import { SendTaskModal } from './ui/send-modal';
 
 /** Clave del id de dispositivo en el almacenamiento LOCAL de Obsidian. */
 const DEVICE_ID_KEY = 'lumbre:device-id';
+
+/**
+ * Tope de vínculos nota↔tarea RETROACTIVOS (de antes de este lote) que se
+ * encolan por drenaje. El cubo de escritura de `POST /api/task-links` es
+ * 60/min, y mandar de golpe TODO lo pendiente competiría con las escrituras
+ * normales del usuario en ese mismo minuto; 40 deja margen y el resto se
+ * completa en el siguiente repaso periódico (ver `backfillTaskLinks`).
+ */
+const TASK_LINK_BACKFILL_BATCH = 40;
 
 /**
  * `app.setting` no está en los tipos públicos de Obsidian, pero es la única vía
@@ -196,8 +212,13 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			storage: this.store,
 			// Materializar es el único momento en que un cambio deja de ser una
 			// promesa: ahí caducan los bloques y se asientan sus casillas.
-			onMaterialized: () => {
+			onMaterialized: (operation) => {
 				void this.refreshBlocks();
+				// Una tarea CREADA (suelta o dentro de un lote de Soplo) recién
+				// materializada: es el primer momento en que su id existe de verdad en
+				// Lumbre, así que es el primer momento en que `POST /api/task-links`
+				// puede aceptarla.
+				void this.emitTaskLinksForMaterialized(operation);
 			},
 			logger: this.logger.child('queue'),
 		});
@@ -280,10 +301,20 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			this.app.vault.on(
 				'rename',
 				guarded(this.logger.child('vault'), 'renombrado', (file: TAbstractFile, oldPath: string) => {
-					void this.links.renamePath(oldPath, file.path).then(() => {
+					const newPath = file.path;
+					// Los vínculos con deep link YA registrado hay que capturarlos ANTES
+					// de mover: `LinkStore.renamePath` muta `notePath` en memoria de forma
+					// SÍNCRONA (antes de su primer `await`), así que leerlos después ya
+					// vería la ruta nueva y no se podría reconstruir la url vieja.
+					const deepLinked = this.links.entriesUnder(oldPath).filter(
+						(link) => link.deepLink !== undefined,
+					);
+
+					void this.links.renamePath(oldPath, newPath).then(() => {
 						this.notifyDataChange();
+						if (deepLinked.length > 0) void this.renameTaskLinks(deepLinked, oldPath, newPath);
 					});
-					void this.renameListLinks(oldPath, file.path);
+					void this.renameListLinks(oldPath, newPath);
 				}),
 			),
 		);
@@ -377,6 +408,15 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 				void this.sweepOrphanedNoteListLinks();
 			}, QUEUE_DRAIN_INTERVAL_MS),
 		);
+		// Gemelo del anterior para los vínculos nota↔tarea: retira los que llevan
+		// huérfanos más de la gracia, y de paso registra en Lumbre los que ya
+		// existían de antes de este lote y todavía no tienen deep link.
+		this.registerInterval(
+			window.setInterval(() => {
+				void this.sweepOrphanedTaskLinks();
+				void this.backfillTaskLinks();
+			}, QUEUE_DRAIN_INTERVAL_MS),
+		);
 		this.registerUnhandled();
 
 		this.log.info('Plugin cargado', {
@@ -389,6 +429,10 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		// estuvo cerrado más de `ORPHAN_GRACE_MS`): no hay que esperar al primer
 		// repaso periódico para retirarlas.
 		void this.sweepOrphanedNoteListLinks();
+		void this.sweepOrphanedTaskLinks();
+		// Y el backfill retroactivo: vínculos nota↔tarea de instalaciones
+		// anteriores a este lote que todavía no tienen su deep link registrado.
+		void this.backfillTaskLinks();
 	}
 
 	/**
@@ -1315,6 +1359,238 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		}
 	}
 
+	// ── Vínculos nota ↔ TAREA por `POST /api/task-links` ────────────────────
+	//
+	// Gemelos de los de arriba (nota ↔ lista), con dos diferencias: aquí una
+	// nota puede tener VARIAS tareas vinculadas, y el `link` de una tarea
+	// CREADA desde el vault no se manda al encolar sino al MATERIALIZARSE (el
+	// id no existe de verdad en Lumbre hasta entonces).
+
+	/**
+	 * Vincula una tarea que YA existe en Lumbre: guarda el mapa local (como
+	 * antes) y además registra el deep link por `POST /api/task-links`. La
+	 * tarea ya existe, así que el `link` se manda YA.
+	 */
+	private async linkExistingTask(file: TFile, task: LumbreTask): Promise<void> {
+		await this.links.link(file.path, task, { label: file.basename, excerpt: null });
+
+		const url = buildObsidianDeepLink(this.app.vault.getName(), file.path);
+		const label = noteLinkLabel(file.basename);
+		const operation = await this.queue.enqueueTaskLink('link', task.id, url, label, {
+			notePath: file.path,
+			label,
+			excerpt: null,
+		});
+		await this.links.setDeepLink(file.path, task.id, { url, label });
+		this.notifyDataChange();
+
+		await this.queue.flush();
+		this.warnIfTaskLinkRejected([operation.id]);
+	}
+
+	/**
+	 * Desvincula desde el panel: quita el mapa local y, si había un deep link
+	 * registrado, encola su retirada con la MISMA url que se mandó al vincular.
+	 */
+	private async unlinkTask(link: LumbreTaskLink): Promise<void> {
+		await this.links.unlink(link.id);
+		this.notifyDataChange();
+
+		const deepLink = link.deepLink;
+		if (deepLink === undefined) return;
+
+		const operation = await this.queue.enqueueTaskLink(
+			'unlink',
+			link.taskId,
+			deepLink.url,
+			deepLink.label,
+			{ notePath: link.notePath, label: deepLink.label, excerpt: null },
+		);
+		await this.queue.flush();
+		this.warnIfTaskLinkRejected([operation.id]);
+	}
+
+	/**
+	 * Registra el deep link de las tareas CREADAS que acaban de materializarse:
+	 * una `create` suelta (Enviar como tarea) o las altas dentro de un lote de
+	 * Soplo. Sin nota (BRL, o una tarea creada sin fichero abierto) no hay deep
+	 * link que registrar.
+	 */
+	private async emitTaskLinksForMaterialized(operation: QueuedOperation): Promise<void> {
+		const taskIds = createdTaskIdsOf(operation);
+		if (taskIds.length === 0) return;
+		const notePath = operation.target.notePath;
+		if (notePath.length === 0) return;
+
+		const url = buildObsidianDeepLink(this.app.vault.getName(), notePath);
+		const label = noteLinkLabel(operation.target.label);
+
+		const queuedIds: string[] = [];
+		for (const taskId of taskIds) {
+			const queued = await this.queue.enqueueTaskLink('link', taskId, url, label, {
+				notePath,
+				label,
+				excerpt: null,
+			});
+			queuedIds.push(queued.id);
+			await this.links.setDeepLink(notePath, taskId, { url, label });
+		}
+
+		this.logger.child('queue').info('Vínculo nota↔tarea encolado al materializar', {
+			notePath,
+			tasks: taskIds.length,
+		});
+		this.notifyDataChange();
+		await this.queue.flush();
+		this.warnIfTaskLinkRejected(queuedIds);
+	}
+
+	/**
+	 * Reemite los vínculos nota↔tarea CON deep link ya registrado tras un
+	 * renombrado (nota o carpeta): la url vieja apuntaba a la ruta anterior, así
+	 * que hay que retirarla y volver a registrar la nueva. `entries` es la foto
+	 * capturada por el listener ANTES de que `LinkStore.renamePath` moviera
+	 * `notePath`; el registro local en sí ya lo mueve esa llamada, así que aquí
+	 * solo hace falta refrescar la url guardada en `deepLink` y reemitir.
+	 */
+	private async renameTaskLinks(
+		entries: readonly LumbreTaskLink[],
+		oldPath: string,
+		newPath: string,
+	): Promise<void> {
+		const vaultName = this.app.vault.getName();
+		const changes = renameTaskLinkChanges(entries, oldPath, newPath, (path) =>
+			buildObsidianDeepLink(vaultName, path),
+		);
+		if (changes.length === 0) return;
+
+		for (const entry of entries) {
+			const deepLink = entry.deepLink;
+			if (deepLink === undefined) continue;
+			const to = movedPath(entry.notePath, oldPath, newPath);
+			if (to === null) continue;
+			await this.links.setDeepLink(to, entry.taskId, {
+				url: buildObsidianDeepLink(vaultName, to),
+				label: deepLink.label,
+			});
+		}
+
+		// Cede el turno: si un renombrado ENCADENADO ha corrido mientras tanto
+		// (mismo motivo que `applyRenameListLinks`), el chequeo de abajo ya lo ve.
+		await Promise.resolve();
+
+		const queuedIds: string[] = [];
+		for (const change of changes) {
+			if (change.type === 'link') {
+				const stillThere = this.links
+					.linksForNote(change.notePath)
+					.some((candidate) => candidate.taskId === change.taskId);
+				if (!stillThere) continue; // superado por un renombrado posterior
+			}
+			const operation = await this.queue.enqueueTaskLink(change.type, change.taskId, change.url, change.label, {
+				notePath: change.notePath,
+				label: change.label,
+				excerpt: null,
+			});
+			queuedIds.push(operation.id);
+		}
+
+		this.logger.child('vault').info('Vínculos nota↔tarea reemitidos por un renombrado', {
+			oldPath,
+			newPath,
+			ops: queuedIds.length,
+		});
+		this.notifyDataChange();
+		await this.queue.flush();
+		this.warnIfTaskLinkRejected(queuedIds);
+	}
+
+	/**
+	 * Retira de Lumbre, de verdad, los vínculos nota↔tarea con deep link
+	 * registrado cuya nota lleva borrada más de `TASK_LINK_ORPHAN_GRACE_MS` sin
+	 * volver. Gemelo de `sweepOrphanedNoteListLinks`.
+	 */
+	private async sweepOrphanedTaskLinks(): Promise<void> {
+		const candidates = taskLinksPastGrace(
+			this.links.all(),
+			new Date(),
+			(path) => this.app.vault.getAbstractFileByPath(path) !== null,
+		);
+		if (candidates.length === 0) return;
+
+		const queuedIds: string[] = [];
+		for (const link of candidates) {
+			const deepLink = link.deepLink;
+			if (deepLink === undefined) continue;
+			const operation = await this.queue.enqueueTaskLink(
+				'unlink',
+				link.taskId,
+				deepLink.url,
+				deepLink.label,
+				{ notePath: link.notePath, label: deepLink.label, excerpt: null },
+			);
+			queuedIds.push(operation.id);
+			await this.links.setDeepLink(link.notePath, link.taskId, undefined);
+		}
+
+		this.logger.child('vault').info(
+			'Vínculos nota↔tarea retirados: su nota lleva borrada más de la gracia',
+			{ removed: candidates.length },
+		);
+		this.notifyDataChange();
+		await this.queue.flush();
+		this.warnIfTaskLinkRejected(queuedIds);
+	}
+
+	/**
+	 * Registra retroactivamente el deep link de los vínculos nota↔tarea que ya
+	 * existían de antes de este lote (materializados, sin `deepLink`). Trocea al
+	 * tope `TASK_LINK_BACKFILL_BATCH` por llamada; el resto lo recoge el
+	 * siguiente repaso periódico, así que no compite con el cubo de escritura de
+	 * `POST /api/task-links` de una sola vez.
+	 */
+	private async backfillTaskLinks(): Promise<void> {
+		const pending = this.links
+			.all()
+			.filter((link) => link.syncState === 'materialized' && link.deepLink === undefined && link.notePath.length > 0);
+		if (pending.length === 0) return;
+
+		const vaultName = this.app.vault.getName();
+		const batch = pending.slice(0, TASK_LINK_BACKFILL_BATCH);
+		const queuedIds: string[] = [];
+		for (const link of batch) {
+			const url = buildObsidianDeepLink(vaultName, link.notePath);
+			const label = noteLinkLabel(link.label);
+			const operation = await this.queue.enqueueTaskLink('link', link.taskId, url, label, {
+				notePath: link.notePath,
+				label,
+				excerpt: null,
+			});
+			queuedIds.push(operation.id);
+			await this.links.setDeepLink(link.notePath, link.taskId, { url, label });
+		}
+
+		this.logger.child('main').info('Vínculos nota↔tarea retroactivos encolados', {
+			total: pending.length,
+			batch: batch.length,
+		});
+		this.notifyDataChange();
+		await this.queue.flush();
+		this.warnIfTaskLinkRejected(queuedIds);
+	}
+
+	/** Avisa con un Notice si Lumbre rechazó alguna de las operaciones de vínculo nota↔tarea recién encoladas. */
+	private warnIfTaskLinkRejected(ids: readonly string[]): void {
+		const pending = this.queue.pending();
+		for (const id of ids) {
+			const operation = pending.find((candidate) => candidate.id === id);
+			if (operation?.state === 'rejected') {
+				this.log.error('Lumbre rechazó el vínculo con la tarea', { id, error: operation.error });
+				new Notice(operation.error ?? 'Lumbre rechazó el vínculo con la tarea.');
+			}
+		}
+	}
+
 	// ── Cableado de los bloques ──────────────────────────────────────────────
 
 	private taskBlockHost(): TaskBlockHost {
@@ -1413,6 +1689,8 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 				this.attachFileToTask(task);
 			},
 			noteListId: (file: TFile) => readNoteListId(this.app, file),
+			linkExistingTask: (file: TFile, task: LumbreTask) => this.linkExistingTask(file, task),
+			unlinkTask: (link: LumbreTaskLink) => this.unlinkTask(link),
 			onDataChange: (listener: () => void) => {
 				this.dataListeners.add(listener);
 				return () => this.dataListeners.delete(listener);
@@ -1455,6 +1733,28 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			},
 		};
 	}
+}
+
+/**
+ * Los ids de las tareas que una operación de la cola CREÓ, ya materializada:
+ * una `create` suelta es su propio `clientTaskId`; un `batch` (plan de Soplo)
+ * son sus `createdTaskIds` menos los que el servidor rechazó (gemela de
+ * `expectedTaskIds`, privada de `queue.ts`, para no exportar de ahí algo que
+ * solo usa este cableado). Cualquier otro `kind` no crea nada, y sale vacío.
+ */
+function createdTaskIdsOf(operation: QueuedOperation): string[] {
+	if (operation.kind === 'create') return [operation.clientTaskId];
+	if (operation.kind !== 'batch') return [];
+
+	const failed = operation.failedItems ?? [];
+	if (failed.length === 0) return operation.createdTaskIds;
+
+	const rejected = new Set<string>();
+	for (const item of failed) {
+		const op = operation.ops[item.index];
+		if (op !== undefined && op.type === 'create') rejected.add(op.clientTaskId);
+	}
+	return operation.createdTaskIds.filter((id) => !rejected.has(id));
 }
 
 /** Lo que hay bajo el cursor, para prefijar el título de la tarea. */
