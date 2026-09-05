@@ -287,10 +287,24 @@ describe('PluginStore: fusión con lo que hay en disco', () => {
 		await b.load();
 
 		await b.writeNoteListLinks([
-			{ id: 'Cocina.md', listId: 'list-1', url: 'url-vieja', label: 'Cocina', updatedAt: '2026-09-03T10:00:00.000Z' },
+			{
+				id: 'Cocina.md',
+				listId: 'list-1',
+				url: 'url-vieja',
+				label: 'Cocina',
+				updatedAt: '2026-09-03T10:00:00.000Z',
+				orphanedAt: null,
+			},
 		]);
 		await a.writeNoteListLinks([
-			{ id: 'Menú.md', listId: 'list-2', url: 'url-menu', label: 'Menú', updatedAt: '2026-09-03T11:00:00.000Z' },
+			{
+				id: 'Menú.md',
+				listId: 'list-2',
+				url: 'url-menu',
+				label: 'Menú',
+				updatedAt: '2026-09-03T11:00:00.000Z',
+				orphanedAt: null,
+			},
 		]);
 
 		const saved = (host.saved as { noteListLinks: NoteListLinkEntry[] }).noteListLinks;

@@ -42,7 +42,11 @@ import { guarded, unhandledEvent } from './diagnostics/unhandled';
 import { buildObsidianDeepLink, noteLinkLabel } from './links/deep-link';
 import { LinkStore } from './links/link-store';
 import { NOTE_LIST_PROPERTY, readNoteListId, writeNoteListId } from './links/note-list';
-import { movedNotePath, NoteListLinkStore, renameListLinkChanges } from './links/note-list-link-store';
+import {
+	applyRenameListLinks,
+	NoteListLinkStore,
+	orphansPastGrace,
+} from './links/note-list-link-store';
 import {
 	describeFailure,
 	LumbreClient,
@@ -58,7 +62,7 @@ import {
 	type BatchQueuedOperation,
 	type LinkTarget,
 } from './lumbre/queue';
-import { startQueueDrain } from './lumbre/queue-drain';
+import { QUEUE_DRAIN_INTERVAL_MS, startQueueDrain } from './lumbre/queue-drain';
 import {
 	collectWeeklySnapshot,
 	type WeeklySnapshotDeps,
@@ -290,7 +294,12 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 					void this.links.markDeleted(file.path).then(() => {
 						this.notifyDataChange();
 					});
-					void this.unlinkDeletedNoteListLinks(file.path);
+					// Solo MARCA huérfano, no encola ni borra nada todavía: Obsidian Sync
+					// emite delete seguido de create en la MISMA ruta cuando la nota vuelve
+					// de otro dispositivo, y un unlink aquí dejaría el frontmatter con
+					// lumbre-list pero Lumbre ya sin la nota. El unlink real lo decide
+					// `sweepOrphanedNoteListLinks`, pasada la gracia.
+					void this.noteListLinks.markDeleted(file.path);
 				}),
 			),
 		);
@@ -305,6 +314,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 					void this.links.markCreated(file.path).then((cleared) => {
 						if (cleared > 0) this.notifyDataChange();
 					});
+					void this.noteListLinks.markCreated(file.path);
 				}),
 			),
 		);
@@ -359,6 +369,14 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			},
 			logger: this.logger.child('queue'),
 		});
+		// Mismo intervalo que el drenaje de la cola, con su propio temporizador
+		// porque no es una operación de la cola: es un candidato a ENCOLAR (el
+		// unlink de una nota huérfana que ya pasó la gracia).
+		this.registerInterval(
+			window.setInterval(() => {
+				void this.sweepOrphanedNoteListLinks();
+			}, QUEUE_DRAIN_INTERVAL_MS),
+		);
 		this.registerUnhandled();
 
 		this.log.info('Plugin cargado', {
@@ -367,6 +385,10 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			pending: this.queue.pending().length,
 		});
 		void this.flushIfConnected();
+		// Huérfanas que ya pasaron la gracia en una sesión anterior (Obsidian
+		// estuvo cerrado más de `ORPHAN_GRACE_MS`): no hay que esperar al primer
+		// repaso periódico para retirarlas.
+		void this.sweepOrphanedNoteListLinks();
 	}
 
 	/**
@@ -1213,59 +1235,72 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	/**
 	 * Reemite el vínculo nota ↔ lista tras un renombrado (nota o carpeta): la
 	 * url vieja apuntaba a la ruta anterior, así que hay que retirarla y volver
-	 * a registrar la nueva. `renameListLinkChanges` fija el orden (unlink de la
-	 * vieja antes que link de la nueva) y aquí solo se encola y se persiste.
+	 * a registrar la nueva. `applyRenameListLinks` es quien fija el orden
+	 * (registro local ANTES de encolar, unlink de la vieja antes que link de la
+	 * nueva): dos renombrados de la misma nota sin esperarse entre sí, que es
+	 * como llegan estos eventos, necesitan que el segundo vea ya movido lo que
+	 * hizo el primero.
 	 */
 	private async renameListLinks(oldPath: string, newPath: string): Promise<void> {
-		const entries = this.noteListLinks.entriesUnder(oldPath);
-		if (entries.length === 0) return;
-
 		const vaultName = this.app.vault.getName();
-		const changes = renameListLinkChanges(entries, oldPath, newPath, (notePath) =>
-			buildObsidianDeepLink(vaultName, notePath),
+		const queuedIds = await applyRenameListLinks(
+			this.noteListLinks,
+			oldPath,
+			newPath,
+			(notePath) => buildObsidianDeepLink(vaultName, notePath),
+			(change) =>
+				this.queue.enqueueListLink(change.type, change.listId, change.url, change.label, {
+					notePath: change.notePath,
+					label: change.label,
+					excerpt: null,
+				}),
 		);
-		for (const change of changes) {
-			await this.queue.enqueueListLink(change.type, change.listId, change.url, change.label, {
-				notePath: change.notePath,
-				label: change.label,
-				excerpt: null,
-			});
-		}
-		for (const entry of entries) {
-			const to = movedNotePath(entry.id, oldPath, newPath);
-			if (to === null) continue;
-			await this.noteListLinks.move(entry.id, to, buildObsidianDeepLink(vaultName, to));
-		}
+		if (queuedIds.length === 0) return;
 
 		this.logger.child('vault').info('Vínculos nota↔lista reemitidos por un renombrado', {
 			oldPath,
 			newPath,
-			moved: entries.length,
+			ops: queuedIds.length,
 		});
 		this.notifyDataChange();
 		await this.queue.flush();
+		this.warnIfListLinkRejected(queuedIds);
 	}
 
-	/** Retira de Lumbre el vínculo nota ↔ lista de una nota (o carpeta) borrada. */
-	private async unlinkDeletedNoteListLinks(path: string): Promise<void> {
-		const entries = this.noteListLinks.entriesUnder(path);
-		if (entries.length === 0) return;
+	/**
+	 * Retira de Lumbre, de verdad, los vínculos cuya nota lleva borrada más de
+	 * `ORPHAN_GRACE_MS` sin haber vuelto. NO se llama desde `vault.on('delete')`
+	 * directamente: ese evento solo marca `orphanedAt` (ver su listener), porque
+	 * Obsidian Sync emite `delete` seguido de `create` en la MISMA ruta cuando
+	 * una nota vuelve de otro dispositivo, y un `unlink` inmediato dejaría el
+	 * frontmatter con `lumbre-list` pero Lumbre ya sin la nota. Se llama al
+	 * arrancar (huérfanas de una sesión anterior) y desde un repaso periódico.
+	 */
+	private async sweepOrphanedNoteListLinks(): Promise<void> {
+		const candidates = orphansPastGrace(
+			this.noteListLinks.all(),
+			new Date(),
+			(path) => this.app.vault.getAbstractFileByPath(path) !== null,
+		);
+		if (candidates.length === 0) return;
 
-		for (const entry of entries) {
-			await this.queue.enqueueListLink('unlink', entry.listId, entry.url, entry.label, {
+		const queuedIds: string[] = [];
+		for (const entry of candidates) {
+			const operation = await this.queue.enqueueListLink('unlink', entry.listId, entry.url, entry.label, {
 				notePath: entry.id,
 				label: entry.label,
 				excerpt: null,
 			});
+			queuedIds.push(operation.id);
 			await this.noteListLinks.remove(entry.id);
 		}
 
-		this.logger.child('vault').info('Vínculos nota↔lista retirados: su nota ha desaparecido', {
-			path,
-			removed: entries.length,
+		this.logger.child('vault').info('Vínculos nota↔lista retirados: su nota lleva borrada más de la gracia', {
+			removed: candidates.length,
 		});
 		this.notifyDataChange();
 		await this.queue.flush();
+		this.warnIfListLinkRejected(queuedIds);
 	}
 
 	/** Avisa con un Notice si Lumbre rechazó alguna de las operaciones de vínculo recién encoladas. */

@@ -24,6 +24,16 @@ export interface NoteListLinkEntry {
 	url: string;
 	label: string;
 	updatedAt: string;
+	/**
+	 * ISO 8601 de cuándo desapareció la nota, o `null` si sigue ahí. La entrada
+	 * NO se borra ni se retira de Lumbre al momento: Obsidian Sync emite
+	 * `delete` seguido de `create` en la MISMA ruta cuando una nota vuelve de
+	 * otro dispositivo (mismo motivo que `orphanedAt` en `LinkStore`), y un
+	 * `unlink` inmediato dejaría el frontmatter con `lumbre-list` pero Lumbre
+	 * ya sin la nota. El `unlink` real espera a `ORPHAN_GRACE_MS` sin que la
+	 * nota haya vuelto (ver `orphansPastGrace`).
+	 */
+	orphanedAt: string | null;
 }
 
 /** Lo que el registro necesita del almacén del plugin. Lo cumple `PluginStore`. */
@@ -58,10 +68,10 @@ export class NoteListLinkStore {
 		return this.all().filter((entry) => entry.id === path || entry.id.startsWith(prefix));
 	}
 
-	/** Registra (o sustituye) la entrada de una nota. */
+	/** Registra (o sustituye) la entrada de una nota. Nace sin huérfana. */
 	async set(notePath: string, listId: string, url: string, label: string): Promise<void> {
 		const entries = this.all().filter((entry) => entry.id !== notePath);
-		entries.push({ id: notePath, listId, url, label, updatedAt: this.stamp() });
+		entries.push({ id: notePath, listId, url, label, updatedAt: this.stamp(), orphanedAt: null });
 		await this.storage.writeNoteListLinks(entries);
 	}
 
@@ -90,6 +100,52 @@ export class NoteListLinkStore {
 		};
 		const rest = entries.filter((entry) => entry.id !== oldNotePath);
 		await this.storage.writeNoteListLinks([...rest, moved]);
+	}
+
+	/**
+	 * Marca como huérfanas las entradas de una nota (o de una carpeta entera)
+	 * que ha desaparecido. No borra nada ni encola nada: el `unlink` real solo
+	 * lo decide `orphansPastGrace`, pasada la gracia. Mismo criterio que
+	 * `LinkStore.markDeleted`.
+	 */
+	async markDeleted(path: string): Promise<number> {
+		const entries = this.all();
+		const stamp = this.stamp();
+		let marked = 0;
+
+		for (const entry of entries) {
+			if (entry.id !== path && !entry.id.startsWith(`${path}/`)) continue;
+			if (entry.orphanedAt !== null) continue;
+			entry.orphanedAt = stamp;
+			entry.updatedAt = stamp;
+			marked += 1;
+		}
+
+		if (marked > 0) await this.storage.writeNoteListLinks(entries);
+		return marked;
+	}
+
+	/**
+	 * Quita el huérfano de las entradas de una nota (o de una carpeta entera)
+	 * que ha VUELTO a aparecer. Mismo criterio que `LinkStore.markCreated`: un
+	 * borrado seguido de una creación en la misma ruta es lo NORMAL con
+	 * Obsidian Sync, no una rareza.
+	 */
+	async markCreated(path: string): Promise<number> {
+		const entries = this.all();
+		const stamp = this.stamp();
+		let cleared = 0;
+
+		for (const entry of entries) {
+			if (entry.orphanedAt === null) continue;
+			if (entry.id !== path && !entry.id.startsWith(`${path}/`)) continue;
+			entry.orphanedAt = null;
+			entry.updatedAt = stamp;
+			cleared += 1;
+		}
+
+		if (cleared > 0) await this.storage.writeNoteListLinks(entries);
+		return cleared;
 	}
 
 	private stamp(): string {
@@ -139,4 +195,104 @@ export function renameListLinkChanges(
 		changes.push({ type: 'link', listId: entry.listId, url: buildUrl(to), label: entry.label, notePath: to });
 	}
 	return changes;
+}
+
+/**
+ * A partir de cuánto tiempo huérfana se retira de verdad el vínculo. Es lo que
+ * distingue un borrado real de un `delete` seguido de un `create` en la misma
+ * ruta, que es lo que hace Obsidian Sync cuando la nota llega de otro
+ * dispositivo: ese vaivén dura del orden de segundos, nunca minutos.
+ */
+export const ORPHAN_GRACE_MS = 30_000;
+
+/**
+ * Las entradas huérfanas que ya pasaron `graceMs` sin que la nota haya vuelto
+ * Y cuya nota SIGUE sin existir ahora mismo: son las que hay que retirar de
+ * Lumbre de verdad con un `unlink`. `exists` es quien sabe si la ruta sigue en
+ * el vault (inyectado, para que este módulo siga sin importar `obsidian`); se
+ * comprueba aquí y no solo con el paso del tiempo porque una nota puede volver
+ * bien pasada la gracia (un dispositivo que tardó en sincronizar) y en ese
+ * caso `markCreated` ya la habrá limpiado, pero por si el orden de eventos no
+ * llegó a tiempo, la comprobación doble no hace daño.
+ */
+export function orphansPastGrace(
+	entries: readonly NoteListLinkEntry[],
+	now: Date,
+	exists: (notePath: string) => boolean,
+	graceMs: number = ORPHAN_GRACE_MS,
+): NoteListLinkEntry[] {
+	const cutoff = now.getTime() - graceMs;
+	return entries.filter((entry) => {
+		if (entry.orphanedAt === null) return false;
+		const orphanedAt = Date.parse(entry.orphanedAt);
+		if (Number.isNaN(orphanedAt) || orphanedAt > cutoff) return false;
+		return !exists(entry.id);
+	});
+}
+
+/**
+ * Orquesta el reemitido de un renombrado: actualiza el registro local
+ * PRIMERO y solo DESPUÉS encola los cambios en Lumbre. El orden importa: los
+ * listeners de `vault.on('rename', ...)` van con `void`, sin esperarse entre
+ * sí, así que dos renombrados seguidos de la MISMA nota pueden solaparse. Si
+ * el registro se actualizara DESPUÉS de encolar, el segundo renombrado leería
+ * la ruta todavía vieja (la del primero, sin mover) y no encontraría nada por
+ * la ruta intermedia, dejando un vínculo muerto en Lumbre sin vía de limpieza.
+ *
+ * Actualizar el registro es la única operación de esta función con un efecto
+ * SÍNCRONO que un llamador concurrente puede observar (`PluginStore` muta su
+ * copia en memoria antes de que la escritura a disco resuelva), así que
+ * hacerlo antes de la primera espera de red es lo que cierra la ventana.
+ *
+ * Tras mover, se cede el turno (`await Promise.resolve()`) y se relee el
+ * registro ANTES de encolar cada `link`: si para entonces la nota ya no está
+ * en `to` es que un renombrado ENCADENADO la movió más allá mientras
+ * esperábamos, y ese `link` sería del todo transitorio (Lumbre lo vería vivo
+ * un instante y el siguiente paso ya lo estaría retirando). El `unlink`, en
+ * cambio, se manda SIEMPRE: retirar una url que nunca llegó a registrarse es
+ * un 200 con `removed: false` (éxito, ver el JSDoc de `ListLinkTarget`), así
+ * que de más nunca rompe nada, y de menos deja un vínculo sin vía de limpieza.
+ * Así, dos renombrados de la misma nota sin esperarse entre sí acaban en
+ * exactamente UN `link` (el de la ruta final) y un `unlink` por cada ruta por
+ * la que pasó.
+ *
+ * `enqueue` es quien encola de verdad (normalmente
+ * `queue.enqueueListLink`); se inyecta para poder probar el solape sin la
+ * cola real ni `obsidian`. Devuelve los ids de las operaciones encoladas.
+ */
+export async function applyRenameListLinks(
+	store: Pick<NoteListLinkStore, 'entriesUnder' | 'move' | 'get'>,
+	oldPath: string,
+	newPath: string,
+	buildUrl: (notePath: string) => string,
+	enqueue: (change: ListLinkChange) => Promise<{ id: string }>,
+): Promise<string[]> {
+	const entries = store.entriesUnder(oldPath);
+	if (entries.length === 0) return [];
+
+	const changes = renameListLinkChanges(entries, oldPath, newPath, buildUrl);
+
+	for (const entry of entries) {
+		const to = movedNotePath(entry.id, oldPath, newPath);
+		if (to === null) continue;
+		await store.move(entry.id, to, buildUrl(to));
+	}
+
+	// Cede el turno: si un renombrado ENCADENADO ha corrido mientras tanto, ya
+	// habrá movido la nota otra vez y lo verá el chequeo de abajo.
+	await Promise.resolve();
+
+	const ids: string[] = [];
+	for (const change of changes) {
+		if (change.type === 'link' && store.get(change.notePath) === null) {
+			// Superado por un renombrado posterior: la nota ya no está en la ruta
+			// que este `link` registraría, así que mandarlo sería darle a Lumbre un
+			// vínculo vivo por un instante para retirarlo enseguida. El `unlink`
+			// que le sigue en la cola (el del siguiente renombrado) ya se encarga.
+			continue;
+		}
+		const operation = await enqueue(change);
+		ids.push(operation.id);
+	}
+	return ids;
 }

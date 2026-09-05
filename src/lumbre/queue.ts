@@ -252,7 +252,19 @@ export const MATERIALIZED_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Y cuántas se conservan como mucho, por recientes que sean. */
 export const MAX_MATERIALIZED = 50;
 
-/** Motivos que NO se reintentan: el servidor ya ha dicho que no. */
+/**
+ * Motivos que NO se reintentan: el servidor ya ha dicho que no.
+ *
+ * `not_found` (404) es de la COLA, no de un endpoint: cualquier operación de
+ * cualquier `kind` que reciba un 404 se queda `rejected` sin reintento. Hoy el
+ * único endpoint de escritura de la cola que de verdad puede devolver 404 es
+ * `POST /api/list-links` (lista de otra cuenta o borrada; medido endpoint por
+ * endpoint en el repo de Lumbre: `/api/ingest`, `/api/mutations` y
+ * `/api/batch` no lo emiten en ningún caso legítimo). Si algún día se añade un
+ * `kind` nuevo cuyo endpoint pueda dar un 404 TRANSITORIO (por ejemplo, una
+ * carrera donde el recurso aún no se ha propagado), esa operación quedaría
+ * `rejected` sin más intentos: revisar aquí antes de asumir lo contrario.
+ */
 const PERMANENT_REASONS: ReadonlySet<FailureReason> = new Set<FailureReason>([
 	'unauthorized',
 	'bad_request',
