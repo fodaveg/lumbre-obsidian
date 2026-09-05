@@ -1,6 +1,6 @@
 {
 	"name": "lumbre-obsidian",
-	"version": "0.1.9",
+	"version": "0.1.10",
 	"private": true,
 	"description": "Plugin de Obsidian que conecta el vault con Lumbre.",
 	"main": "main.js",
