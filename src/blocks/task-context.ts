@@ -44,6 +44,12 @@ export const CONTEXT_SUBTASK_TASK_CAP = 20;
  * Markdown renderizado (`CLAUDE.md`: el token y el contenido de una nota no
  * son lo mismo, pero el mismo cuidado de "no interpretar lo que escribió el
  * usuario" aplica aquí).
+ *
+ * El recorte a `TASK_CONTEXT_NOTE_MAX_CHARS` es por PUNTOS DE CÓDIGO
+ * (`Array.from`), no por unidades UTF-16 (`String.slice`): un emoji fuera del
+ * plano básico son DOS unidades UTF-16 (un par sustituto), y cortar justo en
+ * medio deja una mitad suelta, un carácter inválido pegado delante de la
+ * elipsis (hallazgo de revisión, corregido antes de que llegara a producción).
  */
 export function noteExcerpt(notes: string | null): string | null {
 	if (notes === null) return null;
@@ -52,10 +58,13 @@ export function noteExcerpt(notes: string | null): string | null {
 
 	const lines = trimmed.split('\n');
 	const truncatedByLines = lines.length > TASK_CONTEXT_NOTE_MAX_LINES;
-	let excerpt = lines.slice(0, TASK_CONTEXT_NOTE_MAX_LINES).join('\n');
+	const limitedLines = lines.slice(0, TASK_CONTEXT_NOTE_MAX_LINES).join('\n');
 
-	const truncatedByChars = excerpt.length > TASK_CONTEXT_NOTE_MAX_CHARS;
-	if (truncatedByChars) excerpt = excerpt.slice(0, TASK_CONTEXT_NOTE_MAX_CHARS);
+	const codePoints = Array.from(limitedLines);
+	const truncatedByChars = codePoints.length > TASK_CONTEXT_NOTE_MAX_CHARS;
+	const excerpt = truncatedByChars
+		? codePoints.slice(0, TASK_CONTEXT_NOTE_MAX_CHARS).join('')
+		: limitedLines;
 
 	return truncatedByLines || truncatedByChars ? `${excerpt}…` : excerpt;
 }

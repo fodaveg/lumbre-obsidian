@@ -30,6 +30,19 @@ describe('noteExcerpt', () => {
 		expect(excerpt?.endsWith('…')).toBe(true);
 	});
 
+	it('recorta por PUNTOS DE CÓDIGO: un emoji justo en el borde no se parte', () => {
+		// `'😀'` es un par sustituto: 2 unidades UTF-16, 1 punto de código. Puesto
+		// justo en la posición del corte, un `String.slice` crudo se llevaría solo
+		// la primera mitad (un carácter inválido) y dejaría la segunda suelta.
+		const emoji = '😀';
+		const long = 'a'.repeat(TASK_CONTEXT_NOTE_MAX_CHARS - 1) + emoji + 'b'.repeat(10);
+		const excerpt = noteExcerpt(long);
+
+		expect(excerpt).toBe('a'.repeat(TASK_CONTEXT_NOTE_MAX_CHARS - 1) + emoji + '…');
+		// Ningún punto de código roto: el emoji entero sigue siendo UN elemento.
+		expect(Array.from(excerpt ?? '')).toHaveLength(TASK_CONTEXT_NOTE_MAX_CHARS + 1);
+	});
+
 	it('recorta por líneas aunque cada línea sea corta', () => {
 		const lines = Array.from({ length: TASK_CONTEXT_NOTE_MAX_LINES + 2 }, (_, i) => `Línea ${i}`);
 		const excerpt = noteExcerpt(lines.join('\n'));

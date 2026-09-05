@@ -19,7 +19,7 @@
 
 import type { Logger } from '../diagnostics/logger';
 import { describeFailure, type LumbreClient } from '../lumbre/client';
-import type { LumbreTask } from '../lumbre/types';
+import type { LumbreSubtask, LumbreTask } from '../lumbre/types';
 import { queryKey, queryParams, type ResolvedQuery } from './query-parser';
 import { CONTEXT_SUBTASK_TASK_CAP } from './task-context';
 
@@ -42,6 +42,23 @@ export const REFRESH_COALESCE_MS = 250;
  * solo ocupa memoria.
  */
 export const IDLE_ENTRY_TTL_MS = 10 * 60_000;
+
+/**
+ * TTL propio de la caché de subtareas POR TAREA (ver `SubtaskCacheEntry` y
+ * `attachContextSubtasks`). Dos minutos y no los 30 s del listado, a propósito:
+ * refrescar el listado es UNA petición compartida entre todos los bloques que
+ * pidan lo mismo; refrescar subtareas es una petición POR TAREA (`getTask`,
+ * `?ids=` no las sirve, ver `task-context.ts`), así que su TTL puede ser más
+ * largo sin que la tarea se vea más vieja de lo razonable. Antes de que
+ * venciera este TTL, cada materialización de la cola disparaba `refreshAll` y
+ * `refreshAll` volvía a pedir las subtareas de TODAS las tareas de la entrada,
+ * no solo la que cambió: una nota con dos bloques `context: full` y cinco
+ * casillas marcadas en un minuto eran hasta 5 × 2 × 20 = 200 peticiones extra
+ * contra el cubo de 120/min de `GET /api/tasks` (hallazgo de revisión, 5 sep
+ * 2026). Con esta caché, una tarea sin cambios dentro del TTL no vuelve a
+ * pedirse aunque su consulta se refresque entera.
+ */
+export const SUBTASK_CACHE_TTL_MS = 2 * 60_000;
 
 /** Lo que ve un bloque de su consulta. */
 export interface QuerySnapshot {
@@ -107,6 +124,31 @@ interface CacheEntry {
 	inFlight: Promise<QuerySnapshot> | null;
 }
 
+/**
+ * Lo que sabe la caché de subtareas de UNA tarea, por su id. `undefined` en
+ * `subtasks` es un caso cacheado tan válido como cualquier otro: "se pidió y
+ * no traía subtareas", que es distinto de "no se ha pedido nunca" (ese caso ni
+ * siquiera crea la entrada, ver `attachContextSubtasks`).
+ *
+ * `done`/`cancelledAt`/`archivedAt`/`attachmentCount` son la instantánea del
+ * momento en que se pidió: si alguno de los cuatro llega distinto en la
+ * lectura siguiente, la tarea CAMBIÓ de verdad y la caché se invalida ANTES
+ * del TTL. Una tarea recién materializada por la cola (completada, cancelada,
+ * archivada...) cae aquí sin necesitar un aviso aparte: el campo que cambió es
+ * justo uno de estos cuatro. Lo que esto NO detecta: una subtarea marcada
+ * desde el panel sin que ninguno de los cuatro campos del PADRE cambie; ese
+ * caso se queda con la lectura vieja hasta que venza `SUBTASK_CACHE_TTL_MS`,
+ * aceptado a propósito (el criterio lo dio la revisión).
+ */
+interface SubtaskCacheEntry {
+	subtasks: LumbreSubtask[] | undefined;
+	fetchedAt: number;
+	done: boolean;
+	cancelledAt: string | null;
+	archivedAt: string | null;
+	attachmentCount: number | undefined;
+}
+
 export class QueryCache {
 	/**
 	 * Una entrada por consulta distinta. Las entradas sin suscriptores se quedan
@@ -116,6 +158,13 @@ export class QueryCache {
 	 * `IDLE_ENTRY_TTL_MS` sin nadie que las pida se desalojan (`evictIdle`).
 	 */
 	private readonly entries = new Map<string, CacheEntry>();
+	/**
+	 * Caché de subtareas POR TAREA (no por consulta): una tarea que aparece en
+	 * dos consultas distintas (`scope: today` y `list: Casa`, por ejemplo) pide
+	 * `getTask` UNA vez, no una por consulta. Ver `SubtaskCacheEntry` y
+	 * `attachContextSubtasks`.
+	 */
+	private readonly subtaskCache = new Map<string, SubtaskCacheEntry>();
 	private readonly ttlMs: number;
 	private readonly now: () => number;
 	private readonly wait: (ms: number) => Promise<void>;
@@ -288,6 +337,36 @@ export class QueryCache {
 		if (dropped > 0) {
 			this.log?.debug('Consultas desalojadas de la caché', { dropped, entries: this.entries.size });
 		}
+		this.evictIdleSubtasks();
+	}
+
+	/**
+	 * Tira una fila de la caché de subtareas por tarea si lleva más de
+	 * `IDLE_ENTRY_TTL_MS` sin refrescarse (MISMA constante que las consultas;
+	 * `SUBTASK_CACHE_TTL_MS` decide cuándo hay que REFRESCAR una fila viva, no
+	 * cuándo tirarla) o si ninguna consulta que sigue en la caché la referencia
+	 * ya: una tarea que salió de todos los listados no necesita seguir ocupando
+	 * memoria solo porque todavía no ha pasado el TTL de inactividad.
+	 */
+	private evictIdleSubtasks(): void {
+		const referenced = new Set<string>();
+		for (const entry of this.entries.values()) {
+			for (const task of entry.tasks) referenced.add(task.id);
+		}
+
+		const cutoff = this.now() - IDLE_ENTRY_TTL_MS;
+		let dropped = 0;
+		for (const [taskId, cached] of this.subtaskCache) {
+			if (cached.fetchedAt > cutoff && referenced.has(taskId)) continue;
+			this.subtaskCache.delete(taskId);
+			dropped += 1;
+		}
+		if (dropped > 0) {
+			this.log?.debug('Subtareas desalojadas de la caché', {
+				dropped,
+				entries: this.subtaskCache.size,
+			});
+		}
 	}
 
 	private isFresh(entry: CacheEntry): boolean {
@@ -365,12 +444,14 @@ export class QueryCache {
 
 	/**
 	 * Con `context: none`, no hace nada (la mayoría de las lecturas). Con
-	 * `context: full`, pide las subtareas de las primeras
-	 * `CONTEXT_SUBTASK_TASK_CAP` tareas de primer nivel, una petición
-	 * `getTask(id)` por tarea: es el ÚNICO camino que las trae (ver el HECHO
-	 * MEDIDO en `task-context.ts`, `?ids=` no las sirve). Un fallo puntual de
-	 * una de esas peticiones no tira la lectura entera: esa tarea sencillamente
-	 * se queda sin subtareas, igual que si el servidor no las tuviera.
+	 * `context: full`, asegura que las primeras `CONTEXT_SUBTASK_TASK_CAP`
+	 * tareas de primer nivel tengan subtareas FRESCAS en `this.subtaskCache`
+	 * (pidiendo `getTask(id)` solo para las que hagan falta, ver
+	 * `needsSubtaskFetch`) y las adjunta a la tarea. `getTask` es el ÚNICO
+	 * camino que trae subtareas (ver el HECHO MEDIDO en `task-context.ts`,
+	 * `?ids=` no las sirve). Un fallo puntual de una de esas peticiones no tira
+	 * la lectura entera ni pisa lo que ya hubiera en caché: esa tarea
+	 * sencillamente no se actualiza esta vez.
 	 */
 	private async attachContextSubtasks(
 		entry: CacheEntry,
@@ -385,22 +466,59 @@ export class QueryCache {
 		const candidates = topLevel.slice(0, CONTEXT_SUBTASK_TASK_CAP);
 		if (candidates.length === 0) return { tasks, subtasksLimited: false };
 
-		const results = await Promise.all(
-			candidates.map(async (task) => ({ taskId: task.id, result: await getTask(task.id) })),
-		);
-		const subtasksById = new Map<string, LumbreTask['subtasks']>();
-		for (const { taskId, result } of results) {
-			if (result.ok && result.value !== null && result.value.subtasks !== undefined) {
-				subtasksById.set(taskId, result.value.subtasks);
+		const now = this.now();
+		const toFetch = candidates.filter((task) => this.needsSubtaskFetch(task, now));
+		if (toFetch.length > 0) {
+			this.log?.debug('Pidiendo subtareas por tarea', {
+				key: queryKey(entry.query),
+				candidates: candidates.length,
+				toFetch: toFetch.length,
+			});
+			const results = await Promise.all(
+				toFetch.map(async (task) => ({ task, result: await getTask(task.id) })),
+			);
+			for (const { task, result } of results) {
+				// Un fallo puntual NO se cachea: mejor reintentar en la próxima
+				// lectura que quedarse pegado con un `fetchedAt` de ahora mismo sin
+				// haber conseguido nada.
+				if (!result.ok || result.value === null) continue;
+				this.subtaskCache.set(task.id, {
+					subtasks: result.value.subtasks,
+					fetchedAt: now,
+					done: task.done,
+					cancelledAt: task.cancelledAt,
+					archivedAt: task.archivedAt,
+					attachmentCount: task.attachmentCount,
+				});
 			}
 		}
 
 		const withSubtasks = tasks.map((task) => {
-			const subtasks = subtasksById.get(task.id);
-			return subtasks === undefined ? task : { ...task, subtasks };
+			const cached = this.subtaskCache.get(task.id);
+			if (cached === undefined || cached.subtasks === undefined) return task;
+			return { ...task, subtasks: cached.subtasks };
 		});
 
 		return { tasks: withSubtasks, subtasksLimited: topLevel.length > CONTEXT_SUBTASK_TASK_CAP };
+	}
+
+	/**
+	 * `true` si hace falta pedir `getTask` para esta tarea: sin nada en caché,
+	 * con la caché vencida (`SUBTASK_CACHE_TTL_MS`), o con alguno de los cuatro
+	 * campos que delatan un cambio real (`done`, `cancelledAt`, `archivedAt`,
+	 * `attachmentCount`) distinto de la instantánea guardada. Ver el JSDoc de
+	 * `SubtaskCacheEntry` para el porqué de justo estos cuatro campos.
+	 */
+	private needsSubtaskFetch(task: LumbreTask, now: number): boolean {
+		const cached = this.subtaskCache.get(task.id);
+		if (cached === undefined) return true;
+		if (now - cached.fetchedAt >= SUBTASK_CACHE_TTL_MS) return true;
+		return (
+			cached.done !== task.done ||
+			cached.cancelledAt !== task.cancelledAt ||
+			cached.archivedAt !== task.archivedAt ||
+			cached.attachmentCount !== task.attachmentCount
+		);
 	}
 
 	private notify(entry: CacheEntry): void {

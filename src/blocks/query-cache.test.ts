@@ -6,6 +6,7 @@ import {
 	IDLE_ENTRY_TTL_MS,
 	QueryCache,
 	REFRESH_COALESCE_MS,
+	SUBTASK_CACHE_TTL_MS,
 	type QuerySnapshot,
 } from './query-cache';
 import { parseQuery, resolveQuery, type ResolvedQuery } from './query-parser';
@@ -372,6 +373,98 @@ describe('QueryCache', () => {
 		const snapshot = await cache.get(query('context: full'));
 		expect(snapshot.tasks).toHaveLength(2);
 		expect(snapshot.error).toBeNull();
+	});
+
+	it('subtareas: dos lecturas seguidas con las MISMAS tareas piden getTask solo la primera vez', async () => {
+		const tasks = Array.from({ length: CONTEXT_SUBTASK_TASK_CAP }, (_, i) => task(`t${i}`));
+		const getTask = vi.fn(async (id: string): Promise<LumbreResult<LumbreTask | null>> => ({
+			ok: true,
+			value: { ...task(id), subtasks: [] },
+		}));
+		const cache = new QueryCache({
+			client: { listTasks: async () => ({ ok: true, value: tasks }), getTask },
+			now: () => 0,
+		});
+
+		await cache.get(query('context: full'));
+		expect(getTask).toHaveBeenCalledTimes(CONTEXT_SUBTASK_TASK_CAP);
+
+		getTask.mockClear();
+		// Segunda lectura de la MISMA entrada (forzada, como haría un refresco):
+		// las tareas no han cambiado y siguen dentro de `SUBTASK_CACHE_TTL_MS`.
+		await cache.get(query('context: full'), true);
+		expect(getTask).not.toHaveBeenCalled();
+	});
+
+	it('subtareas: si UNA tarea cambia done, solo esa se vuelve a pedir', async () => {
+		let tasks = [task('1'), task('2'), task('3')];
+		const getTask = vi.fn(async (id: string): Promise<LumbreResult<LumbreTask | null>> => ({
+			ok: true,
+			value: { ...(tasks.find((t) => t.id === id) ?? task(id)), subtasks: [] },
+		}));
+		const cache = new QueryCache({
+			client: { listTasks: async () => ({ ok: true, value: tasks }), getTask },
+			now: () => 0,
+		});
+
+		await cache.get(query('context: full'));
+		expect(getTask).toHaveBeenCalledTimes(3);
+
+		getTask.mockClear();
+		// La '1' se completa (esto es justo lo que hace la cola al materializar);
+		// las otras dos siguen exactamente igual.
+		tasks = [{ ...task('1'), done: true }, task('2'), task('3')];
+		await cache.get(query('context: full'), true);
+		expect(getTask).toHaveBeenCalledTimes(1);
+		expect(getTask).toHaveBeenCalledWith('1');
+	});
+
+	it('subtareas: pasado SUBTASK_CACHE_TTL_MS se vuelve a pedir aunque nada cambie', async () => {
+		let clock = 0;
+		const getTask = vi.fn(async (id: string): Promise<LumbreResult<LumbreTask | null>> => ({
+			ok: true,
+			value: { ...task(id), subtasks: [] },
+		}));
+		const cache = new QueryCache({
+			client: { listTasks: async () => ({ ok: true, value: [task('1')] }), getTask },
+			now: () => clock,
+		});
+
+		await cache.get(query('context: full'));
+		expect(getTask).toHaveBeenCalledTimes(1);
+
+		getTask.mockClear();
+		clock = SUBTASK_CACHE_TTL_MS + 1;
+		await cache.get(query('context: full'), true);
+		expect(getTask).toHaveBeenCalledTimes(1);
+	});
+
+	it('subtareas: se comparten ENTRE consultas distintas que enseñan la misma tarea', async () => {
+		const shared = task('1');
+		let call = 0;
+		const listTasks = vi.fn(
+			async (): Promise<LumbreResult<LumbreTask[]>> => {
+				call += 1;
+				return { ok: true, value: call === 1 ? [shared] : [shared, task('2')] };
+			},
+		);
+		const getTask = vi.fn(async (id: string): Promise<LumbreResult<LumbreTask | null>> => ({
+			ok: true,
+			value: { ...task(id), subtasks: [] },
+		}));
+		const cache = new QueryCache({ client: { listTasks, getTask }, now: () => 0 });
+
+		await cache.get(query('scope: today\ncontext: full'));
+		expect(getTask).toHaveBeenCalledTimes(1);
+		expect(getTask).toHaveBeenCalledWith('1');
+
+		getTask.mockClear();
+		// Otra consulta (otro `scope`, otra entrada de `this.entries`) que
+		// enseña la MISMA tarea '1' más una nueva '2': '1' ya está en la caché
+		// de subtareas (por ID DE TAREA, no por consulta) y NO se vuelve a pedir.
+		await cache.get(query('scope: week\ncontext: full'));
+		expect(getTask).toHaveBeenCalledTimes(1);
+		expect(getTask).toHaveBeenCalledWith('2');
 	});
 
 	it('onRefresh solo salta con una lectura buena', async () => {
