@@ -41,7 +41,7 @@
   - Comando **Anotar en el BRL**: modal mínimo (un campo de texto prefijado con la selección y dos
     botones, «Nota» y «Pensamiento»). Encola un `createBrlEntry` por la cola durable, con su
     relectura propia (`GET /api/brl/<fecha>?format=json`, buscando el id que fijó el plugin), y
-- **Versión**: 0.1.10 (publicada para BRAT). En `main` hay además los lotes L, M y N, sin publicar.
+- **Versión**: 0.1.11 (publicada para BRAT).
   - Bloque de código ```` ```lumbre-brl ````: cuerpo opcional `date: today|YYYY-MM-DD`, el Markdown
     del registro pintado con `MarkdownRenderer.render`, pie con «Datos de HH:MM» y botón
     «Actualizar». Caché propia con el mismo TTL de 30 s (`BrlCache`), clave por día.
