@@ -23,7 +23,7 @@ import type { LumbreTask } from '../lumbre/types';
 import { linkChipState, pendingOperationFor } from '../ui/link-chip-state';
 import { groupBySection } from '../ui/task-sections';
 import { taskStateLabels } from '../ui/task-state-labels';
-import { partialNote, staleNote } from './block-footer';
+import { contextSubtasksLimitedNote, partialNote, staleNote } from './block-footer';
 import { logInvalidBlock } from './block-log';
 import type { QueryCache, QuerySnapshot } from './query-cache';
 import {
@@ -34,7 +34,9 @@ import {
 	resolveQuery,
 	type ParsedQuery,
 	type ResolvedQuery,
+	type TaskContextMode,
 } from './query-parser';
+import { contextStateLabel, noteExcerpt, subtaskGlyph, subtaskItems } from './task-context';
 
 /** El lenguaje del bloque: ```lumbre```. */
 export const LUMBRE_BLOCK_LANGUAGE = 'lumbre';
@@ -244,7 +246,7 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		const operations = this.host.queue.pending();
 
 		if (query.list === null) {
-			this.renderTaskList(fragment.createDiv({ cls: 'lumbre-list' }), tasks, operations);
+			this.renderTaskList(fragment.createDiv({ cls: 'lumbre-list' }), tasks, operations, query.context);
 		} else {
 			// Solo se agrupa por sección cuando la consulta es de una lista: fuera de
 			// una lista, las secciones son de listas distintas y agrupar juntaría
@@ -252,7 +254,12 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 			for (const group of groupBySection(tasks)) {
 				const block = fragment.createDiv({ cls: 'lumbre-block__group' });
 				block.createDiv({ cls: 'lumbre-group__title', text: group.name });
-				this.renderTaskList(block.createDiv({ cls: 'lumbre-list' }), group.tasks, operations);
+				this.renderTaskList(
+					block.createDiv({ cls: 'lumbre-list' }),
+					group.tasks,
+					operations,
+					query.context,
+				);
 			}
 		}
 
@@ -264,14 +271,16 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		list: HTMLElement,
 		tasks: readonly LumbreTask[],
 		operations: readonly QueuedOperation[],
+		context: TaskContextMode,
 	): void {
-		for (const task of tasks) this.renderTask(list, task, operations);
+		for (const task of tasks) this.renderTask(list, task, operations, context);
 	}
 
 	private renderTask(
 		parent: HTMLElement,
 		task: LumbreTask,
 		operations: readonly QueuedOperation[],
+		context: TaskContextMode,
 	): void {
 		const chip = linkChipState(
 			{ syncState: 'materialized', error: null },
@@ -319,6 +328,42 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		}
 
 		this.renderMeta(row, task);
+		if (context === 'full') this.renderTaskContext(row, task);
+	}
+
+	/**
+	 * Lo que solo se pinta con `context: full`: el chip de estado (nada en una
+	 * pendiente, que sería ruido), el extracto de las notas y las subtareas.
+	 * Nunca escribe en la nota, y el indicador de una subtarea NUNCA es una
+	 * casilla: se marca desde el panel o desde Lumbre, no desde aquí.
+	 */
+	private renderTaskContext(row: HTMLElement, task: LumbreTask): void {
+		const state = contextStateLabel(task);
+		const excerpt = noteExcerpt(task.notes);
+		const subtasks = subtaskItems(task);
+		if (state === null && excerpt === null && subtasks === null) return;
+
+		const context = row.createDiv({ cls: 'lumbre-task__context' });
+
+		if (state !== null) {
+			context.createSpan({ cls: 'lumbre-chip lumbre-task__state-chip', text: state });
+		}
+
+		if (excerpt !== null) {
+			context.createDiv({ cls: 'lumbre-task__notes-excerpt', text: excerpt });
+		}
+
+		if (subtasks !== null) {
+			const list = context.createDiv({ cls: 'lumbre-task__subtasks' });
+			for (const subtask of subtasks) {
+				const item = list.createDiv({ cls: 'lumbre-task__subtask' });
+				item.toggleClass('lumbre-task__subtask--done', subtask.done);
+				// Un carácter, no una casilla: una subtarea se marca desde el panel o
+				// desde Lumbre, nunca desde este bloque de solo lectura.
+				item.createSpan({ cls: 'lumbre-task__subtask-glyph', text: subtaskGlyph(subtask) });
+				item.createSpan({ cls: 'lumbre-task__subtask-content', text: subtask.content });
+			}
+		}
 	}
 
 	private renderMeta(row: HTMLElement, task: LumbreTask): void {
@@ -361,6 +406,14 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		const partial = partialNote(snapshot.tasks.length);
 		if (partial !== null) {
 			footer.createSpan({ cls: 'lumbre-block__stale', text: partial });
+		}
+		// Solo con `context: full`: si hubo más tareas de primer nivel que el tope
+		// de `QueryCache`, algunas se quedaron sin pedir sus subtareas.
+		if (this.query?.context === 'full') {
+			const limited = contextSubtasksLimitedNote(snapshot.subtasksLimited);
+			if (limited !== null) {
+				footer.createSpan({ cls: 'lumbre-block__stale', text: limited });
+			}
 		}
 	}
 

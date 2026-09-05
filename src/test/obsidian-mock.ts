@@ -51,7 +51,18 @@ export class Setting {}
 export class Modal {}
 export class SuggestModal {}
 export class ItemView {}
-export class MarkdownRenderChild extends Component {}
+
+/**
+ * A diferencia del resto de esta clase, SÍ guarda `containerEl` (mismo
+ * contrato que `obsidian.d.ts`): `task-block.ts` lo usa para pintar, y sin
+ * esto cualquier test que monte `LumbreTaskBlock` vería `containerEl`
+ * `undefined` aunque el constructor real de Obsidian sí lo asigna.
+ */
+export class MarkdownRenderChild extends Component {
+	constructor(public containerEl: HTMLElement) {
+		super();
+	}
+}
 
 export const MarkdownRenderer = {
 	async render(): Promise<void> {

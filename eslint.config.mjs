@@ -67,6 +67,19 @@ export default defineConfig(
 		},
 	},
 	{
+		// `src/test/` es el DOM de mentira y el mock de `obsidian` para los tests
+		// (`fake-dom.ts`, `obsidian-mock.ts`), no código que corra dentro de la
+		// app: bajo Vitest/Node no existe `window` (`prefer-window-timers` pide
+		// algo que no está), y `globalThis` es justo cómo se instala un global de
+		// mentira (`no-global-this` protege la compatibilidad con una ventana
+		// emergente de Obsidian, que aquí no aplica).
+		files: ['src/test/**/*.ts', 'src/**/*.test.ts'],
+		rules: {
+			'obsidianmd/prefer-window-timers': 'off',
+			'obsidianmd/no-global-this': 'off',
+		},
+	},
+	{
 		files: ['src/**/*.ts'],
 		rules: {
 			// La regla minusculiza "Lumbre", que es un nombre propio.

@@ -9,6 +9,7 @@ import {
 	type QuerySnapshot,
 } from './query-cache';
 import { parseQuery, resolveQuery, type ResolvedQuery } from './query-parser';
+import { CONTEXT_SUBTASK_TASK_CAP } from './task-context';
 
 function task(id: string, content = 'Comprar pan'): LumbreTask {
 	return {
@@ -287,6 +288,90 @@ describe('QueryCache', () => {
 		await cache.refreshSoon();
 		await cache.refreshSoon();
 		expect(client.listTasks).toHaveBeenCalledTimes(2);
+	});
+
+	it('context: none nunca llama a getTask, aunque el cliente lo tenga', async () => {
+		const getTask = vi.fn();
+		const cache = new QueryCache({ client: { ...okClient(), getTask }, now: () => 0 });
+
+		await cache.get(query(''));
+		expect(getTask).not.toHaveBeenCalled();
+	});
+
+	it('context: full pide subtareas de cada tarea de primer nivel con getTask', async () => {
+		const tasks = [task('1'), task('2')];
+		const getTask = vi.fn(async (id: string): Promise<LumbreResult<LumbreTask | null>> => ({
+			ok: true,
+			value: { ...task(id), subtasks: [{ id: `${id}-s1`, content: 'Paso', done: false }] },
+		}));
+		const cache = new QueryCache({
+			client: { listTasks: async () => ({ ok: true, value: tasks }), getTask },
+			now: () => 0,
+		});
+
+		const snapshot = await cache.get(query('context: full'));
+		expect(getTask).toHaveBeenCalledTimes(2);
+		expect(getTask).toHaveBeenCalledWith('1');
+		expect(getTask).toHaveBeenCalledWith('2');
+		expect(snapshot.tasks.map((t) => t.subtasks)).toEqual([
+			[{ id: '1-s1', content: 'Paso', done: false }],
+			[{ id: '2-s1', content: 'Paso', done: false }],
+		]);
+		expect(snapshot.subtasksLimited).toBe(false);
+	});
+
+	it('context: full NO pide subtareas de una subtarea (parentId no nulo)', async () => {
+		const sub = { ...task('2'), parentId: '1' };
+		const getTask = vi.fn(async (): Promise<LumbreResult<LumbreTask | null>> => ({
+			ok: true,
+			value: null,
+		}));
+		const cache = new QueryCache({
+			client: { listTasks: async () => ({ ok: true, value: [task('1'), sub] }), getTask },
+			now: () => 0,
+		});
+
+		await cache.get(query('context: full'));
+		expect(getTask).toHaveBeenCalledTimes(1);
+		expect(getTask).toHaveBeenCalledWith('1');
+	});
+
+	it('context: full recorta a CONTEXT_SUBTASK_TASK_CAP y lo dice en subtasksLimited', async () => {
+		const many = Array.from({ length: CONTEXT_SUBTASK_TASK_CAP + 5 }, (_, i) => task(`t${i}`));
+		const getTask = vi.fn(async (): Promise<LumbreResult<LumbreTask | null>> => ({
+			ok: true,
+			value: null,
+		}));
+		const cache = new QueryCache({
+			client: { listTasks: async () => ({ ok: true, value: many }), getTask },
+			now: () => 0,
+		});
+
+		const snapshot = await cache.get(query('context: full'));
+		expect(getTask).toHaveBeenCalledTimes(CONTEXT_SUBTASK_TASK_CAP);
+		expect(snapshot.subtasksLimited).toBe(true);
+	});
+
+	it('context: full sin getTask en el cliente no revienta, solo no trae subtareas', async () => {
+		const cache = new QueryCache({ client: okClient([task('1')]), now: () => 0 });
+
+		const snapshot = await cache.get(query('context: full'));
+		expect(snapshot.tasks).toHaveLength(1);
+		expect(snapshot.subtasksLimited).toBe(false);
+	});
+
+	it('un getTask que falla para una tarea no tira la lectura entera', async () => {
+		const getTask = vi.fn(async (id: string): Promise<LumbreResult<LumbreTask | null>> =>
+			id === '1' ? { ok: false, reason: 'network' } : { ok: true, value: task(id) },
+		);
+		const cache = new QueryCache({
+			client: { listTasks: async () => ({ ok: true, value: [task('1'), task('2')] }), getTask },
+			now: () => 0,
+		});
+
+		const snapshot = await cache.get(query('context: full'));
+		expect(snapshot.tasks).toHaveLength(2);
+		expect(snapshot.error).toBeNull();
 	});
 
 	it('onRefresh solo salta con una lectura buena', async () => {

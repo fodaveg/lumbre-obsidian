@@ -25,6 +25,17 @@ export type QueryNotes = 'none' | 'full';
 
 const QUERY_NOTES: readonly QueryNotes[] = ['none', 'full'];
 
+/**
+ * Cuánto CONTEXTO de cada tarea se pinta bajo su título: `none` (por defecto,
+ * el bloque queda como siempre) o `full` (chip de estado, extracto de notas y
+ * subtareas). Se llama distinto de `notes` porque implica más que el cuerpo de
+ * la nota, y de `QueryContext` (la interfaz de abajo) porque esa ya nombra otra
+ * cosa: el entorno contra el que se resuelve la consulta.
+ */
+export type TaskContextMode = 'none' | 'full';
+
+const TASK_CONTEXT_MODES: readonly TaskContextMode[] = ['none', 'full'];
+
 /** Los `scope` que acepta `GET /api/tasks`. */
 export type LumbreScope = 'today' | 'week' | 'upcoming' | 'inbox' | 'someday' | 'overdue' | 'all';
 
@@ -57,6 +68,14 @@ export interface ParsedQuery {
 	limit: number | null;
 	/** Cuánto cuerpo de la tarea se pide. Entra en la clave de caché. */
 	notes: QueryNotes;
+	/**
+	 * `true` si el bloque escribió `notes`. Distingue "quiero notes: none a
+	 * propósito" de "no he dicho nada", que es lo que decide si `context: full`
+	 * pisa el valor en silencio o avisa en `debug` de que lo está pisando.
+	 */
+	notesExplicit: boolean;
+	/** Cuánto contexto se pinta bajo el título. Entra en la clave de caché. */
+	context: TaskContextMode;
 	/** Texto de la cabecera. Sin él se describe la consulta. */
 	title: string | null;
 }
@@ -86,6 +105,8 @@ export interface ResolvedQuery {
 	includeDone: boolean;
 	limit: number | null;
 	notes: QueryNotes;
+	notesExplicit: boolean;
+	context: TaskContextMode;
 	title: string | null;
 }
 
@@ -101,6 +122,8 @@ export function emptyQuery(): ParsedQuery {
 		includeDone: false,
 		limit: null,
 		notes: 'none',
+		notesExplicit: false,
+		context: 'none',
 		title: null,
 	};
 }
@@ -182,13 +205,20 @@ function applyKey(query: ParsedQuery, key: string, written: string, value: strin
 			const notes = QUERY_NOTES.find((candidate) => candidate === value.toLowerCase());
 			if (notes === undefined) return `«notes» pide none o full, no «${value}».`;
 			query.notes = notes;
+			query.notesExplicit = true;
+			return null;
+		}
+		case 'context': {
+			const context = TASK_CONTEXT_MODES.find((candidate) => candidate === value.toLowerCase());
+			if (context === undefined) return `«context» pide none o full, no «${value}».`;
+			query.context = context;
 			return null;
 		}
 		case 'title':
 			query.title = value;
 			return null;
 		default:
-			return `No conozco la clave «${written}». Las que hay: scope, list, section, days, tag, includeDone, limit, notes, title.`;
+			return `No conozco la clave «${written}». Las que hay: scope, list, section, days, tag, includeDone, limit, notes, context, title.`;
 	}
 }
 
@@ -210,6 +240,8 @@ export function resolveQuery(parsed: ParsedQuery, context: QueryContext): Resolv
 		includeDone: parsed.includeDone,
 		limit: parsed.limit,
 		notes: parsed.notes,
+		notesExplicit: parsed.notesExplicit,
+		context: parsed.context,
 		title: parsed.title,
 	};
 
@@ -242,13 +274,16 @@ export function resolveQuery(parsed: ParsedQuery, context: QueryContext): Resolv
  * cliente): se pide el tope y se recorta en `applyClientFilters`.
  *
  * `notes` sale de la consulta y por defecto es `none`: el bloque pinta títulos,
- * y traer el cuerpo de 500 tareas es peso que nadie mira.
+ * y traer el cuerpo de 500 tareas es peso que nadie mira. Con `context: full`
+ * las notas SIEMPRE viajan enteras: el extracto que se pinta bajo el título
+ * sale de `task.notes`, así que `notes: none` junto a `context: full` se pisa
+ * (`context` gana; ver `resolveQuery` y `QueryCache` para el aviso en `debug`).
  */
 export function queryParams(query: ResolvedQuery): ListTasksParams {
 	const asked = query.tag !== null ? MAX_TASKS_LIMIT : (query.limit ?? MAX_TASKS_LIMIT);
 	const params: ListTasksParams = {
 		scope: query.scope,
-		notes: query.notes,
+		notes: query.context === 'full' ? 'full' : query.notes,
 		limit: Math.min(asked, MAX_TASKS_LIMIT),
 	};
 	if (query.list !== null) params.list = query.list;
@@ -262,6 +297,12 @@ export function queryParams(query: ResolvedQuery): ListTasksParams {
  * Clave de caché de una consulta. Se calcula sobre lo que se PIDE al servidor,
  * no sobre lo escrito: dos bloques que piden lo mismo comparten una sola
  * petición aunque tengan títulos distintos o filtren por etiquetas distintas.
+ *
+ * `context` entra APARTE de `queryParams`: no es un parámetro que viaje al
+ * servidor (`GET /api/tasks` no lo conoce), es una decisión del PLUGIN sobre
+ * si además de listar hay que pedir subtareas (ver `QueryCache`). Dos
+ * consultas que piden lo mismo al servidor pero difieren en `context` no son
+ * la misma consulta: una dispara peticiones extra y la otra no.
  */
 export function queryKey(query: ResolvedQuery): string {
 	const params = queryParams(query);
@@ -273,6 +314,7 @@ export function queryKey(query: ResolvedQuery): string {
 		params.includeDone === true,
 		params.limit ?? null,
 		params.notes ?? null,
+		query.context,
 	]);
 }
 

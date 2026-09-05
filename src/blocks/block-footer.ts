@@ -9,6 +9,7 @@
  */
 
 import { isPartialRead, MAX_TASKS_LIMIT } from '../lumbre/client';
+import { CONTEXT_SUBTASK_TASK_CAP } from './task-context';
 
 /**
  * El aviso de que lo que se enseña es la ÚLTIMA lectura buena, con el motivo de
@@ -26,5 +27,17 @@ export function staleNote(error: string): string {
 export function partialNote(count: number): string | null {
 	return isPartialRead(count)
 		? `Resultados parciales (${MAX_TASKS_LIMIT} tareas leídas)`
+		: null;
+}
+
+/**
+ * El aviso de que `context: full` no pudo pedir subtareas de TODAS las tareas
+ * de la lectura, o `null` si no hizo falta recortar. Ver `CONTEXT_SUBTASK_TASK_CAP`
+ * (`task-context.ts`) para el porqué del tope: no hay forma barata de pedir
+ * subtareas en lote.
+ */
+export function contextSubtasksLimitedNote(limited: boolean): string | null {
+	return limited
+		? `Subtareas solo cargadas para las primeras ${CONTEXT_SUBTASK_TASK_CAP} tareas`
 		: null;
 }

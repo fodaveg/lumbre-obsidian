@@ -74,6 +74,7 @@ describe('parseQuery', () => {
 				'includeDone: true',
 				'limit: 20',
 				'notes: full',
+				'context: full',
 				'title: Lo que viene',
 			].join('\n'),
 		);
@@ -88,8 +89,24 @@ describe('parseQuery', () => {
 			includeDone: true,
 			limit: 20,
 			notes: 'full',
+			notesExplicit: true,
+			context: 'full',
 			title: 'Lo que viene',
 		});
+	});
+
+	it('context acepta none y full', () => {
+		expect(parsed('context: none').context).toBe('none');
+		expect(parsed('context: full').context).toBe('full');
+	});
+
+	it('rechaza un context que no existe', () => {
+		expect(errorOf('context: parcial')).toContain('context');
+	});
+
+	it('notesExplicit distingue "no dije nada" de "dije notes: none"', () => {
+		expect(parsed('').notesExplicit).toBe(false);
+		expect(parsed('notes: none').notesExplicit).toBe(true);
 	});
 
 	it('acepta los siete scopes', () => {
@@ -228,6 +245,16 @@ describe('queryParams', () => {
 	it('un limit por encima del tope se recorta al tope', () => {
 		expect(queryParams(resolveQuery(parsed('limit: 9000'), BARE)).limit).toBe(MAX_TASKS_LIMIT);
 	});
+
+	it('context: full pide las notas enteras aunque no se escriba notes', () => {
+		expect(queryParams(resolveQuery(parsed('context: full'), BARE)).notes).toBe('full');
+	});
+
+	it('context: full pisa un notes: none escrito a propósito', () => {
+		expect(queryParams(resolveQuery(parsed('notes: none\ncontext: full'), BARE)).notes).toBe(
+			'full',
+		);
+	});
 });
 
 describe('queryKey', () => {
@@ -246,6 +273,15 @@ describe('queryKey', () => {
 	it('pedir las notas es OTRA consulta: no comparte entrada de caché', () => {
 		expect(queryKey(resolveQuery(parsed('notes: full'), BARE))).not.toBe(
 			queryKey(resolveQuery(parsed(''), BARE)),
+		);
+	});
+
+	it('context: full es OTRA consulta aunque pida lo MISMO al servidor', () => {
+		// `notes: full` a secas y `context: full` piden idéntico `queryParams`
+		// (las dos fuerzan `notes: full`), pero una dispara peticiones de
+		// subtareas y la otra no: no pueden compartir entrada.
+		expect(queryKey(resolveQuery(parsed('context: full'), BARE))).not.toBe(
+			queryKey(resolveQuery(parsed('notes: full'), BARE)),
 		);
 	});
 });

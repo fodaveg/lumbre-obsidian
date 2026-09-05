@@ -21,6 +21,7 @@ import type { Logger } from '../diagnostics/logger';
 import { describeFailure, type LumbreClient } from '../lumbre/client';
 import type { LumbreTask } from '../lumbre/types';
 import { queryKey, queryParams, type ResolvedQuery } from './query-parser';
+import { CONTEXT_SUBTASK_TASK_CAP } from './task-context';
 
 /** Treinta segundos: lo que dice el lote, y lo que cabe en el límite de la API. */
 export const DEFAULT_QUERY_TTL_MS = 30_000;
@@ -52,12 +53,23 @@ export interface QuerySnapshot {
 	error: string | null;
 	/** Hay una petición en vuelo para esta consulta. */
 	loading: boolean;
+	/**
+	 * `true` si la consulta es `context: full` y había más tareas de primer
+	 * nivel que `CONTEXT_SUBTASK_TASK_CAP`: solo las primeras llevan subtareas.
+	 * `false` con `context: none` o cuando no hizo falta recortar.
+	 */
+	subtasksLimited: boolean;
 }
 
 export type QuerySubscriber = (snapshot: QuerySnapshot) => void;
 
 export interface QueryCacheOptions {
-	client: Pick<LumbreClient, 'listTasks'>;
+	/**
+	 * `getTask` es OPCIONAL en el tipo (a diferencia de `listTasks`) para que un
+	 * test que nunca pide `context: full` no tenga que simularlo. En el plugin
+	 * real (`main.ts`) el cliente siempre lo trae.
+	 */
+	client: Pick<LumbreClient, 'listTasks'> & Partial<Pick<LumbreClient, 'getTask'>>;
 	ttlMs?: number;
 	/** Reloj, inyectable para los tests. */
 	now?: () => number;
@@ -85,6 +97,8 @@ interface CacheEntry {
 	fetchedAt: number | null;
 	error: string | null;
 	loading: boolean;
+	/** Ver `QuerySnapshot.subtasksLimited`. */
+	subtasksLimited: boolean;
 	/** Invalidada a mano: la próxima lectura va al servidor aunque no haya vencido el TTL. */
 	stale: boolean;
 	/** Última vez que alguien la pidió o se suscribió. Es lo que mide el desalojo. */
@@ -247,6 +261,7 @@ export class QueryCache {
 			fetchedAt: null,
 			error: null,
 			loading: false,
+			subtasksLimited: false,
 			stale: true,
 			touchedAt: this.now(),
 			listeners: new Set(),
@@ -304,12 +319,23 @@ export class QueryCache {
 		this.notify(entry);
 
 		const key = queryKey(entry.query);
+		if (entry.query.context === 'full' && entry.query.notesExplicit && entry.query.notes !== 'full') {
+			// `resolveQuery`/`queryParams` ya pisan el valor (ver su JSDoc); esto solo
+			// avisa de que lo escrito por el usuario no es lo que viajó.
+			this.log?.debug('context: full impone notes: full, se ignora lo escrito', {
+				key,
+				notesEscrito: entry.query.notes,
+			});
+		}
+
 		const startedAt = this.now();
 		const read = await this.options.client.listTasks(queryParams(entry.query));
 		entry.loading = false;
 
 		if (read.ok) {
-			entry.tasks = read.value;
+			const { tasks, subtasksLimited } = await this.attachContextSubtasks(entry, read.value);
+			entry.tasks = tasks;
+			entry.subtasksLimited = subtasksLimited;
 			entry.fetchedAt = this.now();
 			entry.stale = false;
 			entry.error = null;
@@ -317,6 +343,7 @@ export class QueryCache {
 				key,
 				tasks: read.value.length,
 				ms: this.now() - startedAt,
+				...(entry.query.context === 'full' ? { subtasksLimited } : {}),
 			});
 		} else {
 			// Lo leído NO se borra: sin red se sigue enseñando la última lectura
@@ -336,6 +363,46 @@ export class QueryCache {
 		return snapshot(entry);
 	}
 
+	/**
+	 * Con `context: none`, no hace nada (la mayoría de las lecturas). Con
+	 * `context: full`, pide las subtareas de las primeras
+	 * `CONTEXT_SUBTASK_TASK_CAP` tareas de primer nivel, una petición
+	 * `getTask(id)` por tarea: es el ÚNICO camino que las trae (ver el HECHO
+	 * MEDIDO en `task-context.ts`, `?ids=` no las sirve). Un fallo puntual de
+	 * una de esas peticiones no tira la lectura entera: esa tarea sencillamente
+	 * se queda sin subtareas, igual que si el servidor no las tuviera.
+	 */
+	private async attachContextSubtasks(
+		entry: CacheEntry,
+		tasks: LumbreTask[],
+	): Promise<{ tasks: LumbreTask[]; subtasksLimited: boolean }> {
+		const getTask = this.options.client.getTask;
+		if (entry.query.context !== 'full' || getTask === undefined) {
+			return { tasks, subtasksLimited: false };
+		}
+
+		const topLevel = tasks.filter((task) => task.parentId === null);
+		const candidates = topLevel.slice(0, CONTEXT_SUBTASK_TASK_CAP);
+		if (candidates.length === 0) return { tasks, subtasksLimited: false };
+
+		const results = await Promise.all(
+			candidates.map(async (task) => ({ taskId: task.id, result: await getTask(task.id) })),
+		);
+		const subtasksById = new Map<string, LumbreTask['subtasks']>();
+		for (const { taskId, result } of results) {
+			if (result.ok && result.value !== null && result.value.subtasks !== undefined) {
+				subtasksById.set(taskId, result.value.subtasks);
+			}
+		}
+
+		const withSubtasks = tasks.map((task) => {
+			const subtasks = subtasksById.get(task.id);
+			return subtasks === undefined ? task : { ...task, subtasks };
+		});
+
+		return { tasks: withSubtasks, subtasksLimited: topLevel.length > CONTEXT_SUBTASK_TASK_CAP };
+	}
+
 	private notify(entry: CacheEntry): void {
 		const current = snapshot(entry);
 		for (const listener of entry.listeners) listener(current);
@@ -344,7 +411,7 @@ export class QueryCache {
 
 /** Lo que ve quien pregunta por una consulta de la que no hay nada guardado. */
 function emptySnapshot(): QuerySnapshot {
-	return { tasks: [], fetchedAt: null, error: null, loading: false };
+	return { tasks: [], fetchedAt: null, error: null, loading: false, subtasksLimited: false };
 }
 
 function snapshot(entry: CacheEntry): QuerySnapshot {
@@ -352,6 +419,7 @@ function snapshot(entry: CacheEntry): QuerySnapshot {
 		tasks: entry.tasks,
 		fetchedAt: entry.fetchedAt,
 		error: entry.error,
+		subtasksLimited: entry.subtasksLimited,
 		loading: entry.loading,
 	};
 }

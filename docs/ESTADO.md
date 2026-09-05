@@ -328,3 +328,50 @@
     llenaría de elementos enfocables. Para saltar a Lumbre están el panel y `api.openInLumbre(id)`.
   - `OperationQueue` gana un `onMaterialized`: es el único punto en que un cambio deja de ser una
     promesa, y de ahí cuelga la invalidación de la caché de los bloques.
+- **Lote K: contexto de la tarea en el bloque** (tarea `8c88a2c1` de Lumbre; PINTADO EN VIVO, nunca
+  escrito en el Markdown):
+  - Clave nueva del bloque `lumbre`, `context: none | full` (por defecto `none`, el bloque queda
+    como hoy). Entra en la clave de caché (`queryKey`) APARTE de `notes`: dos consultas que piden lo
+    MISMO al servidor pero difieren en `context` no comparten entrada, porque una dispara peticiones
+    extra de subtareas y la otra no. `context: full` implica `notes: full` en la petición; si el
+    bloque escribe `notes: none` a la vez, gana `context` y `QueryCache` lo apunta en `debug`.
+  - Con `context: full`, cada fila pinta bajo el título (`LumbreTaskBlock.renderTaskContext`,
+    `src/blocks/task-block.ts`): el chip de estado (`contextStateLabel`, solo si la tarea no está
+    simplemente pendiente: completada, cancelada o archivada; reutiliza el orden de
+    `taskStateLabels` y añade «Completada», que ese módulo no cubría porque el panel ya lo dice con
+    la casilla marcada), el extracto de las notas en texto plano (`noteExcerpt`, tope de 200
+    caracteres o 3 líneas, `textContent` nunca `innerHTML`) y las subtareas, con un carácter (✓/○)
+    que NO es una casilla interactiva ni de Markdown: una subtarea se marca desde el panel o desde
+    Lumbre, no desde este bloque de solo lectura. Módulo puro nuevo con tests:
+    `src/blocks/task-context.ts`.
+  - **Hecho medido antes de decidir cómo pedir las subtareas** (repo de Lumbre,
+    `src/routes/api/tasks/+server.ts`, SHA `543017e271a526ba4257424bcb3977d264643e9b`, JSDoc de
+    `?ids=` en torno a la línea 146): `?ids=` **NO** adjunta `subtasks` a propósito («A DIFERENCIA de
+    `id`, NO adjunta `subtasks`... en un lote de hasta 200 infla la respuesta justo en el camino que
+    este parámetro existe para adelgazar», 25 ago 2026). Solo `?id=` las trae, y solo para tareas de
+    primer nivel. Una petición por tarea para un bloque de 200 filas reventaría el cubo de 120/min de
+    `GET /api/tasks`, así que `QueryCache.attachContextSubtasks` limita el lookup (`client.getTask`,
+    una petición por tarea) a las primeras `CONTEXT_SUBTASK_TASK_CAP` (20) tareas de primer nivel de
+    la lectura, en el orden que ya trae el listado. Si hubo que recortar, `QuerySnapshot.subtasksLimited`
+    se pone a `true` y el pie del bloque lo dice (`contextSubtasksLimitedNote`,
+    `src/blocks/block-footer.ts`). Un `getTask` que falla para una tarea concreta no tira la lectura
+    entera: esa tarea sencillamente se queda sin subtareas.
+  - `QueryCacheOptions.client` acepta `getTask` como OPCIONAL (`Partial<Pick<LumbreClient,
+    'getTask'>>`, a diferencia de `listTasks`): sin él (o con `context: none`), la caché nunca lo
+    llama, así que un test que no toca `context: full` no tiene que simularlo.
+  - Test de forma sobre el DOM del bloque (`src/blocks/task-block.test.ts`, nuevo): con
+    `context: full`, ninguna línea es una casilla de Markdown (la única `<input type="checkbox">`
+    sigue siendo la de completar/reabrir la tarea) y una pendiente sin notas ni subtareas no pinta
+    nada de contexto. Para esto, `src/test/obsidian-mock.ts` gana un `MarkdownRenderChild` que SÍ
+    guarda `containerEl` (el mock anterior no lo hacía porque nada lo necesitaba) y
+    `src/test/fake-dom.ts` es un DOM de mentira mínimo (`createDiv`/`createSpan`/`createEl`/
+    `createFragment`, sin `jsdom` ni `happy-dom`) con lo justo que usan los bloques.
+- **Decisiones del lote K**:
+  - El tope de subtareas (`CONTEXT_SUBTASK_TASK_CAP = 20`) se aplica sobre el orden del LISTADO del
+    servidor, no sobre lo que queda tras el filtro de cliente (`tag`/`limit`): la caché no sabe qué
+    va a filtrar cada bloque suscrito a la misma consulta, así que recortar ahí sería recortar para
+    unos y no para otros.
+  - El chip de «Completada» no se añadió a `taskStateLabels` (el módulo que usa el panel): el panel
+    ya lo dice con la casilla marcada y añadir el label ahí habría sido ruido nuevo en una superficie
+    que no lo pidió. `contextStateLabel` (`task-context.ts`) reutiliza `taskStateLabels` y solo
+    añade el caso que le falta.

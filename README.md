@@ -68,10 +68,27 @@ El cuerpo son líneas `clave: valor`, y un bloque vacío son las tareas de hoy:
 | `tag` | Etiqueta dentro del título, con o sin `#`. Una etiqueta padre casa con sus hijas. | ninguna |
 | `includeDone` | `true` o `false`. | `false` |
 | `limit` | Tope de tareas. | sin tope |
+| `notes` | `none`, `full`. Trae o no el cuerpo de la nota de cada tarea. | `none` |
+| `context` | `none`, `full`. Ver más abajo. | `none` |
 | `title` | Texto de la cabecera. | una descripción de la consulta |
 
 Si la nota tiene `lumbre-list` y el bloque no dice ni `list` ni `scope`, se enseña esa lista entera.
 Una consulta que no se entiende pinta el problema en una línea y no rompe nada más de la nota.
+
+Con `context: full`, cada tarea pinta además, bajo el título: su chip de estado (solo si no está
+simplemente pendiente: completada, cancelada o archivada), un extracto de sus notas (las primeras
+líneas, recortado con «…» si hace falta) y sus subtareas, con un icono de hecha o pendiente que no
+es una casilla, tampoco de Markdown, porque desde el bloque no se marcan: eso es cosa del panel o de
+Lumbre. `context: full` implica `notes: full` (si escribes `notes: none` a la vez, gana `context`).
+Lumbre solo sirve subtareas por tarea (no en lote), así que con muchas filas el bloque las pide para
+las primeras y lo dice en el pie si tuvo que recortar.
+
+````markdown
+```lumbre
+scope: today
+context: full
+```
+````
 
 La casilla de cada tarea la completa o la reabre, y va por la misma cola durable que el resto: dice
 «Enviando…» hasta que Lumbre la confirma al releer. El pie dice de qué hora son los datos y, si la
