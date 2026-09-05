@@ -18,6 +18,7 @@ import { shortTitle, type Logger } from '../diagnostics/logger';
 import type { LumbreClient } from '../lumbre/client';
 import type { OperationState } from '../lumbre/queue';
 import type { LumbreTask } from '../lumbre/types';
+import { ORPHAN_GRACE_MS } from './note-list-link-store';
 
 /** Lo que se guarda de la nota además de la ruta. */
 export interface LinkTargetInfo {
@@ -46,6 +47,16 @@ export interface LumbreTaskLink {
 	 * sigue viva en Lumbre.
 	 */
 	orphanedAt: string | null;
+	/**
+	 * La url y el label que se mandaron (o se van a mandar) a `POST
+	 * /api/task-links`. Ausente en un vínculo que todavía no se ha registrado en
+	 * Lumbre: una instalación de antes de este lote, o uno que está esperando a
+	 * que su tarea se materialice (ver `main.ts`, `emitTaskLinksForMaterialized`).
+	 * La url viaja TAL CUAL se mandó: un `unlink` tiene que mandar la MISMA
+	 * cadena que mandó el `link`, byte a byte (mismo motivo que
+	 * `NoteListLinkEntry.url`).
+	 */
+	deepLink?: { url: string; label: string };
 }
 
 /** Lo que el mapa necesita del almacén del plugin. Lo cumple `PluginStore`. */
@@ -92,6 +103,12 @@ export class LinkStore {
 	/** Enlaces de una nota concreta. */
 	linksForNote(path: string): LumbreTaskLink[] {
 		return this.all().filter((link) => link.notePath === path);
+	}
+
+	/** Enlaces de una nota o de todas las que cuelgan de una carpeta (mismo criterio que `NoteListLinkStore.entriesUnder`). */
+	entriesUnder(path: string): LumbreTaskLink[] {
+		const prefix = `${path}/`;
+		return this.all().filter((link) => link.notePath === path || link.notePath.startsWith(prefix));
 	}
 
 	/** Rutas de las notas que apuntan a una tarea. Una tarea puede estar en varias. */
@@ -165,6 +182,25 @@ export class LinkStore {
 		}
 		await this.options.storage.writeLinks(remaining);
 		this.log?.info('Vínculo quitado', { id, total: remaining.length });
+	}
+
+	/**
+	 * Guarda (o limpia, con `undefined`) la url y el label que se mandaron a
+	 * `POST /api/task-links` para un vínculo (nota, tarea). Sin efecto si esa
+	 * pareja no está en el mapa: puede haberse desvinculado desde el panel
+	 * mientras la creación de la tarea todavía estaba encolada.
+	 */
+	async setDeepLink(
+		notePath: string,
+		taskId: string,
+		deepLink: { url: string; label: string } | undefined,
+	): Promise<void> {
+		const links = this.all();
+		const link = links.find((candidate) => candidate.notePath === notePath && candidate.taskId === taskId);
+		if (link === undefined) return;
+		link.deepLink = deepLink;
+		link.updatedAt = this.stamp();
+		await this.options.storage.writeLinks(links);
 	}
 
 	/**
@@ -349,9 +385,79 @@ export class LinkStore {
 }
 
 /** La ruta nueva si `path` cae bajo el renombrado, o `null` si no le afecta. */
-function movedPath(path: string, oldPath: string, newPath: string): string | null {
+export function movedPath(path: string, oldPath: string, newPath: string): string | null {
 	if (path === oldPath) return newPath;
 	const prefix = `${oldPath}/`;
 	if (path.startsWith(prefix)) return `${newPath}/${path.slice(prefix.length)}`;
 	return null;
+}
+
+// ── Vínculos nota↔tarea (deep link) ante un renombrado o un borrado ─────────
+//
+// Gemelas de `renameListLinkChanges`/`orphansPastGrace` en
+// `note-list-link-store.ts`, adaptadas a que aquí una nota puede tener VARIAS
+// tareas vinculadas (allí era una lista, como mucho una por nota). Solo entran
+// los vínculos que YA tienen `deepLink`: los demás no están registrados en
+// Lumbre todavía, así que no hay nada que reemitir ni que retirar.
+
+/** Un cambio de vínculo nota↔tarea que hay que reemitir en Lumbre. */
+export interface TaskLinkChange {
+	type: 'link' | 'unlink';
+	taskId: string;
+	url: string;
+	label: string;
+	notePath: string;
+}
+
+/**
+ * El reemplazo de vínculos nota↔tarea para los que caen bajo un renombrado
+ * (nota o carpeta): un `unlink` de la url VIEJA seguido de un `link` con la
+ * NUEVA, mismo orden y mismo motivo que `renameListLinkChanges` (un servidor
+ * que procese la cola en orden no debe ver nunca las dos url activas a la vez).
+ *
+ * `entries` es una FOTO de los vínculos con deep link tal y como estaban ANTES
+ * del renombrado: quien llama la captura antes de invocar `renamePath` (que
+ * muta `notePath` en memoria de forma síncrona), porque después ya no se
+ * podría distinguir la ruta vieja de la nueva.
+ */
+export function renameTaskLinkChanges(
+	entries: readonly Pick<LumbreTaskLink, 'taskId' | 'notePath' | 'deepLink'>[],
+	oldPath: string,
+	newPath: string,
+	buildUrl: (notePath: string) => string,
+): TaskLinkChange[] {
+	const changes: TaskLinkChange[] = [];
+	for (const entry of entries) {
+		const deepLink = entry.deepLink;
+		if (deepLink === undefined) continue;
+		const to = movedPath(entry.notePath, oldPath, newPath);
+		if (to === null) continue;
+		changes.push({ type: 'unlink', taskId: entry.taskId, url: deepLink.url, label: deepLink.label, notePath: entry.notePath });
+		changes.push({ type: 'link', taskId: entry.taskId, url: buildUrl(to), label: deepLink.label, notePath: to });
+	}
+	return changes;
+}
+
+/** A partir de cuánto tiempo huérfano se retira de verdad un vínculo nota↔tarea. Misma ventana que `ORPHAN_GRACE_MS`. */
+export const TASK_LINK_ORPHAN_GRACE_MS = ORPHAN_GRACE_MS;
+
+/**
+ * Los vínculos CON deep link registrado cuya nota lleva huérfana más de
+ * `graceMs` sin volver Y cuya nota SIGUE sin existir ahora mismo: los que hay
+ * que retirar de Lumbre de verdad con un `unlink`. Gemela de `orphansPastGrace`.
+ */
+export function taskLinksPastGrace(
+	links: readonly LumbreTaskLink[],
+	now: Date,
+	exists: (notePath: string) => boolean,
+	graceMs: number = TASK_LINK_ORPHAN_GRACE_MS,
+): LumbreTaskLink[] {
+	const cutoff = now.getTime() - graceMs;
+	return links.filter((link) => {
+		if (link.deepLink === undefined) return false;
+		if (link.orphanedAt === null) return false;
+		const orphanedAt = Date.parse(link.orphanedAt);
+		if (Number.isNaN(orphanedAt) || orphanedAt > cutoff) return false;
+		return !exists(link.notePath);
+	});
 }

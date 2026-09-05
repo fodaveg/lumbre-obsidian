@@ -665,6 +665,102 @@ describe('LumbreClient.listLink, listUnlink y listLinks', () => {
 	});
 });
 
+describe('LumbreClient.taskLink, taskUnlink y taskLinks (gemelo de list-links)', () => {
+	it('taskLink manda type link con el target completo', async () => {
+		const { client, calls } = recordingClient({
+			ok: true,
+			type: 'link',
+			taskId: 'task-1',
+			archived: false,
+		});
+
+		const result = await client.taskLink({
+			taskId: 'task-1',
+			url: 'obsidian://open?vault=v&file=Cocina',
+			label: 'Cocina',
+		});
+
+		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/task-links');
+		expect(calls[0]?.method).toBe('POST');
+		expect(jsonBody(calls[0])).toEqual({
+			type: 'link',
+			taskId: 'task-1',
+			target: { kind: 'obsidian', url: 'obsidian://open?vault=v&file=Cocina', label: 'Cocina' },
+		});
+		expect(result).toEqual({ ok: true, value: undefined });
+	});
+
+	it('taskLink sale ok aunque la tarea esté archivada (200 con archived:true, no un 409)', async () => {
+		const client = clientWith(async () => ({
+			status: 200,
+			json: { ok: true, type: 'link', taskId: 'task-1', archived: true, link: {} },
+		}));
+
+		const result = await client.taskLink({ taskId: 'task-1', url: 'u', label: 'l' });
+
+		expect(result).toEqual({ ok: true, value: undefined });
+	});
+
+	it('taskUnlink manda type unlink, con el MISMO label que se guardó', async () => {
+		const { client, calls } = recordingClient({ ok: true, type: 'unlink', taskId: 'task-1', archived: false });
+
+		await client.taskUnlink({ taskId: 'task-1', url: 'obsidian://open?vault=v&file=Cocina', label: 'Cocina' });
+
+		expect(jsonBody(calls[0])).toMatchObject({ type: 'unlink' });
+	});
+
+	it('un unlink con removed:false en el cuerpo sigue siendo ok: no es un fallo', async () => {
+		const client = clientWith(async () => ({
+			status: 200,
+			json: { ok: true, type: 'unlink', taskId: 'task-1', archived: false, removed: false },
+		}));
+
+		const result = await client.taskUnlink({ taskId: 'task-1', url: 'url', label: 'Cocina' });
+
+		expect(result).toEqual({ ok: true, value: undefined });
+	});
+
+	it('taskLinks pide GET con taskId y lee las filas', async () => {
+		const { client, calls } = recordingClient({
+			links: [
+				{
+					id: 'row-1',
+					taskId: 'task-1',
+					kind: 'obsidian',
+					targetKey: 'obsidian://open?vault=v&file=Cocina',
+					url: 'obsidian://open?vault=v&file=Cocina',
+					label: 'Cocina',
+					updatedAt: '2026-09-05T10:00:00.000Z',
+				},
+			],
+		});
+
+		const result = await client.taskLinks('task-1');
+
+		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/task-links?taskId=task-1');
+		expect(calls[0]?.method).toBe('GET');
+		expect(result.ok && result.value).toEqual([
+			{
+				id: 'row-1',
+				taskId: 'task-1',
+				kind: 'obsidian',
+				targetKey: 'obsidian://open?vault=v&file=Cocina',
+				url: 'obsidian://open?vault=v&file=Cocina',
+				label: 'Cocina',
+				updatedAt: '2026-09-05T10:00:00.000Z',
+			},
+		]);
+	});
+
+	it('un 404 (tarea de otra cuenta o borrada) sale como not_found, no reintentable', async () => {
+		expect(await clientWith(respondWith(404)).taskLink({ taskId: 'x', url: 'u', label: 'l' })).toEqual({
+			ok: false,
+			reason: 'not_found',
+			status: 404,
+		});
+	});
+});
+
 describe('LumbreClient.agent', () => {
 	it('manda el texto como prompt y empareja plan con preview por índice', async () => {
 		const { client, calls } = recordingClient({

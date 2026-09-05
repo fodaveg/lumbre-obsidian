@@ -9,6 +9,8 @@ import type {
 	LumbreFailure,
 	LumbreResult,
 	MutationOp,
+	TaskLinkRow,
+	TaskLinkTarget,
 } from './client';
 import { Logger } from '../diagnostics/logger';
 import {
@@ -127,6 +129,11 @@ function fakeClient() {
 		listUnlink: vi.fn(async (_target: ListLinkTarget): Promise<LumbreResult<void>> => OK),
 		listLinks: vi.fn(
 			async (_listId: string): Promise<LumbreResult<ListLinkRow[]>> => ({ ok: true, value: [] }),
+		),
+		taskLink: vi.fn(async (_target: TaskLinkTarget): Promise<LumbreResult<void>> => OK),
+		taskUnlink: vi.fn(async (_target: TaskLinkTarget): Promise<LumbreResult<void>> => OK),
+		taskLinks: vi.fn(
+			async (_taskId: string): Promise<LumbreResult<TaskLinkRow[]>> => ({ ok: true, value: [] }),
 		),
 	};
 }
@@ -592,6 +599,84 @@ describe('OperationQueue: la foto de una nota en las notes de una tarea', () => 
 
 		expect(JSON.stringify(logger.recent())).not.toContain('bastante privado');
 		expect(logger.recent()[0]?.data).toMatchObject({ kind: 'notes', taskId: 'task-1', length: notes.length });
+	});
+});
+
+describe('OperationQueue: un vínculo nota↔tarea (gemelo del de nota↔lista)', () => {
+	const NOTE_TARGET: LinkTarget = { notePath: 'Proyectos/Cocina.md', label: 'Cocina', excerpt: null };
+
+	it('link manda taskLink y confirma releyendo que la url está presente', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		const operation = await queue.enqueueTaskLink(
+			'link',
+			'task-1',
+			'obsidian://open?vault=v&file=Cocina',
+			'Cocina',
+			NOTE_TARGET,
+		);
+		client.taskLinks.mockResolvedValue({
+			ok: true,
+			value: [
+				{
+					id: 'row-1',
+					taskId: 'task-1',
+					kind: 'obsidian',
+					targetKey: operation.url,
+					url: operation.url,
+					label: 'Cocina',
+					updatedAt: '2026-09-05T10:00:00.000Z',
+				},
+			],
+		});
+
+		await queue.flush();
+
+		expect(client.taskLink).toHaveBeenCalledWith({
+			taskId: 'task-1',
+			url: 'obsidian://open?vault=v&file=Cocina',
+			label: 'Cocina',
+		});
+		expect(client.taskLinks).toHaveBeenCalledWith('task-1');
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('unlink manda la MISMA url que se guardó, byte a byte', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		const url = 'obsidian://open?vault=v&file=Notas%20con%20espacios';
+		await queue.enqueueTaskLink('unlink', 'task-1', url, 'Notas con espacios', NOTE_TARGET);
+
+		await queue.flush();
+
+		expect(client.taskUnlink).toHaveBeenCalledWith({ taskId: 'task-1', url, label: 'Notas con espacios' });
+	});
+
+	it('un 404 (tarea de otra cuenta o borrada) deja la operación rejected, no se reintenta', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.taskLink.mockResolvedValue(failure('not_found', 404));
+		const queue = queueWith(client, storage);
+		await queue.enqueueTaskLink('link', 'task-ajena', 'url', 'Cocina', NOTE_TARGET);
+
+		await queue.flush();
+
+		expect(storage.operations[0]?.state).toBe('rejected');
+		expect(client.taskLinks).not.toHaveBeenCalled();
+	});
+
+	it('si la url mandada no aparece en la relectura, se queda en sent con un intento más', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		await queue.enqueueTaskLink('link', 'task-1', 'url-nueva', 'Cocina', NOTE_TARGET);
+		client.taskLinks.mockResolvedValue({ ok: true, value: [] });
+
+		await queue.flush();
+
+		expect(storage.operations[0]).toMatchObject({ state: 'sent', attempts: 1 });
 	});
 });
 

@@ -41,7 +41,7 @@
   - Comando **Anotar en el BRL**: modal mínimo (un campo de texto prefijado con la selección y dos
     botones, «Nota» y «Pensamiento»). Encola un `createBrlEntry` por la cola durable, con su
     relectura propia (`GET /api/brl/<fecha>?format=json`, buscando el id que fijó el plugin), y
-    avisa con un Notice al encolar.
+- **Versión**: 0.1.10 (publicada para BRAT). En `main` hay además los lotes L, M y N, sin publicar.
   - Bloque de código ```` ```lumbre-brl ````: cuerpo opcional `date: today|YYYY-MM-DD`, el Markdown
     del registro pintado con `MarkdownRenderer.render`, pie con «Datos de HH:MM» y botón
     «Actualizar». Caché propia con el mismo TTL de 30 s (`BrlCache`), clave por día.
@@ -331,8 +331,36 @@
     ENTRA en `PERMANENT_REASONS` de la cola: no se reintenta solo, igual que `bad_request` y
     `unauthorized`. Antes de este lote un 404 cualquiera caía en `server` (recuperable) porque ningún
     endpoint lo devolvía en un caso legítimo.
-  - **Qué falta**: los pasos 2 a 4 de la tarea (mostrar el vínculo en el panel, tareas de otro agente
-    en paralelo sobre `src/blocks/*` y `src/ui/note-tasks-view.ts`); ver la lista `lumbre-obsidian`.
+  - **Qué falta**: los pasos 3 y 4 de la tarea `5800b32a` (mostrar el vínculo en el panel; tareas de
+    otro agente en paralelo sobre `src/blocks/*`); ver la lista `lumbre-obsidian`. El paso 2, el
+    gemelo de tarea, es el lote de abajo.
+- **Lote N: vínculos nota ↔ tarea por `POST /api/task-links`** (paso 2 de 4 de la tarea `5800b32a`):
+  - **Qué hay**: el mapa nota↔tarea que ya guardaba `LinkStore` (`src/links/link-store.ts`) gana un
+    campo opcional `deepLink: { url, label }` con lo que se mandó (o se va a mandar) a
+    `POST /api/task-links` (`data.json` versión 4; migración desde la 3 arranca sin él, sin perder
+    nada). Se registra: al vincular una tarea EXISTENTE desde el buscador del panel (ya se manda);
+    al crear una tarea (Enviar como tarea o un alta de Soplo) en cuanto la cola la da por
+    MATERIALIZADA (`onMaterialized`, porque antes el id no existe de verdad en Lumbre); y
+    retroactivamente al arrancar, para los vínculos de instalaciones anteriores a este lote
+    (`backfillTaskLinks`, troceado a `TASK_LINK_BACKFILL_BATCH` = 40 por drenaje, para no competir
+    con el cubo de escritura de 60/min). Un renombrado reemite `unlink`→`link` (`renameTaskLinkChanges`,
+    `src/links/link-store.ts`, capturando el estado ANTES de que `LinkStore.renamePath` mueva
+    `notePath` en memoria); un borrado marca huérfano y el barrido con gracia
+    (`taskLinksPastGrace`, misma `ORPHAN_GRACE_MS` que las listas) manda el `unlink`.
+  - **Por qué un `kind` NUEVO (`taskLink`) y no una generalización de `listLink`**: una cola YA
+    escrita en `data.json` (desde la 0.1.10) tiene operaciones con `kind: 'listLink'` que hay que
+    seguir pudiendo leer tal cual; fusionar los dos en un `target` discriminado habría exigido
+    traducir esas operaciones ya persistidas al vuelo. El precio es algo de código repetido entre
+    `src/lumbre/client.ts` (`taskLink`/`taskUnlink`/`taskLinks`, cubos `TASK_LINKS_WRITE_RATE_LIMIT`
+    60/min y `TASK_LINKS_READ_RATE_LIMIT` 120/min, APARTE de los de list-links) y
+    `src/lumbre/queue.ts` (kind `taskLink` con relectura por GET); la ganancia es que ninguno de los
+    dos cambia de forma.
+  - **`archived` del contrato**: `link`/`unlink` de `POST /api/task-links` traen siempre
+    `archived: boolean` (una tarea archivada da 200, no 409). El cliente no lo surface por ahora: el
+    vínculo se registra igual esté o no archivada, así que no cambia ningún camino; queda anotado
+    aquí por si un futuro lote quiere mostrarlo.
+  - **Qué falta**: el paso 3 de la tarea (mostrar el deep link en el panel; comparte alcance con el
+    paso 3 de list-links).
 - **Decisiones del lote B**: las listas se cachean en memoria cinco minutos (`ListCache`), no en
   `data.json`; las secciones de la lista de proyecto se agrupan en cliente por el `section` que ya
   trae cada tarea, sin usar `includeSections=1`, que el cliente todavía no soporta.

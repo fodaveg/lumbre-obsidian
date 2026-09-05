@@ -331,6 +331,28 @@ export interface ListLinkRow {
 	updatedAt: string;
 }
 
+/**
+ * Destino de `POST /api/task-links`: el enlace de vuelta de una nota del vault
+ * hacia una TAREA de Lumbre. Gemelo de `ListLinkTarget`, con `taskId` en vez de
+ * `listId`: mismo trato de la url (viaja TAL CUAL, sin normalizar).
+ */
+export interface TaskLinkTarget {
+	taskId: string;
+	url: string;
+	label: string;
+}
+
+/** Una fila de `GET /api/task-links`. Gemela de `ListLinkRow`. */
+export interface TaskLinkRow {
+	id: string;
+	taskId: string;
+	kind: string;
+	targetKey: string;
+	url: string;
+	label: string;
+	updatedAt: string;
+}
+
 /** Cuerpo que NO es JSON, con las cabeceras que le tocan. */
 interface RawBody {
 	body: ArrayBuffer;
@@ -410,6 +432,16 @@ export const LIST_LINKS_WRITE_RATE_LIMIT = 60;
 export const LIST_LINKS_READ_RATE_LIMIT = 120;
 
 /**
+ * Límite de escrituras en `POST /api/task-links`: cubo PROPIO, aparte del de
+ * `/api/list-links` (medido en el repo de Lumbre: `task-links:<rateKey>` es una
+ * clave distinta de `list-links:<rateKey>`).
+ */
+export const TASK_LINKS_WRITE_RATE_LIMIT = 60;
+
+/** Límite de lecturas en `GET /api/task-links`. */
+export const TASK_LINKS_READ_RATE_LIMIT = 120;
+
+/**
  * Proporción del límite de un cubo a partir de la que se avisa. Con el cubo
  * único de antes era 100 de 120 (5/6); se mantiene la misma proporción por
  * endpoint, así que el de `/api/agent` (30) avisa a partir de 25 y no espera a
@@ -430,6 +462,8 @@ const RATE_LIMITS: ReadonlyMap<string, number> = new Map([
 	['POST /api/agent', AGENT_RATE_LIMIT],
 	['POST /api/list-links', LIST_LINKS_WRITE_RATE_LIMIT],
 	['GET /api/list-links', LIST_LINKS_READ_RATE_LIMIT],
+	['POST /api/task-links', TASK_LINKS_WRITE_RATE_LIMIT],
+	['GET /api/task-links', TASK_LINKS_READ_RATE_LIMIT],
 ]);
 
 /** Ventana del contador de peticiones. */
@@ -765,6 +799,42 @@ export class LumbreClient {
 		const response = await this.gated('GET', path, () => this.send('GET', path));
 		if (!response.ok) return response;
 		return { ok: true, value: listLinksFrom(response.value) };
+	}
+
+	/**
+	 * `POST /api/task-links` con `type: 'link'`: registra en Lumbre el enlace de
+	 * vuelta a la nota, para el detalle de tarea («Abrir en Obsidian»). Gemelo de
+	 * `listLink`. Una tarea archivada o cancelada responde igualmente 200 (con
+	 * `archived: true` en el cuerpo, que aquí no hace falta mirar: el vínculo se
+	 * registra igual, es el contrato del endpoint).
+	 */
+	async taskLink(target: TaskLinkTarget): Promise<LumbreResult<void>> {
+		const response = await this.send('POST', '/api/task-links', taskLinkBody('link', target));
+		if (!response.ok) return response;
+		return { ok: true, value: undefined };
+	}
+
+	/**
+	 * `POST /api/task-links` con `type: 'unlink'`. Mismo trato que `listUnlink`:
+	 * un destino que ya no estaba registrado responde 200, no motivo para
+	 * reintentar.
+	 */
+	async taskUnlink(target: TaskLinkTarget): Promise<LumbreResult<void>> {
+		const response = await this.send('POST', '/api/task-links', taskLinkBody('unlink', target));
+		if (!response.ok) return response;
+		return { ok: true, value: undefined };
+	}
+
+	/**
+	 * `GET /api/task-links?taskId=`: todos los vínculos de esa tarea. Es la
+	 * relectura de `taskLink`/`taskUnlink`, gemela de `listLinks`.
+	 */
+	async taskLinks(taskId: string): Promise<LumbreResult<TaskLinkRow[]>> {
+		const query = new URLSearchParams({ taskId });
+		const path = `/api/task-links?${query.toString()}`;
+		const response = await this.gated('GET', path, () => this.send('GET', path));
+		if (!response.ok) return response;
+		return { ok: true, value: taskLinksFrom(response.value) };
 	}
 
 	/**
@@ -1227,6 +1297,42 @@ function listLinksFrom(raw: unknown): ListLinkRow[] {
 		links.push({
 			id,
 			listId,
+			kind: typeof link['kind'] === 'string' ? link['kind'] : '',
+			targetKey: typeof link['targetKey'] === 'string' ? link['targetKey'] : '',
+			url,
+			label: typeof link['label'] === 'string' ? link['label'] : '',
+			updatedAt: typeof link['updatedAt'] === 'string' ? link['updatedAt'] : '',
+		});
+	}
+	return links;
+}
+
+/** El cuerpo de `POST /api/task-links`. Gemelo de `listLinkBody`, con `taskId` en vez de `listId`. */
+function taskLinkBody(type: 'link' | 'unlink', target: TaskLinkTarget): Record<string, unknown> {
+	return {
+		type,
+		taskId: target.taskId,
+		target: { kind: 'obsidian', url: target.url, label: target.label },
+	};
+}
+
+/** El JSON de `GET /api/task-links` a la lista de filas. Gemelo de `listLinksFrom`. */
+function taskLinksFrom(raw: unknown): TaskLinkRow[] {
+	const row = asRow(raw);
+	const rawLinks = row?.['links'];
+	if (!Array.isArray(rawLinks)) return [];
+
+	const links: TaskLinkRow[] = [];
+	for (const item of rawLinks) {
+		const link = asRow(item);
+		if (link === null) continue;
+		const id = link['id'];
+		const taskId = link['taskId'];
+		const url = link['url'];
+		if (typeof id !== 'string' || typeof taskId !== 'string' || typeof url !== 'string') continue;
+		links.push({
+			id,
+			taskId,
 			kind: typeof link['kind'] === 'string' ? link['kind'] : '',
 			targetKey: typeof link['targetKey'] === 'string' ? link['targetKey'] : '',
 			url,

@@ -32,8 +32,12 @@ import { DEFAULT_SETTINGS, normalizeOrigin, type LumbreSettings } from '../setti
  * - 3: `noteListLinks`, la url que se mandó a `POST /api/list-links` por cada
  *   nota vinculada a una lista. Un `data.json` anterior no lo trae y empieza
  *   con el registro vacío, sin perder nada.
+ * - 4: cada entrada de `links` gana `deepLink` (la url y el label ya mandados
+ *   a `POST /api/task-links`). Un `data.json` anterior no lo trae; el vínculo
+ *   se detecta como pendiente de registrar y `main.ts` lo encola al arrancar
+ *   (ver `TASK_LINK_BACKFILL_BATCH`).
  */
-export const PLUGIN_DATA_VERSION = 3;
+export const PLUGIN_DATA_VERSION = 4;
 
 export interface PluginData {
 	version: number;

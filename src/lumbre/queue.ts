@@ -33,6 +33,7 @@ import type {
 	ListLinkTarget,
 	LumbreFailure,
 	LumbreResult,
+	TaskLinkTarget,
 } from './client';
 import type { LumbreTask, TaskDraft } from './types';
 
@@ -207,13 +208,35 @@ export type NotesQueuedOperation = OperationBase & {
 	target: LinkTarget;
 };
 
+/**
+ * Un enlace de vuelta nota ↔ TAREA por `POST /api/task-links`: registrarlo
+ * (`type: 'link'`) o retirarlo (`type: 'unlink'`). Gemelo de
+ * `ListLinkQueuedOperation`, con `taskId` en vez de `listId`.
+ *
+ * Es un `kind` NUEVO y no una generalización de `listLink`: una cola YA
+ * escrita en `data.json` (desde la 0.1.10) tiene operaciones con
+ * `kind: 'listLink'` que hay que seguir pudiendo leer, y fusionar los dos en un
+ * único `kind` con un `target` discriminado habría exigido traducir esas
+ * operaciones ya persistidas al vuelo. El precio es algo de código repetido
+ * entre los dos `kind`; la ganancia es que ninguno de los dos cambia de forma.
+ */
+export type TaskLinkQueuedOperation = OperationBase & {
+	kind: 'taskLink';
+	type: 'link' | 'unlink';
+	taskId: string;
+	url: string;
+	label: string;
+	target: LinkTarget;
+};
+
 export type QueuedOperation =
 	| CreateOperation
 	| StatusOperation
 	| BrlOperation
 	| BatchQueuedOperation
 	| ListLinkQueuedOperation
-	| NotesQueuedOperation;
+	| NotesQueuedOperation
+	| TaskLinkQueuedOperation;
 
 /** Lo que la cola necesita del almacén del plugin. Lo cumple `PluginStore`. */
 export interface QueueStorage {
@@ -236,6 +259,9 @@ export interface OperationQueueOptions {
 		| 'listLink'
 		| 'listUnlink'
 		| 'listLinks'
+		| 'taskLink'
+		| 'taskUnlink'
+		| 'taskLinks'
 	>;
 	storage: QueueStorage;
 	/** Espera entre la primera relectura vacía y la segunda. Inyectable para los tests. */
@@ -443,6 +469,33 @@ export class OperationQueue {
 		await this.append(operation);
 		// El TEXTO no se apunta: es el contenido de la nota. Solo cuánto ocupa.
 		this.logEnqueued(operation, { taskId, length: notes.length });
+		return operation;
+	}
+
+	/**
+	 * Encola un enlace de vuelta nota ↔ TAREA (`type: 'link'`) o su retirada
+	 * (`type: 'unlink'`) por `POST /api/task-links`. Gemelo de
+	 * `enqueueListLink`: mismas garantías sobre la url exacta (ver el JSDoc de
+	 * `TaskLinkQueuedOperation` sobre por qué es un `kind` propio).
+	 */
+	async enqueueTaskLink(
+		type: 'link' | 'unlink',
+		taskId: string,
+		url: string,
+		label: string,
+		target: LinkTarget,
+	): Promise<TaskLinkQueuedOperation> {
+		const operation: TaskLinkQueuedOperation = {
+			...this.newBase(),
+			kind: 'taskLink',
+			type,
+			taskId,
+			url,
+			label,
+			target,
+		};
+		await this.append(operation);
+		this.logEnqueued(operation, { type, taskId });
 		return operation;
 	}
 
@@ -700,6 +753,16 @@ export class OperationQueue {
 					taskId: operation.taskId,
 					notes: operation.notes,
 				});
+			case 'taskLink': {
+				const target: TaskLinkTarget = {
+					taskId: operation.taskId,
+					url: operation.url,
+					label: operation.label,
+				};
+				return operation.type === 'link'
+					? this.options.client.taskLink(target)
+					: this.options.client.taskUnlink(target);
+			}
 		}
 	}
 
@@ -783,6 +846,15 @@ export class OperationQueue {
 			const task = read.value;
 			if (task === null) return 'missing';
 			return (task.notes ?? '').includes(operation.header) ? 'confirmed' : 'missing';
+		}
+
+		if (operation.kind === 'taskLink') {
+			// Gemelo de `listLink`, arriba.
+			const read = await this.options.client.taskLinks(operation.taskId);
+			if (!read.ok) return read;
+			const present = read.value.some((link) => link.url === operation.url);
+			const wanted = operation.type === 'link';
+			return present === wanted ? 'confirmed' : 'missing';
 		}
 
 		const id = operation.kind === 'create' ? operation.clientTaskId : operation.taskId;

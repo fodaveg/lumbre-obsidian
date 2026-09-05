@@ -41,6 +41,9 @@ export interface ChipState {
  * lo es. Tampoco un `listLink`: liga una nota con una LISTA, no con una tarea.
  * Una foto de nota (`notes`) SÍ afecta, igual que un `status`: muta una tarea
  * que ya existe, por su `taskId`.
+ * Y tampoco un `taskLink`: aunque SÍ liga con una tarea, es un registro de
+ * trazabilidad hacia Lumbre, no un cambio de la tarea en sí, así que no debe
+ * tapar su chip de "Enviando…"/"Rechazada" con el estado de ese registro.
  */
 export function pendingOperationFor(
 	operations: readonly QueuedOperation[],
@@ -65,6 +68,7 @@ function affectsTask(operation: QueuedOperation, taskId: string): boolean {
 			return operation.createdTaskIds.includes(taskId);
 		case 'brl':
 		case 'listLink':
+		case 'taskLink':
 			return false;
 	}
 }
