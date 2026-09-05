@@ -21,9 +21,9 @@ guiones largos como inciso: coma, punto o paréntesis.
   no se aplica nada sin el clic. Y solo se puede aplicar lo que se ha ENSEÑADO: una acción sin su
   línea de preview se descarta.
 - **El token nunca entra en Markdown, frontmatter, logs ni Notices.** Solo se lee para construir la
-  cabecera `Authorization`. Dónde se guarda es una decisión abierta (ver `src/token-store.ts`). En
-  el registro lo garantiza `src/diagnostics/redact.ts`, por el que pasa TODO lo que se apunta; el
-  contenido de una nota tampoco entra, y el título de una tarea solo en `debug` y recortado a 80.
+  cabecera `Authorization`. Vive en `data.json` en todas las plataformas (decidido el 5 sep 2026, ver
+  `src/token-store.ts`). En el registro lo garantiza `src/diagnostics/redact.ts`, por el que pasa
+  TODO lo que se apunta; el contenido de una nota tampoco entra, y el título de una tarea solo en `debug` y recortado a 80.
 
 ## Estructura
 

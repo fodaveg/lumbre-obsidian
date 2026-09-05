@@ -19,10 +19,13 @@ export interface TokenHost {
 }
 
 /**
- * PROVISIONAL. data.json viaja por Obsidian Sync; la decisión de dónde vive el
- * token (fichero fuera del vault o safeStorage de Electron) está abierta en la
- * lista lumbre-obsidian de Lumbre, tarea "Decidir: dónde se guarda el token".
- * Cambiar de almacén es cambiar esta implementación, no sus consumidores.
+ * DECIDIDO (5 sep 2026): el token vive en data.json en TODAS las plataformas.
+ * data.json viaja por Obsidian Sync y un dispositivo comprometido lo expone; se
+ * acepta porque en móvil no hay safeStorage ni fichero fuera del vault, así que
+ * cualquier otra vía acababa igual en cuanto el usuario tuviera un móvil. La
+ * mitigación es regenerar el token en Lumbre. Cambiar de almacén (por ejemplo
+ * al emparejamiento por dispositivo, hoy parado) es cambiar esta implementación,
+ * no sus consumidores.
  */
 export class PluginDataTokenStore implements TokenStore {
 	constructor(private readonly host: TokenHost) {}
