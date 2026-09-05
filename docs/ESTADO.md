@@ -395,3 +395,32 @@
     ya lo dice con la casilla marcada y añadir el label ahí habría sido ruido nuevo en una superficie
     que no lo pidió. `contextStateLabel` (`task-context.ts`) reutiliza `taskStateLabels` y solo
     añade el caso que le falta.
+- **Lote L: sondeo de cambios por `updatedSince`** (tarea `5800b32a` de Lumbre, paso 4): el panel
+  y los bloques ```lumbre``` se enteran de lo que cambia FUERA de Obsidian (completada, archivada o
+  movida desde la app o el móvil) sin releerlo todo a ciegas.
+  - `LumbreClient.tasksUpdatedSince` (`src/lumbre/client.ts`): `GET /api/tasks?updatedSince=`, la
+    misma ruta que `listTasks` (comparte pestillo de lecturas y cubo de 120/min), pero una forma
+    DISTINTA: sin filtro de visibilidad, orden por `updatedAt` ascendente con desempate por `id`.
+    `LumbreTask` gana `updatedAt?: string`, AUSENTE si el servidor no lo trae, igual que
+    `rolloverCount`.
+  - **Hecho medido** (`src/routes/api/tasks/+server.ts` del repo de Lumbre, `origin/main`, JSDoc de
+    `updatedSince` entorno a la línea 195, 5 sep 2026): `updatedAt` sale del HLC del CRDT y solo se
+    mueve cuando la celda cambia de valor; `done` la mueve si cambia, no en el no-op; `date` la
+    mueve al cambiar de día; `list`/`section`/`priority` la mueven si el valor difiere. Un cliente
+    que reintenta una mutación ya aplicada ve la marca quieta, y es correcto.
+  - `src/lumbre/change-feed.ts`, módulo puro nuevo con tests: `ChangeFeed` guarda el cursor (arranca
+    en el instante de carga del plugin, `new Date().toISOString()`, EN MEMORIA, nunca en
+    `data.json`, mío: al cargar ya se hace una lectura completa, y un cursor persistido traería
+    deltas de otro dispositivo si `data.json` llega por Obsidian Sync) y pagina mientras la
+    respuesta llegue LLENA (`limit: 500`, `notes: 'none'`). El borde de los empates en el último
+    `updatedAt` de una página llena se resuelve repitiendo ESE instante menos un milisegundo,
+    descartando por id lo ya visto. `startChangeFeedPoll`/`pollChangeFeedOnce` (mismo patrón que
+    `queue-drain.ts`) sondean cada `CHANGE_FEED_INTERVAL_MS` (60 s) solo si hay algo montado que lo
+    necesite (`QueryCache.hasSubscribers()`, método mínimo nuevo, o el panel abierto), hay conexión,
+    la pestaña está visible (`document.hidden`, mío) y el pestillo de lecturas está suelto (mío).
+  - Reacción al delta (mío): con tareas, `QueryCache.refreshSoon()` (coalescido con lo que dispare
+    la cola en la misma ventana, así que un sondeo y una materialización a la vez comparten UNA
+    ronda) y `LinkStore.refresh` de las notas que tengan vinculada alguna tarea del delta, seguido de
+    `notifyDataChange`. Con delta vacío, nada: es lo que ahorra las lecturas. El registro apunta el
+    tamaño del delta y las páginas, nunca títulos.
+  - Cableado en `main.ts` junto al drenaje periódico de la cola. Sin interruptor nuevo en Ajustes.

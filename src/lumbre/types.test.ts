@@ -70,3 +70,18 @@ describe('taskFromApi y los adjuntos', () => {
 		expect(task === null ? false : 'attachmentCount' in task).toBe(false);
 	});
 });
+
+describe('taskFromApi y updatedAt', () => {
+	it('lee el ISO cuando la fila lo trae', () => {
+		const task = taskFromApi({ id: 'task-1', content: 'x', updatedAt: '2026-09-05T10:00:00.000Z' });
+
+		expect(task?.updatedAt).toBe('2026-09-05T10:00:00.000Z');
+	});
+
+	it('sin el campo, AUSENTE (no se inventa), igual que rolloverCount', () => {
+		const task = taskFromApi({ id: 'task-1', content: 'x' });
+
+		expect(task?.updatedAt).toBeUndefined();
+		expect(task === null ? false : 'updatedAt' in task).toBe(false);
+	});
+});

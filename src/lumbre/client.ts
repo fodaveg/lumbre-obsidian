@@ -159,6 +159,19 @@ export interface ListTasksParams {
 }
 
 /**
+ * Parámetros de `GET /api/tasks?updatedSince=`, la CUARTA forma de la ruta
+ * (hermana de `id`/`ids`, no un filtro más del listado). Sin filtro de
+ * visibilidad: entran completadas, canceladas, archivadas y subtareas. Ver el
+ * JSDoc de `tasksUpdatedSince`.
+ */
+export interface TasksUpdatedSinceParams {
+	/** ISO 8601 con zona. Devuelve lo con `updatedAt` ESTRICTAMENTE posterior. */
+	since: string;
+	limit?: number;
+	notes?: 'full' | 'length' | 'none';
+}
+
+/**
  * Una mutación sobre una tarea que YA existe. Es la superficie del plugin, no
  * la del servidor: `translateOp` la traduce al `{ taskId, kind, payload }` que
  * acepta `POST /api/mutations` (ver `MUTATION_KINDS` en el repo de Lumbre).
@@ -496,6 +509,32 @@ export class LumbreClient {
 
 		const suffix = query.toString();
 		const path = `/api/tasks${suffix ? `?${suffix}` : ''}`;
+		const response = await this.gated('GET', path, () => this.send('GET', path));
+		if (!response.ok) return response;
+		return { ok: true, value: tasksFromApi(response.value) };
+	}
+
+	/**
+	 * `GET /api/tasks?updatedSince=`: el delta de tareas cambiadas ESTRICTAMENTE
+	 * después de `since`. Es la MISMA ruta que `listTasks` (comparte su pestillo
+	 * de lecturas y su cubo de 120/min), pero es una forma DISTINTA: sin ningún
+	 * filtro de visibilidad (entran completadas, canceladas, archivadas y
+	 * subtareas), orden por `updatedAt` ascendente con desempate por `id`, y solo
+	 * `notes`/`limit` aplican (`scope`/`days`/`list`/`section`/`includeDone`/
+	 * `includeArchived`/`today` se ignoran). Medido en
+	 * `src/routes/api/tasks/+server.ts` del repo de Lumbre (`origin/main`, JSDoc
+	 * de `updatedSince`, 5 sep 2026). El paginado del delta lo hace
+	 * `ChangeFeed` (`src/lumbre/change-feed.ts`), no este método: aquí es una
+	 * página suelta.
+	 */
+	async tasksUpdatedSince(
+		params: TasksUpdatedSinceParams,
+	): Promise<LumbreResult<LumbreTask[]>> {
+		const query = new URLSearchParams({ updatedSince: params.since });
+		if (params.limit !== undefined) query.set('limit', String(params.limit));
+		if (params.notes !== undefined) query.set('notes', params.notes);
+
+		const path = `/api/tasks?${query.toString()}`;
 		const response = await this.gated('GET', path, () => this.send('GET', path));
 		if (!response.ok) return response;
 		return { ok: true, value: tasksFromApi(response.value) };
