@@ -4,6 +4,8 @@ import type {
 	BatchOperation,
 	BatchResultItem,
 	BrlDay,
+	ListLinkRow,
+	ListLinkTarget,
 	LumbreFailure,
 	LumbreResult,
 	MutationOp,
@@ -120,6 +122,11 @@ function fakeClient() {
 				ok: true,
 				value: { date, entries: [] },
 			}),
+		),
+		listLink: vi.fn(async (_target: ListLinkTarget): Promise<LumbreResult<void>> => OK),
+		listUnlink: vi.fn(async (_target: ListLinkTarget): Promise<LumbreResult<void>> => OK),
+		listLinks: vi.fn(
+			async (_listId: string): Promise<LumbreResult<ListLinkRow[]>> => ({ ok: true, value: [] }),
 		),
 	};
 }
@@ -436,6 +443,94 @@ describe('OperationQueue: una entrada del BRL', () => {
 		await queue.flush();
 
 		expect(client.brlJson).toHaveBeenCalledTimes(2);
+		expect(storage.operations[0]).toMatchObject({ state: 'sent', attempts: 1 });
+	});
+});
+
+describe('OperationQueue: un vínculo nota↔lista', () => {
+	const NOTE_TARGET: LinkTarget = { notePath: 'Proyectos/Cocina.md', label: 'Cocina', excerpt: null };
+
+	it('link manda listLink y confirma releyendo que la url está presente', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		const operation = await queue.enqueueListLink('link', 'list-1', 'obsidian://open?vault=v&file=Cocina', 'Cocina', NOTE_TARGET);
+		client.listLinks.mockResolvedValue({
+			ok: true,
+			value: [
+				{
+					id: 'row-1',
+					listId: 'list-1',
+					kind: 'obsidian',
+					targetKey: operation.url,
+					url: operation.url,
+					label: 'Cocina',
+					updatedAt: '2026-09-05T10:00:00.000Z',
+				},
+			],
+		});
+
+		await queue.flush();
+
+		expect(client.listLink).toHaveBeenCalledWith({
+			listId: 'list-1',
+			url: 'obsidian://open?vault=v&file=Cocina',
+			label: 'Cocina',
+		});
+		expect(client.listLinks).toHaveBeenCalledWith('list-1');
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('unlink manda la MISMA url que se guardó, byte a byte', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		const url = 'obsidian://open?vault=v&file=Notas%20con%20espacios';
+		await queue.enqueueListLink('unlink', 'list-1', url, 'Notas con espacios', NOTE_TARGET);
+
+		await queue.flush();
+
+		expect(client.listUnlink).toHaveBeenCalledWith({ listId: 'list-1', url, label: 'Notas con espacios' });
+	});
+
+	it('unlink con removed:false en el servidor igualmente se confirma: la ausencia en la relectura basta', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		// La relectura ya no trae la url, tanto si el servidor la quitó de verdad
+		// como si `removed: false` porque ya no estaba: la cola no distingue los
+		// dos casos, y no hace falta.
+		client.listLinks.mockResolvedValue({ ok: true, value: [] });
+		await queue.enqueueListLink('unlink', 'list-1', 'url-vieja', 'Cocina', NOTE_TARGET);
+
+		await queue.flush();
+
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('un 404 (lista de otra cuenta o borrada) deja la operación rejected, no se reintenta', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.listLink.mockResolvedValue(failure('not_found', 404));
+		const queue = queueWith(client, storage);
+		await queue.enqueueListLink('link', 'list-ajena', 'url', 'Cocina', NOTE_TARGET);
+
+		await queue.flush();
+
+		expect(storage.operations[0]?.state).toBe('rejected');
+		expect(client.listLinks).not.toHaveBeenCalled();
+	});
+
+	it('si la url mandada no aparece en la relectura, se queda en sent con un intento más', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		const queue = queueWith(client, storage);
+		await queue.enqueueListLink('link', 'list-1', 'url-nueva', 'Cocina', NOTE_TARGET);
+		// La relectura no trae la url que se acaba de mandar.
+		client.listLinks.mockResolvedValue({ ok: true, value: [] });
+
+		await queue.flush();
+
 		expect(storage.operations[0]).toMatchObject({ state: 'sent', attempts: 1 });
 	});
 });

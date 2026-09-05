@@ -19,6 +19,7 @@
 
 import { isLogLevel, type Logger } from '../diagnostics/logger';
 import type { LumbreTaskLink } from '../links/link-store';
+import type { NoteListLinkEntry } from '../links/note-list-link-store';
 import type { QueuedOperation } from '../lumbre/queue';
 import { DEFAULT_SETTINGS, normalizeOrigin, type LumbreSettings } from '../settings';
 
@@ -28,8 +29,11 @@ import { DEFAULT_SETTINGS, normalizeOrigin, type LumbreSettings } from '../setti
  * - 1: el objeto único (ajustes, token, cola, vínculos, deviceId).
  * - 2: los ajustes ganan `logLevel` y `liveLog`. Un `data.json` de la 1 los
  *   estrena en su valor por defecto, sin perder nada.
+ * - 3: `noteListLinks`, la url que se mandó a `POST /api/list-links` por cada
+ *   nota vinculada a una lista. Un `data.json` anterior no lo trae y empieza
+ *   con el registro vacío, sin perder nada.
  */
-export const PLUGIN_DATA_VERSION = 2;
+export const PLUGIN_DATA_VERSION = 3;
 
 export interface PluginData {
 	version: number;
@@ -38,6 +42,8 @@ export interface PluginData {
 	token: string | null;
 	queue: QueuedOperation[];
 	links: LumbreTaskLink[];
+	/** Qué url se mandó a Lumbre por cada nota vinculada a una lista. */
+	noteListLinks: NoteListLinkEntry[];
 	/**
 	 * Solo se usa si NO hay `DeviceIdStore` local. Con almacenamiento local
 	 * disponible el id vive ahí y esta clave se queda a `null`, para que no viaje
@@ -84,6 +90,7 @@ export class PluginStore {
 	 */
 	private readonly removedOperations = new Set<string>();
 	private readonly removedLinks = new Set<string>();
+	private readonly removedNoteListLinks = new Set<string>();
 
 	constructor(
 		private readonly host: PluginDataHost,
@@ -157,6 +164,16 @@ export class PluginStore {
 		await this.save();
 	}
 
+	readNoteListLinks(): NoteListLinkEntry[] {
+		return this.data.noteListLinks;
+	}
+
+	async writeNoteListLinks(entries: NoteListLinkEntry[]): Promise<void> {
+		remember(this.data.noteListLinks, entries, this.removedNoteListLinks);
+		this.data.noteListLinks = entries;
+		await this.save();
+	}
+
 	readToken(): string | null {
 		return this.data.token;
 	}
@@ -200,6 +217,11 @@ export class PluginStore {
 			...mine,
 			queue: mergeById(asArray<QueuedOperation>(onDisk['queue']), mine.queue, this.removedOperations),
 			links: mergeById(asArray<LumbreTaskLink>(onDisk['links']), mine.links, this.removedLinks),
+			noteListLinks: mergeById(
+				asArray<NoteListLinkEntry>(onDisk['noteListLinks']),
+				mine.noteListLinks,
+				this.removedNoteListLinks,
+			),
 		};
 	}
 
@@ -240,6 +262,7 @@ function emptyData(): PluginData {
 		token: null,
 		queue: [],
 		links: [],
+		noteListLinks: [],
 		deviceId: null,
 	};
 }
@@ -332,6 +355,9 @@ export function migrate(raw: unknown): PluginData {
 		token: asString(row['token']),
 		queue: asArray<QueuedOperation>(row['queue']),
 		links: asArray<LumbreTaskLink>(row['links']),
+		// Ausente en un data.json de la versión 2 o anterior: empieza vacío, sin
+		// perder nada de lo que ya hubiera.
+		noteListLinks: asArray<NoteListLinkEntry>(row['noteListLinks']),
 		deviceId: asString(row['deviceId']),
 	};
 }

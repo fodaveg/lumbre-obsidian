@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { Logger } from '../diagnostics/logger';
 import type { LumbreTaskLink } from '../links/link-store';
+import type { NoteListLinkEntry } from '../links/note-list-link-store';
 import type { CreateOperation, QueuedOperation } from '../lumbre/queue';
 import { DEFAULT_SETTINGS } from '../settings';
 import { PluginDataTokenStore } from '../token-store';
@@ -115,6 +116,16 @@ describe('PluginStore: migración desde el data.json viejo', () => {
 		const store = new PluginStore(host);
 
 		expect((await store.load()).settings.logLevel).toBe(DEFAULT_SETTINGS.logLevel);
+	});
+
+	it('un data.json de la versión 2 (sin noteListLinks) migra con el registro vacío', async () => {
+		const host = memoryHost({ version: 2, settings: {}, token: null, queue: [], links: [] });
+		const store = new PluginStore(host);
+
+		const data = await store.load();
+
+		expect(data.version).toBe(PLUGIN_DATA_VERSION);
+		expect(data.noteListLinks).toEqual([]);
 	});
 
 	it('el token que ya estaba sigue llegando al TokenStore tras migrar', async () => {
@@ -266,6 +277,24 @@ describe('PluginStore: fusión con lo que hay en disco', () => {
 		await store.writeQueue([]);
 
 		expect(savedQueue(host)).toEqual([]);
+	});
+
+	it('une el registro de vínculos nota↔lista por id y deja ganar al más reciente', async () => {
+		const host = memoryHost(null);
+		const a = new PluginStore(host);
+		const b = new PluginStore(host);
+		await a.load();
+		await b.load();
+
+		await b.writeNoteListLinks([
+			{ id: 'Cocina.md', listId: 'list-1', url: 'url-vieja', label: 'Cocina', updatedAt: '2026-09-03T10:00:00.000Z' },
+		]);
+		await a.writeNoteListLinks([
+			{ id: 'Menú.md', listId: 'list-2', url: 'url-menu', label: 'Menú', updatedAt: '2026-09-03T11:00:00.000Z' },
+		]);
+
+		const saved = (host.saved as { noteListLinks: NoteListLinkEntry[] }).noteListLinks;
+		expect(saved.map((entry) => entry.id).sort()).toEqual(['Cocina.md', 'Menú.md']);
 	});
 
 	it('borrar el token gana sobre lo que siga en el fichero', async () => {

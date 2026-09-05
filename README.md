@@ -17,8 +17,8 @@ vive en Lumbre y la nota es tuya.
 | **Insertar el BRL de hoy como texto** | Pega el Markdown del registro de hoy en el cursor. Es una **foto fija**: la única vez que el BRL entra en un fichero del vault, y solo porque lo pides a mano. |
 | **Insertar la foto semanal** | Pega en el cursor el texto de la revisión: vencidas y arrastradas, listas sin próxima acción y cinco de «Algún día». También es una **foto fija**. Ver «La foto semanal». |
 | **Soplo con la selección** | Manda la selección (o el párrafo del cursor) a Soplo y enseña lo que HARÍA, con una casilla por acción. Nada se aplica sin pulsar «Aplicar». También está en el menú contextual del editor. |
-| **Vincular esta nota a una lista** | Escribe la propiedad `lumbre-list` en el frontmatter con el id de la lista elegida. |
-| **Quitar el vínculo con la lista** | Borra esa propiedad. |
+| **Vincular esta nota a una lista** | Escribe la propiedad `lumbre-list` en el frontmatter con el id de la lista elegida, y registra en Lumbre el enlace de vuelta a la nota (solo la RUTA, nunca el contenido): la vista de proyecto lo enseña en «Notas vinculadas». |
+| **Quitar el vínculo con la lista** | Borra esa propiedad y retira el enlace de vuelta en Lumbre. |
 | **Mostrar diagnóstico** | El resumen de estado y los últimos 100 eventos del registro, con botones para copiarlo o guardarlo. Ver «Cuando algo falla». |
 
 **Un panel lateral**, «Tareas de esta nota» (icono en la barra izquierda, o el comando **Abrir las

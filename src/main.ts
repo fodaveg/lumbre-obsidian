@@ -39,8 +39,10 @@ import {
 import { formatEvent, Logger, shortTitle, type LogEvent, type LogLevel } from './diagnostics/logger';
 import { buildReport, DEFAULT_REPORT_EVENTS, type CacheStats } from './diagnostics/report';
 import { guarded, unhandledEvent } from './diagnostics/unhandled';
+import { buildObsidianDeepLink, noteLinkLabel } from './links/deep-link';
 import { LinkStore } from './links/link-store';
 import { NOTE_LIST_PROPERTY, readNoteListId, writeNoteListId } from './links/note-list';
+import { movedNotePath, NoteListLinkStore, renameListLinkChanges } from './links/note-list-link-store';
 import {
 	describeFailure,
 	LumbreClient,
@@ -106,6 +108,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	client!: LumbreClient;
 	queue!: OperationQueue;
 	links!: LinkStore;
+	noteListLinks!: NoteListLinkStore;
 	lists!: ListCache;
 	queries!: QueryCache;
 	brl!: BrlCache;
@@ -201,6 +204,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			exists: (path: string) => this.app.vault.getAbstractFileByPath(path) !== null,
 			logger: this.logger.child('links'),
 		});
+		this.noteListLinks = new NoteListLinkStore(this.store);
 		this.lists = new ListCache({ client: this.client });
 		this.queries = new QueryCache({
 			client: this.client,
@@ -275,6 +279,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 					void this.links.renamePath(oldPath, file.path).then(() => {
 						this.notifyDataChange();
 					});
+					void this.renameListLinks(oldPath, file.path);
 				}),
 			),
 		);
@@ -285,6 +290,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 					void this.links.markDeleted(file.path).then(() => {
 						this.notifyDataChange();
 					});
+					void this.unlinkDeletedNoteListLinks(file.path);
 				}),
 			),
 		);
@@ -1114,7 +1120,12 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		this.notifyDataChange();
 	}
 
-	/** Escribe `lumbre-list` en la nota. Es la ÚNICA escritura del plugin en el vault. */
+	/**
+	 * Escribe `lumbre-list` en la nota (es la ÚNICA escritura del plugin en el
+	 * vault) Y encola el enlace de vuelta a la nota en Lumbre (`POST
+	 * /api/list-links`), para que la vista de proyecto lo enseñe en «Notas
+	 * vinculadas». Solo viaja la RUTA, nunca el contenido.
+	 */
 	private async linkNoteToList(file: TFile): Promise<void> {
 		const lists = await this.lists.get();
 		if (lists.length === 0) {
@@ -1123,25 +1134,150 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			return;
 		}
 		new ListSuggestModal(this.app, lists, (list) => {
-			void writeNoteListId(this.app, file, list.id).then(() => {
-				this.logger.child('vault').info('Nota vinculada a una lista', {
-					notePath: file.path,
-					listId: list.id,
-				});
-				new Notice(`Nota vinculada a la lista ${list.name}`);
-				this.notifyDataChange();
-			});
+			void this.applyListLink(file, list.id, list.name);
 		}).open();
 	}
 
+	/**
+	 * Si la nota ya estaba vinculada a OTRA lista, primero se encola el
+	 * `unlink` de la vieja: la propiedad del frontmatter es singular, así que
+	 * dos vínculos activos a la vez no tendría sentido.
+	 */
+	private async applyListLink(file: TFile, listId: string, listName: string): Promise<void> {
+		const queuedIds: string[] = [];
+		const previous = this.noteListLinks.get(file.path);
+		if (previous !== null && previous.listId !== listId) {
+			const unlinkOp = await this.queue.enqueueListLink(
+				'unlink',
+				previous.listId,
+				previous.url,
+				previous.label,
+				{ notePath: file.path, label: previous.label, excerpt: null },
+			);
+			queuedIds.push(unlinkOp.id);
+		}
+
+		await writeNoteListId(this.app, file, listId);
+		const url = buildObsidianDeepLink(this.app.vault.getName(), file.path);
+		const label = noteLinkLabel(file.basename);
+		await this.noteListLinks.set(file.path, listId, url, label);
+		const linkOp = await this.queue.enqueueListLink('link', listId, url, label, {
+			notePath: file.path,
+			label,
+			excerpt: null,
+		});
+		queuedIds.push(linkOp.id);
+
+		this.logger.child('vault').info('Nota vinculada a una lista', { notePath: file.path, listId });
+		new Notice(`Nota vinculada a la lista ${listName}`);
+		this.notifyDataChange();
+
+		await this.queue.flush();
+		this.warnIfListLinkRejected(queuedIds);
+	}
+
+	/**
+	 * Borra `lumbre-list` de la nota Y encola el `unlink` con la url que se
+	 * guardó al vincular: tiene que ser la MISMA cadena que se mandó entonces
+	 * (ver el JSDoc de `NoteListLinkEntry`). Sin url guardada (una instalación
+	 * que vinculó antes de este lote) solo se quita el frontmatter.
+	 */
 	private async unlinkNoteFromList(file: TFile): Promise<void> {
 		await writeNoteListId(this.app, file, null);
 		this.logger.child('vault').info('Quitado el vínculo de la nota con su lista', {
 			notePath: file.path,
 			property: NOTE_LIST_PROPERTY,
 		});
+
+		const stored = this.noteListLinks.get(file.path);
 		new Notice(`Quitada la propiedad ${NOTE_LIST_PROPERTY} de la nota`);
 		this.notifyDataChange();
+
+		if (stored === null) {
+			this.log.info('Vínculo sin url guardada, solo se quita el frontmatter', { notePath: file.path });
+			return;
+		}
+
+		const operation = await this.queue.enqueueListLink('unlink', stored.listId, stored.url, stored.label, {
+			notePath: file.path,
+			label: stored.label,
+			excerpt: null,
+		});
+		await this.noteListLinks.remove(file.path);
+		this.notifyDataChange();
+
+		await this.queue.flush();
+		this.warnIfListLinkRejected([operation.id]);
+	}
+
+	/**
+	 * Reemite el vínculo nota ↔ lista tras un renombrado (nota o carpeta): la
+	 * url vieja apuntaba a la ruta anterior, así que hay que retirarla y volver
+	 * a registrar la nueva. `renameListLinkChanges` fija el orden (unlink de la
+	 * vieja antes que link de la nueva) y aquí solo se encola y se persiste.
+	 */
+	private async renameListLinks(oldPath: string, newPath: string): Promise<void> {
+		const entries = this.noteListLinks.entriesUnder(oldPath);
+		if (entries.length === 0) return;
+
+		const vaultName = this.app.vault.getName();
+		const changes = renameListLinkChanges(entries, oldPath, newPath, (notePath) =>
+			buildObsidianDeepLink(vaultName, notePath),
+		);
+		for (const change of changes) {
+			await this.queue.enqueueListLink(change.type, change.listId, change.url, change.label, {
+				notePath: change.notePath,
+				label: change.label,
+				excerpt: null,
+			});
+		}
+		for (const entry of entries) {
+			const to = movedNotePath(entry.id, oldPath, newPath);
+			if (to === null) continue;
+			await this.noteListLinks.move(entry.id, to, buildObsidianDeepLink(vaultName, to));
+		}
+
+		this.logger.child('vault').info('Vínculos nota↔lista reemitidos por un renombrado', {
+			oldPath,
+			newPath,
+			moved: entries.length,
+		});
+		this.notifyDataChange();
+		await this.queue.flush();
+	}
+
+	/** Retira de Lumbre el vínculo nota ↔ lista de una nota (o carpeta) borrada. */
+	private async unlinkDeletedNoteListLinks(path: string): Promise<void> {
+		const entries = this.noteListLinks.entriesUnder(path);
+		if (entries.length === 0) return;
+
+		for (const entry of entries) {
+			await this.queue.enqueueListLink('unlink', entry.listId, entry.url, entry.label, {
+				notePath: entry.id,
+				label: entry.label,
+				excerpt: null,
+			});
+			await this.noteListLinks.remove(entry.id);
+		}
+
+		this.logger.child('vault').info('Vínculos nota↔lista retirados: su nota ha desaparecido', {
+			path,
+			removed: entries.length,
+		});
+		this.notifyDataChange();
+		await this.queue.flush();
+	}
+
+	/** Avisa con un Notice si Lumbre rechazó alguna de las operaciones de vínculo recién encoladas. */
+	private warnIfListLinkRejected(ids: readonly string[]): void {
+		const pending = this.queue.pending();
+		for (const id of ids) {
+			const operation = pending.find((candidate) => candidate.id === id);
+			if (operation?.state === 'rejected') {
+				this.log.error('Lumbre rechazó el vínculo con la lista', { id, error: operation.error });
+				new Notice(operation.error ?? 'Lumbre rechazó el vínculo con la lista.');
+			}
+		}
 	}
 
 	// ── Cableado de los bloques ──────────────────────────────────────────────
