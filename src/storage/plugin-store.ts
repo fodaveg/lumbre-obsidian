@@ -21,7 +21,12 @@ import { isLogLevel, type Logger } from '../diagnostics/logger';
 import type { LumbreTaskLink } from '../links/link-store';
 import type { NoteListLinkEntry } from '../links/note-list-link-store';
 import type { QueuedOperation } from '../lumbre/queue';
-import { DEFAULT_SETTINGS, normalizeOrigin, type LumbreSettings } from '../settings';
+import {
+	DEFAULT_SETTINGS,
+	normalizeExportFolder,
+	normalizeOrigin,
+	type LumbreSettings,
+} from '../settings';
 
 /**
  * Versión del formato de `data.json`. Sube cuando la forma cambie.
@@ -36,8 +41,11 @@ import { DEFAULT_SETTINGS, normalizeOrigin, type LumbreSettings } from '../setti
  *   a `POST /api/task-links`). Un `data.json` anterior no lo trae; el vínculo
  *   se detecta como pendiente de registrar y `main.ts` lo encola al arrancar
  *   (ver `TASK_LINK_BACKFILL_BATCH`).
+ * - 5: los ajustes ganan `exportFolder`, la carpeta de «Guardar una copia de
+ *   exportación en el vault». Un `data.json` anterior no lo trae y lo estrena
+ *   en su valor por defecto (`Lumbre/exportaciones`), sin perder nada.
  */
-export const PLUGIN_DATA_VERSION = 4;
+export const PLUGIN_DATA_VERSION = 5;
 
 export interface PluginData {
 	version: number;
@@ -342,10 +350,19 @@ export function migrate(raw: unknown): PluginData {
 	const rawLevel = settings?.['logLevel'];
 	const logLevel = isLogLevel(rawLevel) ? rawLevel : DEFAULT_SETTINGS.logLevel;
 
+	// `exportFolder` entró en la versión 5. Un `data.json` anterior (o uno con
+	// el campo vacío, que `normalizeExportFolder` rechazaría en Ajustes) lo
+	// estrena en su valor por defecto.
+	const rawExportFolder = settings?.['exportFolder'];
+	const exportFolder =
+		typeof rawExportFolder === 'string' && normalizeExportFolder(rawExportFolder) !== null
+			? rawExportFolder
+			: DEFAULT_SETTINGS.exportFolder;
+
 	return {
 		version: PLUGIN_DATA_VERSION,
 		// Los ajustes se COPIAN enteros sobre los de fábrica y solo se corrigen los
-		// dos que pueden venir mal escritos. Reconstruirlos campo a campo hacía que
+		// que pueden venir mal escritos. Reconstruirlos campo a campo hacía que
 		// un ajuste que este plugin todavía no conoce (porque lo escribió una
 		// versión más nueva desde otro dispositivo, por Sync) se perdiera en cada
 		// carga, y la primera escritura lo borraba también del fichero.
@@ -355,6 +372,7 @@ export function migrate(raw: unknown): PluginData {
 			apiOrigin,
 			logLevel,
 			liveLog: settings?.['liveLog'] === true,
+			exportFolder,
 		},
 		token: asString(row['token']),
 		queue: asArray<QueuedOperation>(row['queue']),

@@ -172,6 +172,24 @@ export interface TasksUpdatedSinceParams {
 }
 
 /**
+ * Cómo resolvió el servidor una mutación de `POST /api/mutations`, contrato
+ * cerrado con el plugin (commit `9e44cca9` del repo de Lumbre, tarea
+ * `908ebaec`, 2026-09-03):
+ *
+ * - `'applied'`: se materializó y CAMBIÓ algo.
+ * - `'noop'`: se materializó pero no cambió nada (completar una tarea que ya
+ *   estaba completada, reabrir una que ya estaba abierta).
+ * - `'not-found'`: el drenaje no encontró la tarea en el store del dueño del
+ *   token (inexistente, borrada o archivada). No se reintenta.
+ * - `'queued'`: aceptada y todavía pendiente de materializar.
+ *
+ * `undefined` (ausente en la respuesta) significa "este Lumbre todavía no lo
+ * sirve", no un quinto valor: la cola lo trata como el `'queued'` de siempre
+ * y relee para confirmar (ver `OperationQueue.process`).
+ */
+export type MutationOutcome = 'applied' | 'noop' | 'not-found' | 'queued';
+
+/**
  * Una mutación sobre una tarea que YA existe. Es la superficie del plugin, no
  * la del servidor: `translateOp` la traduce al `{ taskId, kind, payload }` que
  * acepta `POST /api/mutations` (ver `MUTATION_KINDS` en el repo de Lumbre).
@@ -442,6 +460,15 @@ export const TASK_LINKS_WRITE_RATE_LIMIT = 60;
 export const TASK_LINKS_READ_RATE_LIMIT = 120;
 
 /**
+ * Límite de `GET /api/export`: cubo PROPIO y más estricto que el de
+ * `GET /api/tasks` (120/min), porque cada petición vuelca la cuenta ENTERA
+ * (deserializa el blob CRDT completo), no unas pocas tareas. Medido en el
+ * JSDoc de `src/routes/api/export/+server.ts` del repo de Lumbre, commit
+ * `9e44cca9`.
+ */
+export const EXPORT_RATE_LIMIT = 10;
+
+/**
  * Proporción del límite de un cubo a partir de la que se avisa. Con el cubo
  * único de antes era 100 de 120 (5/6); se mantiene la misma proporción por
  * endpoint, así que el de `/api/agent` (30) avisa a partir de 25 y no espera a
@@ -464,6 +491,7 @@ const RATE_LIMITS: ReadonlyMap<string, number> = new Map([
 	['GET /api/list-links', LIST_LINKS_READ_RATE_LIMIT],
 	['POST /api/task-links', TASK_LINKS_WRITE_RATE_LIMIT],
 	['GET /api/task-links', TASK_LINKS_READ_RATE_LIMIT],
+	['GET /api/export', EXPORT_RATE_LIMIT],
 ]);
 
 /** Ventana del contador de peticiones. */
@@ -623,6 +651,29 @@ export class LumbreClient {
 	}
 
 	/**
+	 * `GET /api/export`: la cuenta ENTERA (tareas, calendarios, listas y
+	 * secciones de "Algún día", plantillas, notas de día, objetivos de semana,
+	 * contextos y hábitos), para guardar una copia de respaldo en el vault.
+	 *
+	 * Va por el pestillo de lecturas, igual que el resto de lecturas: un 401
+	 * aquí también apaga las demás superficies. Y por su PROPIO cubo
+	 * (`EXPORT_RATE_LIMIT`, más estricto que el de `/api/tasks`), no el de
+	 * `TASKS_RATE_LIMIT`.
+	 *
+	 * El texto vuelve TAL CUAL lo mandó el servidor, sin parsear ni
+	 * reserializar: es un fichero de respaldo y tiene que ser BYTE A BYTE lo
+	 * que sirvió Lumbre, no una reconstrucción de este cliente que podría
+	 * reordenar claves o cambiar el formato de un número.
+	 */
+	async exportData(): Promise<LumbreResult<{ text: string; bytes: number }>> {
+		const path = '/api/export';
+		const response = await this.gated('GET', path, () => this.request('GET', path));
+		if (!response.ok) return response;
+		const text = readText(response.value);
+		return { ok: true, value: { text, bytes: byteLengthOf(text) } };
+	}
+
+	/**
 	 * `POST /api/ingest`: encola una tarea nueva. El id lo genera el LLAMADOR
 	 * (`crypto.randomUUID()`) y viaja como `clientTaskId`: repetir la llamada con
 	 * el mismo id no crea una segunda tarea, que es lo que hace seguro reintentar
@@ -638,11 +689,17 @@ export class LumbreClient {
 		return { ok: true, value: undefined };
 	}
 
-	/** `POST /api/mutations`: encola una mutación sobre una tarea existente. */
-	async mutate(op: MutationOp): Promise<LumbreResult<void>> {
+	/**
+	 * `POST /api/mutations`: encola una mutación sobre una tarea existente.
+	 *
+	 * `value.outcome` es el `MutationOutcome` que devolvió el servidor, o
+	 * `undefined` si la respuesta no lo trae (un Lumbre anterior al contrato).
+	 * Quien llama (la cola) decide qué hacer con cada valor.
+	 */
+	async mutate(op: MutationOp): Promise<LumbreResult<{ outcome?: MutationOutcome }>> {
 		const response = await this.send('POST', '/api/mutations', translateOp(op));
 		if (!response.ok) return response;
-		return { ok: true, value: undefined };
+		return { ok: true, value: { outcome: outcomeFrom(response.value) } };
 	}
 
 	/**
@@ -1189,10 +1246,39 @@ function readText(response: LumbreResponse): string {
 	}
 }
 
+/**
+ * Bytes REALES de un texto en UTF-8, para el tamaño que se enseña de la
+ * exportación: `.length` cuenta unidades UTF-16, que subestima cualquier
+ * carácter fuera del ASCII (una tilde, un emoji de un hábito).
+ */
+function byteLengthOf(text: string): number {
+	return new TextEncoder().encode(text).length;
+}
+
 function asRow(value: unknown): Record<string, unknown> | null {
 	return value !== null && typeof value === 'object' && !Array.isArray(value)
 		? (value as Record<string, unknown>)
 		: null;
+}
+
+/** Los cuatro valores válidos de `MutationOutcome`, para validar lo que llega del servidor. */
+const MUTATION_OUTCOMES: ReadonlySet<string> = new Set<MutationOutcome>([
+	'applied',
+	'noop',
+	'not-found',
+	'queued',
+]);
+
+/**
+ * El `outcome` de `POST /api/mutations`, o `undefined` si no viene o no es uno
+ * de los cuatro valores del contrato (un Lumbre anterior, o una respuesta que
+ * no tiene la forma esperada).
+ */
+function outcomeFrom(raw: unknown): MutationOutcome | undefined {
+	const value = asRow(raw)?.['outcome'];
+	return typeof value === 'string' && MUTATION_OUTCOMES.has(value)
+		? (value as MutationOutcome)
+		: undefined;
 }
 
 /** El JSON del BRL a `BrlDay`, descartando lo que no sea una entrada. */

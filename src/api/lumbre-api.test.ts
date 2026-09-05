@@ -104,6 +104,10 @@ function harness(overrides: Partial<LumbreApiDeps> = {}): {
 		buildReport: () => 'informe de prueba',
 		weeklySnapshot: async (options): Promise<string> =>
 			`## Foto de prueba (${options?.seed ?? 'sin semilla'})`,
+		exportToVault: async (): Promise<{ path: string; bytes: number }> => ({
+			path: 'Lumbre/exportaciones/lumbre-export-2026-09-05.json',
+			bytes: 42,
+		}),
 		...overrides,
 	};
 
@@ -301,6 +305,36 @@ describe('LumbreApi: la foto semanal', () => {
 
 		const calls = logger.recent().filter((event) => event.message === 'Llamada a la API pública');
 		expect(calls.map((event) => event.data)).toEqual([{ method: 'weeklySnapshot' }]);
+	});
+});
+
+describe('LumbreApi: exportToVault', () => {
+	it('devuelve la ruta y los bytes que compone el plugin', async () => {
+		const { api } = harness();
+
+		expect(await api.exportToVault()).toEqual({
+			path: 'Lumbre/exportaciones/lumbre-export-2026-09-05.json',
+			bytes: 42,
+		});
+	});
+
+	it('propaga el fallo del plugin (la petición o la escritura)', async () => {
+		const { api } = harness({
+			exportToVault: async () => {
+				throw new Error('El token no vale o ha caducado.');
+			},
+		});
+
+		await expect(api.exportToVault()).rejects.toThrow('El token no vale o ha caducado.');
+	});
+
+	it('se apunta como una llamada más de la API', async () => {
+		const { api, logger } = harness();
+
+		await api.exportToVault();
+
+		const calls = logger.recent().filter((event) => event.message === 'Llamada a la API pública');
+		expect(calls.map((event) => event.data)).toEqual([{ method: 'exportToVault' }]);
 	});
 });
 

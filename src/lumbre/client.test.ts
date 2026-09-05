@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { Logger, type LogLevel } from '../diagnostics/logger';
 import {
 	AGENT_RATE_LIMIT,
+	EXPORT_RATE_LIMIT,
 	LumbreClient,
 	MAX_ATTACHMENT_BYTES,
 	MUTATIONS_RATE_LIMIT,
@@ -12,6 +13,7 @@ import {
 	type LumbreRequestInit,
 	type LumbreRequestFn,
 	type MutationOp,
+	type MutationOutcome,
 } from './client';
 
 const ORIGIN = 'https://app.lumbre.pro';
@@ -352,6 +354,70 @@ describe('LumbreClient.listLists', () => {
 	});
 });
 
+describe('LumbreClient.exportData', () => {
+	it('pide GET /api/export y devuelve el texto TAL CUAL, con sus bytes', async () => {
+		const calls: LumbreRequestInit[] = [];
+		const body = '{"tasks":[{"content":"Comprar café"}]}';
+		const client = clientWith(async (init) => {
+			calls.push(init);
+			return { status: 200, text: body };
+		});
+
+		const result = await client.exportData();
+
+		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/export');
+		expect(calls[0]?.method).toBe('GET');
+		expect(calls[0]?.headers['Authorization']).toBe('Bearer tok-123');
+		expect(result).toEqual({ ok: true, value: { text: body, bytes: new TextEncoder().encode(body).length } });
+	});
+
+	it('cuenta los bytes en UTF-8, no en unidades UTF-16', async () => {
+		const body = 'café'; // "é" ocupa 2 bytes en UTF-8, 1 unidad UTF-16
+		const client = clientWith(async () => ({ status: 200, text: body }));
+
+		const result = await client.exportData();
+
+		expect(result.ok && result.value.bytes).toBe(5);
+		expect(body.length).toBe(4);
+	});
+
+	it('un 401 apaga el pestillo de lecturas, igual que el resto de superficies', async () => {
+		const client = clientWith(async () => ({ status: 401, text: '' }));
+
+		const first = await client.exportData();
+		expect(first).toEqual({ ok: false, reason: 'unauthorized', status: 401 });
+		expect(client.readsAreLocked).toBe(true);
+	});
+});
+
+describe('LumbreClient: cubo de /api/export, propio y más estricto que /api/tasks', () => {
+	it('avisa al pasar de su propio umbral, sin gastar el cubo de /api/tasks', async () => {
+		const logger = Logger.create({ console: null, level: 'info' });
+		const client = new LumbreClient({
+			apiOrigin: ORIGIN,
+			getToken: async () => 'tok-123',
+			request: async () => ({ status: 200, text: '{}' }),
+			logger: logger.child('http'),
+			now: () => 1000,
+		});
+
+		for (let index = 0; index < warnThreshold(EXPORT_RATE_LIMIT) + 1; index += 1) {
+			await client.exportData();
+		}
+
+		const warnings = logger
+			.recent()
+			.filter((event) => event.message === 'Muchas peticiones en un minuto');
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.data).toMatchObject({
+			limit: warnThreshold(EXPORT_RATE_LIMIT),
+			serverLimit: EXPORT_RATE_LIMIT,
+			method: 'GET',
+			path: '/api/export',
+		});
+	});
+});
+
 describe('LumbreClient.createTask', () => {
 	it('manda el clientTaskId y solo las claves informadas', async () => {
 		const { client, calls } = recordingClient({ ok: true });
@@ -436,6 +502,33 @@ describe('LumbreClient.mutate', () => {
 		await client.mutate(op);
 
 		expect(jsonBody(calls[0])).toEqual({ taskId: 't', kind, payload });
+	});
+
+	it.each<MutationOutcome>(['applied', 'noop', 'not-found', 'queued'])(
+		'lee outcome: %s de la respuesta',
+		async (outcome) => {
+			const { client } = recordingClient({ ok: true, outcome, outcomes: [outcome] });
+
+			const result = await client.mutate({ op: 'complete', taskId: 'task-1' });
+
+			expect(result).toEqual({ ok: true, value: { outcome } });
+		},
+	);
+
+	it('sin outcome en la respuesta (un Lumbre anterior al contrato) sale undefined', async () => {
+		const { client } = recordingClient({ ok: true });
+
+		const result = await client.mutate({ op: 'complete', taskId: 'task-1' });
+
+		expect(result).toEqual({ ok: true, value: { outcome: undefined } });
+	});
+
+	it('un outcome que no es de los cuatro valores sale undefined, no se propaga tal cual', async () => {
+		const { client } = recordingClient({ ok: true, outcome: 'algo-inventado' });
+
+		const result = await client.mutate({ op: 'complete', taskId: 'task-1' });
+
+		expect(result).toEqual({ ok: true, value: { outcome: undefined } });
 	});
 });
 

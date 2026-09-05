@@ -15,8 +15,9 @@ Dos reglas que explican por qué la API hace lo que hace:
 - **Todo lo que muta pasa por la cola durable.** `createTask`, `completeTask` y `reopenTask` encolan;
   no hablan con la API de Lumbre a pelo. Un 200 de Lumbre significa «aceptada», no «ya existe», y la
   cola es quien relee para confirmarlo.
-- **Nada de aquí escribe en el vault.** La API lee tareas y encola escrituras hacia Lumbre. Tu nota
-  es tuya.
+- **Nada de aquí escribe en el vault, con UNA excepción: `exportToVault()`.** No es una nota que el
+  plugin proyecte ni Markdown que reescriba: es una copia de respaldo pedida a mano (o programada
+  desde fuera), igual de excepcional que el comando que pega el BRL de hoy.
 
 ## La superficie
 
@@ -33,6 +34,7 @@ Dos reglas que explican por qué la API hace lo que hace:
 | `linksForNote(path): LumbreTaskLink[]` | Los vínculos nota ↔ tarea de una nota, por su ruta en el vault. |
 | `openInLumbre(id): void` | Abre la tarea: la app nativa en macOS (con repliegue a la web si no está instalada), y la web en Windows, Linux y móvil, donde nada atiende `lumbre://`. |
 | `weeklySnapshot(options?): Promise<string>` | El Markdown de la foto semanal de la revisión, para pegarlo desde una plantilla. Ver «La foto semanal». |
+| `exportToVault(): Promise<{ path, bytes }>` | Pide la exportación completa a Lumbre y la guarda en el vault. Ver «Exportar a un fichero del vault». |
 | `on(evento, handler): () => void` | Se apunta a un evento. Devuelve cómo darse de baja. |
 | `diagnostics.report(): string` | El informe de diagnóstico en texto plano, el mismo que copia el botón de los ajustes. |
 | `diagnostics.events(n?): LogEvent[]` | Los últimos `n` eventos del registro (300 por defecto), del más viejo al más nuevo. |
@@ -171,6 +173,33 @@ En una plantilla de nota semanal:
 
 ```
 <%* tR += await app.plugins.plugins['lumbre'].api.weeklySnapshot() %>
+```
+
+## Exportar a un fichero del vault
+
+`exportToVault()` hace lo mismo que el comando **Lumbre: Guardar una copia de exportación en el
+vault**: pide `GET /api/export` (la cuenta ENTERA, mismo JSON que el export de la web) y lo escribe
+en `<carpeta de exportaciones>/lumbre-export-YYYY-MM-DD.json`, sobrescribiendo el fichero de HOY si
+ya existe. Es una copia de RESPALDO, no una proyección: el plugin no la relee nunca y el JSON no es
+Markdown.
+
+```js
+const { path, bytes } = await lumbre.exportToVault();
+```
+
+Devuelve la ruta escrita y su tamaño en bytes. Lanza un `Error` si la petición o la escritura
+fallan, con el motivo en castellano.
+
+Sin temporizador propio: para una copia PERIÓDICA (semanal, por ejemplo), la programa quien llama,
+desde fuera.
+
+### Ejemplo: Templater, una copia semanal
+
+En una plantilla que se ejecuta una vez por semana:
+
+```
+<%* const { path, bytes } = await app.plugins.plugins['lumbre'].api.exportToVault();
+tR += `Copia de respaldo guardada en ${path} (${bytes} bytes).`; %>
 ```
 
 ## Eventos

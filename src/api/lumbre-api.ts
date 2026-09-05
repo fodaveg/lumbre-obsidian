@@ -11,8 +11,10 @@
  * - Todo lo que MUTA pasa por la cola durable. Ni un `createTask` ni un
  *   `completeTask` hablan directamente con la API de Lumbre: si lo hicieran, un
  *   200 se leería como un hecho y un corte de red perdería la escritura.
- * - Nada de aquí escribe en el vault. La API lee tareas y encola escrituras
- *   hacia Lumbre; el Markdown es del usuario.
+ * - Nada de aquí escribe en el vault, con UNA excepción: `exportToVault()`. No
+ *   es una nota que el plugin proyecte ni un Markdown que reescriba: es una
+ *   copia de respaldo pedida a mano (o programada desde fuera, por Templater
+ *   o js-engine), igual de excepcional que el comando que pega el BRL de hoy.
  *
  * No importa `obsidian`: la plataforma y el `workspace.trigger` entran por
  * inyección, así que esto se prueba entero con Vitest.
@@ -98,6 +100,12 @@ export interface LumbreApiDeps {
 	 * cliente: aquí solo se expone, para que una plantilla pueda pedirlo.
 	 */
 	weeklySnapshot(options?: WeeklySnapshotOptions): Promise<string>;
+	/**
+	 * Pide la exportación completa y la guarda en el vault. Lo cablea `main.ts`
+	 * (mismo código que el comando de la paleta); aquí solo se expone. LANZA si
+	 * la petición o la escritura fallan.
+	 */
+	exportToVault(): Promise<{ path: string; bytes: number }>;
 }
 
 /**
@@ -230,6 +238,17 @@ export class LumbreApi {
 	async weeklySnapshot(options?: WeeklySnapshotOptions): Promise<string> {
 		this.called('weeklySnapshot', { seed: options?.seed ?? null });
 		return this.deps.weeklySnapshot(options);
+	}
+
+	/**
+	 * Pide la exportación completa a Lumbre y la guarda en el vault, en la
+	 * carpeta de los ajustes. Sin temporizador propio: para una copia SEMANAL,
+	 * quien la quiera la programa desde fuera (Templater, js-engine) llamando a
+	 * esto cuando le convenga. Lanza si la petición o la escritura fallan.
+	 */
+	async exportToVault(): Promise<{ path: string; bytes: number }> {
+		this.called('exportToVault');
+		return this.deps.exportToVault();
 	}
 
 	/** Los vínculos nota ↔ tarea de una nota, por su ruta dentro del vault. */

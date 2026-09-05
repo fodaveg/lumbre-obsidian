@@ -24,13 +24,31 @@ export interface LumbreSettings {
 	 * delante.
 	 */
 	liveLog: boolean;
+	/**
+	 * Carpeta del vault donde «Guardar una copia de exportación en el vault»
+	 * escribe `lumbre-export-YYYY-MM-DD.json`. Decisión mía (no la pidió David):
+	 * dentro de `Lumbre/`, junto a lo demás que el plugin pueda dejar en el
+	 * vault, y no en la raíz.
+	 */
+	exportFolder: string;
 }
 
 export const DEFAULT_SETTINGS: LumbreSettings = {
 	apiOrigin: 'https://app.lumbre.pro',
 	logLevel: DEFAULT_LOG_LEVEL,
 	liveLog: false,
+	exportFolder: 'Lumbre/exportaciones',
 };
+
+/**
+ * Normaliza la carpeta de exportaciones escrita a mano: recorta espacios y
+ * barras de los extremos. `null` si queda vacía, igual que `normalizeOrigin`
+ * con una URL que no vale; el llamador decide qué hacer (aquí, no guardar).
+ */
+export function normalizeExportFolder(raw: string): string | null {
+	const trimmed = raw.trim().replace(/^\/+|\/+$/g, '');
+	return trimmed.length > 0 ? trimmed : null;
+}
 
 /**
  * Lo que la pestaña de ajustes necesita del plugin. Se declara aquí como
@@ -134,6 +152,28 @@ export class LumbreSettingTab extends PluginSettingTab {
 					this.host.createClient().unlockReads('settings');
 				});
 			});
+
+		new Setting(containerEl)
+			.setName('Carpeta de exportaciones')
+			.setDesc(
+				'Dónde guarda «Guardar una copia de exportación en el vault» el JSON de respaldo. Por defecto, Lumbre/exportaciones',
+			)
+			.addText((text) =>
+				text
+					.setPlaceholder(DEFAULT_SETTINGS.exportFolder)
+					.setValue(this.host.config.exportFolder)
+					.onChange(async (value) => {
+						const folder = normalizeExportFolder(value);
+						if (folder === null) {
+							new Notice('Esa carpeta no es válida, no se ha guardado.');
+							this.log.warn('Carpeta de exportaciones no válida, no se guarda');
+							return;
+						}
+						this.host.config.exportFolder = folder;
+						await this.host.saveSettings();
+						this.log.info('Carpeta de exportaciones cambiada', { folder });
+					}),
+			);
 
 		new Setting(containerEl)
 			.setName('Probar conexión')

@@ -20,6 +20,7 @@ vive en Lumbre y la nota es tuya.
 | **Soplo con la selección** | Manda la selección (o el párrafo del cursor) a Soplo y enseña lo que HARÍA, con una casilla por acción. Nada se aplica sin pulsar «Aplicar». También está en el menú contextual del editor. |
 | **Vincular esta nota a una lista** | Escribe la propiedad `lumbre-list` en el frontmatter con el id de la lista elegida, y registra en Lumbre el enlace de vuelta a la nota (solo la RUTA, nunca el contenido): la vista de proyecto lo enseña en «Notas vinculadas». |
 | **Quitar el vínculo con la lista** | Borra esa propiedad y retira el enlace de vuelta en Lumbre. |
+| **Guardar una copia de exportación en el vault** | Pide la cuenta ENTERA (`GET /api/export`) y la guarda como `lumbre-export-YYYY-MM-DD.json` en la carpeta de los ajustes, sobrescribiendo la de hoy si ya existe. Es una copia de RESPALDO: el plugin no la relee ni la proyecta. Ver «Exportar una copia de respaldo». |
 | **Mostrar diagnóstico** | El resumen de estado y los últimos 100 eventos del registro, con botones para copiarlo o guardarlo. Ver «Cuando algo falla». |
 
 **Un panel lateral**, «Tareas de esta nota» (icono en la barra izquierda, o el comando **Abrir las
@@ -47,7 +48,8 @@ completada, archivada o movida desde la app o el móvil): un sondeo barato cada 
 por lo que ha cambiado desde la última vez, y solo si hay algo abierto que lo necesite.
 
 `lumbre-list` es **lo único** que el plugin escribe dentro de una nota por su cuenta. Lo otro que
-puede acabar en un fichero es el BRL de hoy, y solo con el comando que lo pega a mano.
+puede acabar en un fichero es el BRL de hoy (y solo con el comando que lo pega a mano) y la copia de
+exportación (un JSON aparte, nunca una nota, y solo con su propio comando).
 
 ## El bloque `lumbre`
 
@@ -147,6 +149,20 @@ lo informa» en vez de dar un cero que parecería un dato.
 Gasta una petición por lista, en serie y con un intervalo entre medias para no pasarse del límite de
 Lumbre, así que en un vault con muchas listas tarda unos segundos. Lo mismo, desde una plantilla:
 `api.weeklySnapshot()`, documentado en [`docs/API.md`](docs/API.md).
+
+## Exportar una copia de respaldo
+
+**Lumbre: Guardar una copia de exportación en el vault** pide `GET /api/export` (la cuenta ENTERA:
+tareas, calendarios, listas y secciones de «Algún día», plantillas, notas de día, objetivos de
+semana, contextos y hábitos, el mismo JSON que descarga la web) y lo escribe tal cual, byte a byte,
+en `<carpeta de exportaciones>/lumbre-export-YYYY-MM-DD.json`. Por defecto esa carpeta es
+`Lumbre/exportaciones`, configurable en **Ajustes → Lumbre → Carpeta de exportaciones**.
+
+Es una copia de **RESPALDO**, no una proyección: el plugin no la relee nunca, el JSON no es
+Markdown y no se convierte en tareas. Guardarla un mismo día dos veces **sobrescribe** el fichero de
+hoy, con un aviso que lo dice. Solo a mano: sin temporizador ni proceso en segundo plano. Para una
+copia periódica, `api.exportToVault()` (documentado en [`docs/API.md`](docs/API.md)) se puede llamar
+desde una plantilla programada.
 
 ## Guardar la nota en la tarea
 

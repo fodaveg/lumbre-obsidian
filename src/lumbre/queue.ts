@@ -23,6 +23,12 @@
  * cuántas operaciones movió, y los dos casos que suelen ser la explicación de
  * "no se ha enviado nada" (una operación agotada y una cola llena de
  * operaciones de OTRO dispositivo).
+ *
+ * Excepción a "siempre se relee": `POST /api/mutations` puede devolver un
+ * `outcome` (ver `MutationOutcome` en `client.ts`) que YA es la confirmación,
+ * sin gastar una relectura. Solo lo interpretan `status` y `notes` (ver
+ * `outcomeOf`); con `queued` o sin `outcome` (un Lumbre anterior al contrato)
+ * se sigue relayendo como siempre.
  */
 
 import type { Logger } from '../diagnostics/logger';
@@ -33,6 +39,7 @@ import type {
 	ListLinkTarget,
 	LumbreFailure,
 	LumbreResult,
+	MutationOutcome,
 	TaskLinkTarget,
 } from './client';
 import type { LumbreTask, TaskDraft } from './types';
@@ -656,6 +663,22 @@ export class OperationQueue {
 			// Aquí NO se drena: `/api/ingest`, `/api/mutations` y `/api/batch` ya
 			// llaman a `runHeadlessDrain` antes de responder, así que lo recién
 			// aceptado ya está materializándose.
+
+			// `outcome` es la evidencia FUERTE que trae el propio envío, y solo la
+			// interpretan `status` y `notes` (las dos únicas que mandan por
+			// `mutate`): con `applied`/`noop` no hace falta releer, y con
+			// `not-found` releer no cambiaría nada (la tarea ya no está). `queued` o
+			// ausente (un Lumbre anterior al contrato) caen al camino de siempre,
+			// abajo.
+			const outcome = outcomeOf(operation, sent.value);
+			if (outcome === 'applied' || outcome === 'noop') {
+				await this.materializeByOutcome(operation, outcome);
+				return null;
+			}
+			if (outcome === 'not-found') {
+				await this.rejectByOutcome(operation);
+				return null;
+			}
 		} else {
 			// Ya venía aceptada de un flush anterior: ahí sí puede quedar algo sin
 			// drenar. Es el único caso que gasta `POST /api/sync/flush`, y lo comparte
@@ -707,10 +730,21 @@ export class OperationQueue {
 		});
 	}
 
-	private async send(operation: QueuedOperation): Promise<LumbreResult<void>> {
+	/**
+	 * Envía la operación. El resultado lleva SIEMPRE la forma `{ outcome? }`,
+	 * aunque solo la rellenen `status` y `notes` (las dos que mandan por
+	 * `mutate`): así `process` puede mirar `sent.value.outcome` sin un `switch`
+	 * previo por `kind`, y el resto de operaciones simplemente no lo traen.
+	 */
+	private async send(
+		operation: QueuedOperation,
+	): Promise<LumbreResult<{ outcome?: MutationOutcome }>> {
 		switch (operation.kind) {
-			case 'create':
-				return this.options.client.createTask(operation.draft, operation.clientTaskId);
+			case 'create': {
+				const sent = await this.options.client.createTask(operation.draft, operation.clientTaskId);
+				if (!sent.ok) return sent;
+				return { ok: true, value: {} };
+			}
 			case 'status':
 				return this.options.client.mutate({
 					op: 'complete',
@@ -735,7 +769,7 @@ export class OperationQueue {
 				operation.failedItems = sent.value
 					.filter((item) => !item.ok)
 					.map((item) => ({ index: item.index, error: item.error ?? null }));
-				return { ok: true, value: undefined };
+				return { ok: true, value: {} };
 			}
 			case 'listLink': {
 				const target: ListLinkTarget = {
@@ -743,9 +777,12 @@ export class OperationQueue {
 					url: operation.url,
 					label: operation.label,
 				};
-				return operation.type === 'link'
-					? this.options.client.listLink(target)
-					: this.options.client.listUnlink(target);
+				const sent =
+					operation.type === 'link'
+						? await this.options.client.listLink(target)
+						: await this.options.client.listUnlink(target);
+				if (!sent.ok) return sent;
+				return { ok: true, value: {} };
 			}
 			case 'notes':
 				return this.options.client.mutate({
@@ -759,9 +796,12 @@ export class OperationQueue {
 					url: operation.url,
 					label: operation.label,
 				};
-				return operation.type === 'link'
-					? this.options.client.taskLink(target)
-					: this.options.client.taskUnlink(target);
+				const sent =
+					operation.type === 'link'
+						? await this.options.client.taskLink(target)
+						: await this.options.client.taskUnlink(target);
+				if (!sent.ok) return sent;
+				return { ok: true, value: {} };
 			}
 		}
 	}
@@ -794,6 +834,40 @@ export class OperationQueue {
 			}
 		}
 		return 'missing';
+	}
+
+	/**
+	 * Marca `materialized` SIN releer: lo pide un `outcome` de `'applied'` o
+	 * `'noop'`, que ya es la confirmación de que el servidor tocó (o no tocó a
+	 * propósito) la tarea. Gemela de la rama `confirmed` de `confirm()`.
+	 */
+	private async materializeByOutcome(
+		operation: QueuedOperation,
+		outcome: MutationOutcome,
+	): Promise<void> {
+		const from = operation.state;
+		operation.state = 'materialized';
+		operation.error = null;
+		operation.materializedAt = this.stamp();
+		operation.updatedAt = operation.materializedAt;
+		await this.persist(operation);
+		this.logTransition(operation, from, 'Confirmada por el outcome del servidor', { outcome });
+		this.options.onMaterialized?.(operation);
+	}
+
+	/**
+	 * Marca `rejected` SIN gastar un reintento: lo pide un `outcome` de
+	 * `'not-found'`, que ya dice que la tarea no está en el store del dueño del
+	 * token (inexistente, borrada o archivada). Reintentar no la haría
+	 * reaparecer.
+	 */
+	private async rejectByOutcome(operation: QueuedOperation): Promise<void> {
+		const from = operation.state;
+		operation.state = 'rejected';
+		operation.error = 'La tarea ya no existe en Lumbre o está archivada.';
+		operation.updatedAt = this.stamp();
+		await this.persist(operation);
+		this.logTransition(operation, from, operation.error, { outcome: 'not-found' }, 'error');
 	}
 
 	/**
@@ -1071,18 +1145,33 @@ export function describeFailedItems(items: readonly BatchFailedItem[]): string {
 }
 
 /**
+ * El `outcome` que trae un envío, pero SOLO para `status` y `notes`: son las
+ * dos únicas cuyo objetivo es una tarea existente y cuyo `not-found` significa
+ * de verdad "esa tarea ya no está". El resto de `kind`s (incluido `brl`, que
+ * también manda por `mutate`) lo ignora a propósito: un `create` apunta a una
+ * tarea que el propio plugin acaba de inventar, y su `not-found` no cabe.
+ */
+function outcomeOf(
+	operation: QueuedOperation,
+	value: { outcome?: MutationOutcome },
+): MutationOutcome | undefined {
+	if (operation.kind !== 'status' && operation.kind !== 'notes') return undefined;
+	return value.outcome;
+}
+
+/**
  * `true` si la tarea leída ya refleja lo que pedía la operación.
  *
- * LÍMITE CONOCIDO, y no se puede cerrar desde aquí: un `status` se confirma solo
- * por `done`, así que reabrir una tarea que en Lumbre YA estaba abierta (o
- * completar una que ya estaba hecha) se da por materializado al instante,
- * aunque la mutación no se haya aplicado. Lo que lo distinguiría es una marca de
- * última escritura de la tarea posterior al `sentAt` de la operación, y
- * `GET /api/tasks` no la sirve: `serializeTask` (repo de Lumbre) devuelve
- * `createdAt` y `notesUpdatedAt`, y ninguno de los dos se mueve al completar o
- * reabrir. En cuanto la API exponga un `updatedAt` de la fila, la condición pasa
- * a ser `done` coincidente Y `updatedAt >= sentAt` (test en `queue.test.ts`,
- * hoy `it.todo`).
+ * Solo se llama por RELECTURA, o sea cuando `process` no ha podido resolver el
+ * envío por `outcome` (ver `outcomeOf`): un `create` (que no tiene outcome), o
+ * un `status`/`notes` contra un Lumbre anterior al contrato, o con `outcome:
+ * 'queued'`. Con outcome disponible, `'applied'`/`'noop'` ya distinguen si la
+ * mutación CAMBIÓ algo, que es justo lo que esta función no puede saber: un
+ * `status` se confirma aquí solo por `done`, así que reabrir una tarea que en
+ * Lumbre YA estaba abierta (o completar una que ya estaba hecha) se da por
+ * materializado al instante, haya llegado a aplicarse la mutación o no. Este
+ * límite se documentaba como H7 (`docs/ESTADO.md`, lote H) y lo cierra el
+ * `outcome`, no esta función: contra un servidor sin él, sigue vigente.
  */
 function matchesOperation(operation: CreateOperation | StatusOperation, task: LumbreTask): boolean {
 	// Para un `create` basta con que la tarea EXISTA: el id lo fijamos nosotros.

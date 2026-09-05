@@ -5,13 +5,13 @@ import {
 	Platform,
 	Plugin,
 	requestUrl,
+	TFile,
 	type Editor,
 	type MarkdownFileInfo,
 	type MarkdownPostProcessorContext,
 	type MarkdownView,
 	type Menu,
 	type TAbstractFile,
-	type TFile,
 	type WorkspaceLeaf,
 } from 'obsidian';
 
@@ -30,6 +30,7 @@ import { BrlEntryModal } from './brl/brl-modal';
 import { BRL_TODAY, brlCreateOp, type BrlKind } from './brl/brl-ops';
 import { DiagnosticsModal } from './diagnostics/diagnostics-modal';
 import { describeError } from './diagnostics/errors';
+import { exportFilePath } from './export/export-path';
 import {
 	LiveLog,
 	logsFolder,
@@ -269,6 +270,11 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			buildReport: () => this.buildReport(),
 			weeklySnapshot: (options?: WeeklySnapshotOptions) =>
 				this.weeklySnapshot(options).then((snapshot) => snapshot.markdown),
+			exportToVault: async () => {
+				const result = await this.writeExportToVault();
+				if (!result.ok) throw new Error(describeFailure(result.reason, result.status));
+				return { path: result.value.path, bytes: result.value.bytes };
+			},
 		});
 
 		this.addSettingTab(new LumbreSettingTab(this.app, this));
@@ -769,6 +775,14 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		});
 
 		this.addCommand({
+			id: 'export-to-vault',
+			name: 'Guardar una copia de exportación en el vault',
+			callback: this.command('export-to-vault', () => {
+				void this.runExportToVault();
+			}),
+		});
+
+		this.addCommand({
 			id: 'show-diagnostics',
 			name: 'Mostrar diagnóstico',
 			callback: this.command('show-diagnostics', () => {
@@ -913,6 +927,68 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 						snapshot.failures === 1 ? 'apartado' : 'apartados'
 					} sin leer`,
 		);
+	}
+
+	// ── Exportación al vault ─────────────────────────────────────────────────
+
+	/**
+	 * «Guardar una copia de exportación en el vault»: pide `GET /api/export`
+	 * (la cuenta ENTERA) y la escribe en `<exportFolder>/lumbre-export-
+	 * YYYY-MM-DD.json`. Es una copia de RESPALDO, no una proyección: el plugin
+	 * no la relee nunca y el JSON no es Markdown, así que no entra ninguna de
+	 * las reglas de "Lumbre manda sobre la tarea". Solo a mano: sin
+	 * temporizador ni proceso en segundo plano.
+	 */
+	private async runExportToVault(): Promise<void> {
+		new Notice('Pidiendo la exportación a Lumbre…');
+		const result = await this.writeExportToVault();
+		if (!result.ok) {
+			this.log.warn('No se pudo guardar la exportación', {
+				reason: result.reason,
+				status: result.status,
+			});
+			new Notice(describeFailure(result.reason, result.status));
+			return;
+		}
+
+		const { path, bytes, overwritten } = result.value;
+		new Notice(
+			`${overwritten ? 'Exportación sobrescrita' : 'Exportación guardada'} en ${path} (${formatBytes(bytes)})`,
+		);
+	}
+
+	/**
+	 * Hace el trabajo de verdad, sin tocar la interfaz: la comparte el comando
+	 * (que enseña un Notice) y `api.exportToVault()` (que lanza si falla, como
+	 * el resto de la API pública). Crea la carpeta si falta y SOBRESCRIBE el
+	 * fichero de HOY si ya existe (`overwritten` lo dice, para el aviso).
+	 */
+	private async writeExportToVault(): Promise<
+		LumbreResult<{ path: string; bytes: number; overwritten: boolean }>
+	> {
+		const read = await this.client.exportData();
+		if (!read.ok) return read;
+
+		const folder = normalizePath(this.config.exportFolder);
+		if (this.app.vault.getAbstractFileByPath(folder) === null) {
+			await this.app.vault.createFolder(folder);
+		}
+
+		const path = normalizePath(exportFilePath(folder, new Date()));
+		const existing = this.app.vault.getAbstractFileByPath(path);
+		const overwritten = existing instanceof TFile;
+		if (overwritten) {
+			await this.app.vault.modify(existing, read.value.text);
+		} else {
+			await this.app.vault.create(path, read.value.text);
+		}
+
+		this.log.info('Exportación guardada en el vault', {
+			path,
+			bytes: read.value.bytes,
+			overwritten,
+		});
+		return { ok: true, value: { path, bytes: read.value.bytes, overwritten } };
 	}
 
 	// ── Guardar la nota en la tarea ───────────────────────────────────────────

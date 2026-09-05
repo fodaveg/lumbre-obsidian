@@ -9,6 +9,7 @@ import type {
 	LumbreFailure,
 	LumbreResult,
 	MutationOp,
+	MutationOutcome,
 	TaskLinkRow,
 	TaskLinkTarget,
 } from './client';
@@ -99,7 +100,14 @@ function fakeClient() {
 		createTask: vi.fn(
 			async (_draft: TaskDraft, _clientTaskId: string): Promise<LumbreResult<void>> => OK,
 		),
-		mutate: vi.fn(async (_op: MutationOp): Promise<LumbreResult<void>> => OK),
+		// Sin `outcome`, como un Lumbre anterior al contrato: la cola sigue
+		// releyendo como siempre. Los tests de `outcome` lo sobrescriben.
+		mutate: vi.fn(
+			async (_op: MutationOp): Promise<LumbreResult<{ outcome?: MutationOutcome }>> => ({
+				ok: true,
+				value: {},
+			}),
+		),
 		flush: vi.fn(async (): Promise<LumbreResult<void>> => OK),
 		getTask: vi.fn(
 			async (_id: string): Promise<LumbreResult<LumbreTask | null>> => ({
@@ -250,15 +258,116 @@ describe('OperationQueue: completar una tarea', () => {
 		expect(storage.operations[0]?.attempts).toBe(1);
 	});
 
-	// Reabrir una tarea que en Lumbre YA estaba abierta se confirma al instante:
-	// la relectura ve `done: false`, que es lo que pedía la operación, y no hay
-	// forma de saber si la mutación llegó a aplicarse. La única señal que lo
-	// distinguiría es una marca de ÚLTIMA ESCRITURA de la tarea posterior al
-	// `sentAt`, y `GET /api/tasks` no la sirve: `serializeTask` (repo de Lumbre)
-	// devuelve `createdAt` y `notesUpdatedAt`, y ninguno se mueve al completar o
-	// reabrir. Queda pendiente de que la API exponga un `updatedAt` de la fila.
-	// Ver `matchesOperation` en `queue.ts`.
-	it.todo('una relectura con `done` igual pero anterior al envío NO confirma');
+	// H7, ya cerrado por el `outcome` del servidor (contrato del 2026-09-03,
+	// commit `9e44cca9`): reabrir una tarea que en Lumbre YA estaba abierta
+	// responde `noop`, y eso es justo lo que antes no se podía distinguir de un
+	// `applied` de verdad. Ver `matchesOperation` en `queue.ts` para el límite
+	// que sigue vigente contra un Lumbre SIN el contrato (más abajo, describe
+	// «outcome de las mutaciones»).
+	it('reabrir una tarea que ya estaba abierta responde noop y queda materialized sin relectura', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'noop' } });
+		const queue = queueWith(client, storage);
+		await queue.enqueueStatus('task-1', false, TARGET);
+
+		await queue.flush();
+
+		expect(client.mutate).toHaveBeenCalledWith({ op: 'complete', taskId: 'task-1', done: false });
+		expect(client.getTask).not.toHaveBeenCalled();
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+});
+
+describe('OperationQueue: outcome de las mutaciones (status y notes)', () => {
+	it.each<['status' | 'notes', MutationOutcome]>([
+		['status', 'applied'],
+		['status', 'noop'],
+		['notes', 'applied'],
+		['notes', 'noop'],
+	])('%s con outcome %s queda materialized SIN relectura', async (kind, outcome) => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome } });
+		const queue = queueWith(client, storage);
+		if (kind === 'status') {
+			await queue.enqueueStatus('task-1', true, TARGET);
+		} else {
+			await queue.enqueueNotes('task-1', 'Notas', 'cabecera', TARGET);
+		}
+
+		await queue.flush();
+
+		expect(client.getTask).not.toHaveBeenCalled();
+		expect(storage.operations[0]?.state).toBe('materialized');
+		expect(storage.operations[0]?.materializedAt).not.toBeNull();
+	});
+
+	it.each<'status' | 'notes'>(['status', 'notes'])(
+		'%s con outcome not-found queda rejected, sin gastar un intento ni releer',
+		async (kind) => {
+			const storage = memoryStorage();
+			const client = fakeClient();
+			client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'not-found' } });
+			const queue = queueWith(client, storage);
+			if (kind === 'status') {
+				await queue.enqueueStatus('task-1', true, TARGET);
+			} else {
+				await queue.enqueueNotes('task-1', 'Notas', 'cabecera', TARGET);
+			}
+
+			await queue.flush();
+
+			expect(client.getTask).not.toHaveBeenCalled();
+			expect(storage.operations[0]?.state).toBe('rejected');
+			expect(storage.operations[0]?.attempts).toBe(0);
+			expect(storage.operations[0]?.error).toContain('ya no existe');
+		},
+	);
+
+	it('status con outcome queued sigue el camino de siempre: sent y relectura', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'queued' } });
+		const queue = queueWith(client, storage);
+		await queue.enqueueStatus('task-1', true, TARGET);
+
+		await queue.flush();
+
+		expect(client.getTask).toHaveBeenCalledTimes(2);
+		expect(storage.operations[0]).toMatchObject({ state: 'sent', attempts: 1 });
+	});
+
+	it('status sin outcome (Lumbre anterior al contrato) sigue el camino de siempre', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.getTask.mockResolvedValue({ ok: true, value: task({ done: true }) });
+		const queue = queueWith(client, storage);
+		await queue.enqueueStatus('task-1', true, TARGET);
+
+		await queue.flush();
+
+		expect(client.getTask).toHaveBeenCalledWith('task-1');
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('create y brl ignoran outcome aunque el servidor lo mande: siguen relayendo', async () => {
+		// `brl` manda por `mutate` (createBrlEntry) igual que `status`/`notes`,
+		// pero `outcomeOf` lo excluye a propósito: su `not-found` no cabe (la
+		// entrada la crea el propio plugin) y su relectura es OTRA (el JSON del
+		// día, no `getTask`).
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'applied' } });
+		client.brlJson.mockResolvedValue({ ok: true, value: { date: '2026-09-05', entries: [] } });
+		const queue = queueWith(client, storage);
+		await queue.enqueueBrl('2026-09-05', '- Nota', TARGET);
+
+		await queue.flush();
+
+		expect(client.brlJson).toHaveBeenCalled();
+		expect(storage.operations[0]?.state).toBe('sent');
+	});
 });
 
 describe('OperationQueue: fallos', () => {
@@ -925,7 +1034,7 @@ describe('OperationQueue: encolar durante un flush en vuelo', () => {
 		const gate = deferred();
 		client.mutate.mockImplementationOnce(async () => {
 			await gate.promise;
-			return OK;
+			return { ok: true, value: {} };
 		});
 		const queue = queueWith(client, storage);
 		await queue.enqueueStatus('task-1', true, TARGET);

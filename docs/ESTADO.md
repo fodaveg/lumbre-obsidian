@@ -489,3 +489,47 @@
     activo).
   - **Qué falta**: nada pendiente de este lote; ver la lista `lumbre-obsidian` de Lumbre por si hay
     deuda nueva.
+- **Lote O: `outcome` de las mutaciones y exportación al vault** (contrato cerrado con el servidor,
+  commit `9e44cca9` del repo de Lumbre, tarea `908ebaec` de la lista `lumbre-obsidian`). El servidor
+  todavía NO tiene esta rama desplegada al escribir esto: el plugin tolera un Lumbre sin `outcome` y
+  sin `GET /api/export`, tratándolos como ausentes.
+  - **`outcome`**: `client.mutate()` (`src/lumbre/client.ts`) devuelve ahora
+    `LumbreResult<{ outcome?: MutationOutcome }>`, con `outcome` uno de `'applied' | 'noop' |
+    'not-found' | 'queued'` si el JSON de la respuesta lo trae y es uno de los cuatro valores;
+    `undefined` en cualquier otro caso (campo ausente, valor que no reconoce, o un Lumbre anterior al
+    contrato). La cola (`src/lumbre/queue.ts`) lo interpreta SOLO para `status` y `notes` (`outcomeOf`):
+    con `applied`/`noop` pasa a `materialized` DIRECTAMENTE, sin releer (`materializeByOutcome`); con
+    `not-found`, a `rejected` sin gastar un intento (`rejectByOutcome`, mensaje «La tarea ya no existe
+    en Lumbre o está archivada»); con `queued` o sin `outcome`, sigue el camino de siempre (`sent` y
+    relectura). `create` (que no manda por `mutate`), `brl` (que sí manda por `mutate` pero cuyo
+    `not-found` no cabe: la entrada la crea el propio plugin) y `batch`/`listLink`/`taskLink` no
+    cambian.
+  - **H7 cerrado**: el `it.todo` de `queue.test.ts` sobre reabrir una tarea ya abierta ahora es un test
+    real, con `outcome: 'noop'`. El límite documentado en `matchesOperation` (una relectura por `done`
+    no puede distinguir «cambió» de «ya estaba así») sigue vigente, pero SOLO contra un Lumbre sin el
+    contrato: con `outcome` disponible, `process` ni siquiera llama a `confirm()`.
+  - **Exportación**: `client.exportData()` (`GET /api/export`, cubo propio `EXPORT_RATE_LIMIT` = 10/min,
+    por el pestillo de lecturas) devuelve el texto TAL CUAL lo mandó el servidor (nunca se parsea ni se
+    reserializa: es un fichero de respaldo y tiene que ser byte a byte lo que sirvió Lumbre) más sus
+    bytes REALES en UTF-8 (`TextEncoder`, no `.length`, que subestima cualquier carácter fuera de ASCII).
+  - **El comando y la API**: «Guardar una copia de exportación en el vault» (`src/main.ts`,
+    `writeExportToVault`) crea la carpeta si falta (`vault.createFolder`) y escribe
+    `<exportFolder>/lumbre-export-YYYY-MM-DD.json` con `vault.create`, o `vault.modify` si el de hoy ya
+    existe (`instanceof TFile`, con Notice que dice que se sobrescribe). `api.exportToVault()`
+    (`src/api/lumbre-api.ts`) comparte el mismo método interno y LANZA si la petición o la escritura
+    fallan, como el resto de la API pública; sin temporizador propio, para que una copia periódica la
+    programe quien llama desde fuera (Templater, js-engine).
+  - **El ajuste**: `exportFolder` en `LumbreSettings` (`src/settings.ts`), por defecto
+    `Lumbre/exportaciones` (decisión mía, no la pidió David), con su propio campo de texto en Ajustes y
+    `normalizeExportFolder` (recorta espacios y barras de los extremos; vacío cae al valor de fábrica).
+    `PLUGIN_DATA_VERSION` sube a 5; un `data.json` de la 4 lo estrena en su valor por defecto sin perder
+    nada.
+  - **Módulo nuevo**: `src/export/export-path.ts` (puro, con tests): `exportFileName` (fecha LOCAL del
+    dispositivo, nunca la del servidor que trae `Content-Disposition`: son ficheros de sitios
+    distintos) y `exportFilePath`.
+  - **Decisiones**: el nombre del fichero se recalcula en LOCAL en vez de leer el de
+    `Content-Disposition`, porque ese nombre es el de una DESCARGA y aquí no hay ninguna: el plugin
+    escribe el fichero él mismo. `outcomeOf` excluye `brl` a propósito aunque también mande por
+    `mutate`: su relectura es OTRA (el JSON del día, no `getTask`) y su target no es una tarea
+    existente. El registro de la exportación apunta bytes y milisegundos, nunca el contenido (que
+    puede llevar títulos y notas de tareas).

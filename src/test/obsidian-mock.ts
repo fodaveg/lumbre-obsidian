@@ -53,6 +53,15 @@ export class SuggestModal {}
 export class ItemView {}
 
 /**
+ * Solo para el `instanceof TFile` de `main.ts` al escribir la exportación en
+ * el vault (`vault.getAbstractFileByPath` puede devolver uno). Ningún test
+ * monta una instancia real: basta con que la CLASE exista para que la
+ * comprobación no reviente al cargar el módulo.
+ */
+export class TFile {}
+export class TFolder {}
+
+/**
  * A diferencia del resto de esta clase, SÍ guarda `containerEl` (mismo
  * contrato que `obsidian.d.ts`): `task-block.ts` lo usa para pintar, y sin
  * esto cualquier test que monte `LumbreTaskBlock` vería `containerEl`

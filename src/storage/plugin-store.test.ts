@@ -118,6 +118,36 @@ describe('PluginStore: migración desde el data.json viejo', () => {
 		expect((await store.load()).settings.logLevel).toBe(DEFAULT_SETTINGS.logLevel);
 	});
 
+	it('un data.json de la versión 4 (sin exportFolder) migra con el valor de fábrica', async () => {
+		const host = memoryHost({ version: 4, settings: {}, token: null, queue: [], links: [] });
+		const store = new PluginStore(host);
+
+		const data = await store.load();
+
+		expect(data.version).toBe(PLUGIN_DATA_VERSION);
+		expect(data.settings.exportFolder).toBe(DEFAULT_SETTINGS.exportFolder);
+	});
+
+	it('una carpeta de exportaciones vacía o solo de espacios cae al valor de fábrica', async () => {
+		const host = memoryHost({
+			version: PLUGIN_DATA_VERSION,
+			settings: { exportFolder: '   ' },
+		});
+		const store = new PluginStore(host);
+
+		expect((await store.load()).settings.exportFolder).toBe(DEFAULT_SETTINGS.exportFolder);
+	});
+
+	it('una carpeta de exportaciones escrita se conserva tal cual', async () => {
+		const host = memoryHost({
+			version: PLUGIN_DATA_VERSION,
+			settings: { exportFolder: 'Respaldo/Lumbre' },
+		});
+		const store = new PluginStore(host);
+
+		expect((await store.load()).settings.exportFolder).toBe('Respaldo/Lumbre');
+	});
+
 	it('un data.json de la versión 2 (sin noteListLinks) migra con el registro vacío', async () => {
 		const host = memoryHost({ version: 2, settings: {}, token: null, queue: [], links: [] });
 		const store = new PluginStore(host);
