@@ -59,3 +59,11 @@ guiones largos como inciso: coma, punto o paréntesis.
 - `src/settings.ts`: pestaña de ajustes.
 - `src/token-store.ts`: almacén del token detrás de una interfaz.
 - `scripts/verify-release.mjs`: coherencia de versión, tag sin prefijo `v` y assets publicados.
+
+## Cierre de versión
+
+En orden, sin saltos: `npm run check` en verde; `docs/ESTADO.md` con la versión nueva; `npm version patch|minor`
+(corre `version-bump.mjs` y añade `manifest.json` y `versions.json` al commit; el `.npmrc` quita el prefijo `v`
+del tag); `git push --follow-tags`. `release.yml` repite el gate y publica `main.js`, `manifest.json` y
+`styles.css` sueltos, que es lo que BRAT consume. La publicación la lanza David a mano con
+`~/publicar-lumbre-obsidian.sh`. Sin verde no se etiqueta.
