@@ -79,6 +79,11 @@ import {
 	type WeeklySnapshotDeps,
 	type WeeklySnapshotOptions,
 } from './review/weekly-snapshot';
+import {
+	sendLinesAsTasks,
+	titlesToBatches,
+	type SendLinesOutcome,
+} from './send-lines/send-lines-flow';
 import { planToBatches, type PlanBatch } from './soplo/plan-to-ops';
 import { SoploModal } from './soplo/soplo-modal';
 import { taskFromDraft, type LumbreTask, type TaskDraft } from './lumbre/types';
@@ -90,7 +95,7 @@ import {
 } from './settings';
 import { PluginStore, type DeviceIdStore } from './storage/plugin-store';
 import { PluginDataTokenStore, type TokenStore } from './token-store';
-import { draftFromEditor, type EditorContext } from './ui/draft-from-editor';
+import { draftFromEditor, linesFromSelection, type EditorContext } from './ui/draft-from-editor';
 import { ListSuggestModal } from './ui/list-suggest-modal';
 import { openTaskInLumbre } from './ui/open-in-lumbre';
 import {
@@ -691,6 +696,17 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 				'send-task',
 				(editor: Editor, context: MarkdownView | MarkdownFileInfo) => {
 					void this.openSendModal(context.file ?? null, editorContext(editor));
+				},
+			),
+		});
+
+		this.addCommand({
+			id: 'send-lines-as-tasks',
+			name: 'Enviar como tareas',
+			editorCallback: this.command(
+				'send-lines-as-tasks',
+				(editor: Editor, context: MarkdownView | MarkdownFileInfo) => {
+					void this.sendSelectionAsTasks(context.file ?? null, editor);
 				},
 			),
 		});
@@ -1410,6 +1426,79 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		}
 		if (file !== null && navigator.onLine) await this.links.refresh(file.path, this.client);
 		this.notifyDataChange();
+	}
+
+	/**
+	 * «Enviar como tareas»: UNA tarea por línea seleccionada, en un solo
+	 * `POST /api/batch` (o varios, trocheado, si la selección pasa de
+	 * `MAX_BATCH_OPS`). El título de cada tarea ES la línea, así que no hay nada
+	 * que dejarle editar al usuario en un modal: se manda directo, sin abrir uno.
+	 *
+	 * Sin selección se manda la línea del cursor como si fuera la selección
+	 * entera: por eso no hace falta un comando aparte para una sola línea, esta
+	 * misma cubre la variante de un solo título.
+	 *
+	 * El texto de la nota NO se toca, igual que «Enviar como tarea».
+	 */
+	private async sendSelectionAsTasks(file: TFile | null, editor: Editor): Promise<void> {
+		const selection = editor.getSelection();
+		const raw = selection.length > 0 ? selection : editor.getLine(editor.getCursor().line);
+		const titles = linesFromSelection(raw);
+		if (titles.length === 0) {
+			this.log.info('Enviar como tareas sin líneas que mandar');
+			new Notice('No hay ninguna línea con texto que enviar.');
+			return;
+		}
+
+		const target: LinkTarget = {
+			notePath: file?.path ?? '',
+			label: file?.basename ?? 'Sin nota',
+			excerpt: null,
+		};
+		const listId = file === null ? null : readNoteListId(this.app, file);
+		const { batches, total } = titlesToBatches(titles, listId);
+		this.logger.child('modal').info('Acción del usuario', {
+			action: 'enviar como tareas',
+			notePath: target.notePath,
+			lines: total,
+			batches: batches.length,
+		});
+
+		const outcome = await sendLinesAsTasks(
+			{ queue: this.queue, links: this.links },
+			batches,
+			target,
+			this.lists.refFor(listId),
+		);
+		this.notifyDataChange();
+		this.reportSendLinesOutcome(outcome);
+
+		if (file !== null && navigator.onLine) await this.links.refresh(file.path, this.client);
+		this.notifyDataChange();
+	}
+
+	/**
+	 * Qué le dice al usuario el envío de líneas, ya drenado. Un lote rechazado
+	 * ENTERO es lo primero que se avisa (nada de ese lote ha entrado); el éxito
+	 * parcial va aparte, porque el resto SÍ está aplicado.
+	 */
+	private reportSendLinesOutcome(outcome: SendLinesOutcome): void {
+		if (outcome.rejected.length > 0) {
+			this.log.error('Lumbre rechazó parte del envío', { reasons: outcome.rejected });
+			new Notice(outcome.rejected[0] ?? 'Lumbre rechazó el envío.');
+		}
+		if (outcome.failed.length > 0) {
+			this.log.warn('Lumbre no aceptó parte de las líneas', {
+				failed: describeFailedItems(outcome.failed),
+			});
+			new Notice(
+				`Lumbre no ha creado ${outcome.failed.length} de ${outcome.total} tareas: ${describeFailedItems(outcome.failed)}`,
+			);
+			return;
+		}
+		if (outcome.rejected.length === 0) {
+			new Notice(`${outcome.total} ${outcome.total === 1 ? 'tarea enviada' : 'tareas enviadas'} a Lumbre`);
+		}
 	}
 
 	/**
