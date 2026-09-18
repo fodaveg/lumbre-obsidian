@@ -32,7 +32,13 @@ import { RefTaskCache } from './blocks/ref-chip-cache';
 import { RefChipRenderer, type RefChipHost } from './blocks/ref-chip-postprocessor';
 import { LUMBRE_BLOCK_LANGUAGE, LumbreTaskBlock, type TaskBlockHost } from './blocks/task-block';
 import { BrlEntryModal } from './brl/brl-modal';
-import { BRL_TODAY, brlCreateOp, type BrlKind } from './brl/brl-ops';
+import {
+	BRL_TODAY,
+	brlCreateOp,
+	removeBrlEntryMutation,
+	updateBrlEntryMutation,
+	type BrlKind,
+} from './brl/brl-ops';
 import { DiagnosticsModal } from './diagnostics/diagnostics-modal';
 import { describeError } from './diagnostics/errors';
 import {
@@ -1011,6 +1017,66 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		if (after?.state === 'rejected') {
 			this.log.error('Lumbre rechazó la entrada del BRL', { id: queued.id, error: after.error });
 			new Notice(after.error ?? 'Lumbre rechazó la entrada del BRL.');
+		}
+		await this.refreshBrl();
+	}
+
+	/**
+	 * Edita una entrada que ya existe, desde el bloque en vivo. Mismo trato que
+	 * `setTaskDone`: encola, drena y solo avisa con un Notice si Lumbre RECHAZÓ la
+	 * operación. El refresco del día va aparte (`refreshBrl`): a diferencia de las
+	 * tareas, `onMaterialized` no caduca la caché del BRL (ver su JSDoc).
+	 */
+	private async updateBrlEntry(
+		date: string,
+		entryId: string,
+		raw: string,
+		kind: BrlKind,
+		notePath: string,
+	): Promise<void> {
+		const mutation = updateBrlEntryMutation(date, entryId, raw, kind);
+		if (mutation === null) {
+			this.log.warn('Edición del BRL vacía, no se encola');
+			new Notice('La entrada no puede quedar vacía.');
+			return;
+		}
+		const file = notePath.length === 0 ? null : this.app.vault.getFileByPath(notePath);
+		this.logger.child('block').info('Acción del usuario', { action: 'editar entrada del BRL', entryId });
+
+		const operation = await this.queue.enqueueMutation(mutation.op, mutation.check, {
+			notePath,
+			label: file?.basename ?? 'Sin nota',
+			excerpt: null,
+		});
+		this.notifyDataChange();
+
+		await this.queue.flush();
+		const after = this.queue.pending().find((candidate) => candidate.id === operation.id);
+		if (after?.state === 'rejected') {
+			this.log.error('Lumbre rechazó la edición del BRL', { id: operation.id, error: after.error });
+			new Notice(after.error ?? 'Lumbre rechazó la edición.');
+		}
+		await this.refreshBrl();
+	}
+
+	/** Borra una entrada que ya existe, desde el bloque en vivo. Mismo trato que `updateBrlEntry`. */
+	private async removeBrlEntry(date: string, entryId: string, notePath: string): Promise<void> {
+		const mutation = removeBrlEntryMutation(date, entryId);
+		const file = notePath.length === 0 ? null : this.app.vault.getFileByPath(notePath);
+		this.logger.child('block').info('Acción del usuario', { action: 'borrar entrada del BRL', entryId });
+
+		const operation = await this.queue.enqueueMutation(mutation.op, mutation.check, {
+			notePath,
+			label: file?.basename ?? 'Sin nota',
+			excerpt: null,
+		});
+		this.notifyDataChange();
+
+		await this.queue.flush();
+		const after = this.queue.pending().find((candidate) => candidate.id === operation.id);
+		if (after?.state === 'rejected') {
+			this.log.error('Lumbre rechazó el borrado del BRL', { id: operation.id, error: after.error });
+			new Notice(after.error ?? 'Lumbre rechazó el borrado.');
 		}
 		await this.refreshBrl();
 	}
@@ -2094,6 +2160,11 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		return {
 			cache: this.brl,
 			app: this.app,
+			queue: this.queue,
+			updateEntry: (date: string, entryId: string, raw: string, kind: BrlKind, notePath: string) =>
+				this.updateBrlEntry(date, entryId, raw, kind, notePath),
+			removeEntry: (date: string, entryId: string, notePath: string) =>
+				this.removeBrlEntry(date, entryId, notePath),
 			onDataChange: (listener: () => void) => {
 				this.dataListeners.add(listener);
 				return () => this.dataListeners.delete(listener);

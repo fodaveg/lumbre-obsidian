@@ -6,10 +6,14 @@ import {
 	brlCreateOp,
 	brlEntryPresent,
 	brlEntryText,
+	brlKindOf,
 	brlMarker,
 	MAX_BRL_ENTRY_LENGTH,
 	parseBrlDate,
 	parseBrlQuery,
+	removeBrlEntryMutation,
+	stripBrlMarker,
+	updateBrlEntryMutation,
 } from './brl-ops';
 
 function day(entries: BrlDay['entries']): BrlDay {
@@ -62,6 +66,64 @@ describe('brlCreateOp', () => {
 
 	it('sin texto no hay operación que encolar', () => {
 		expect(brlCreateOp('  ', 'note')).toBeNull();
+	});
+});
+
+describe('brlKindOf y stripBrlMarker', () => {
+	it('lee el tipo del marcador delantero', () => {
+		expect(brlKindOf('- Llamé al fontanero')).toBe('note');
+		expect(brlKindOf('= No me apetece nada')).toBe('thought');
+	});
+
+	it('sin marcador es nota, igual que brlEntryText', () => {
+		expect(brlKindOf('Llamé al fontanero')).toBe('note');
+	});
+
+	it('quita el marcador y el espacio que lo sigue', () => {
+		expect(stripBrlMarker('- Llamé al fontanero')).toBe('Llamé al fontanero');
+		expect(stripBrlMarker('=   Ya está')).toBe('Ya está');
+	});
+});
+
+describe('updateBrlEntryMutation', () => {
+	it('conserva el marcador cuando el tipo no cambia', () => {
+		const mutation = updateBrlEntryMutation('2026-09-03', 'entry-1', 'Llamé al fontanero', 'note');
+
+		expect(mutation).toEqual({
+			op: { op: 'updateBrlEntry', entryId: 'entry-1', entry: '- Llamé al fontanero' },
+			check: { check: 'brlEntry', date: '2026-09-03', entryId: 'entry-1', entry: '- Llamé al fontanero' },
+		});
+	});
+
+	it('cambiar el tipo cambia el marcador que se manda', () => {
+		const mutation = updateBrlEntryMutation('2026-09-03', 'entry-1', 'Llamé al fontanero', 'thought');
+
+		expect(mutation?.op).toEqual({
+			op: 'updateBrlEntry',
+			entryId: 'entry-1',
+			entry: '= Llamé al fontanero',
+		});
+		expect(mutation?.check).toEqual({
+			check: 'brlEntry',
+			date: '2026-09-03',
+			entryId: 'entry-1',
+			entry: '= Llamé al fontanero',
+		});
+	});
+
+	it('un texto vacío no da mutación que encolar', () => {
+		expect(updateBrlEntryMutation('2026-09-03', 'entry-1', '   ', 'note')).toBeNull();
+	});
+});
+
+describe('removeBrlEntryMutation', () => {
+	it('pide la entrada AUSENTE en la relectura', () => {
+		const mutation = removeBrlEntryMutation('2026-09-03', 'entry-1');
+
+		expect(mutation).toEqual({
+			op: { op: 'removeBrlEntry', entryId: 'entry-1' },
+			check: { check: 'brlEntry', date: '2026-09-03', entryId: 'entry-1', entry: null },
+		});
 	});
 });
 

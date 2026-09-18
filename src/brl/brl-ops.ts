@@ -15,7 +15,8 @@
  *   para cualquier otro día. Mandarla desde aquí sería adivinar la zona.
  */
 
-import type { BrlDay } from '../lumbre/client';
+import type { BrlDay, MutationOp } from '../lumbre/client';
+import type { MutationCheck } from '../lumbre/queue';
 
 /** Los dos tipos de entrada del registro. */
 export type BrlKind = 'note' | 'thought';
@@ -62,6 +63,70 @@ export interface BrlCreateOp {
 export function brlCreateOp(raw: string, kind: BrlKind, date = BRL_TODAY): BrlCreateOp | null {
 	const entry = brlEntryText(raw, kind);
 	return entry === null ? null : { date, entry };
+}
+
+/**
+ * El tipo de una entrada YA canónica (con marcador), leído de su primer
+ * carácter. Es lo que hace falta al abrir la edición de una entrada existente,
+ * para saber qué tipo tenía antes de tocarla y poder avisar si el tipo nuevo
+ * es distinto (ver `updateBrlEntryMutation`).
+ */
+export function brlKindOf(entry: string): BrlKind {
+	return entry.trimStart().startsWith('=') ? 'thought' : 'note';
+}
+
+/** El texto de una entrada YA canónica, sin su marcador delante. Para prellenar un campo de edición. */
+export function stripBrlMarker(entry: string): string {
+	return entry.replace(/^[-=]\s*/, '');
+}
+
+/** Una mutación de `POST /api/mutations` con su comprobación, listas para `queue.enqueueMutation`. */
+export interface BrlMutation {
+	op: MutationOp;
+	check: MutationCheck;
+}
+
+/**
+ * La operación de EDITAR una entrada que ya existe, o `null` si el texto no
+ * da para una (mismo criterio que `brlCreateOp`: una entrada vacía el
+ * servidor la descarta en silencio, así que aquí ni se encola).
+ *
+ * El marcador lo decide el tipo elegido en la interfaz, nunca el que pudiera
+ * llevar el texto tecleado a mano: mismo criterio que `brlEntryText`. Cambiar
+ * el marcador CAMBIA EL TIPO de la entrada (`-` nota, `=` pensamiento), igual
+ * que en la interfaz de Lumbre: quien llama es responsable de avisar de eso en
+ * la interfaz si el tipo nuevo no es el que tenía la entrada (`brlKindOf` del
+ * texto original).
+ *
+ * `check` viaja siempre como `brlEntry`, nunca como `none`: la relectura aquí
+ * es OBLIGATORIA (ver el JSDoc del caso `brlEntry` en `MutationCheck`, en
+ * `queue.ts`), porque el servidor confirma con `outcome: 'applied'` exista o
+ * no la entrada.
+ */
+export function updateBrlEntryMutation(
+	date: string,
+	entryId: string,
+	raw: string,
+	kind: BrlKind,
+): BrlMutation | null {
+	const entry = brlEntryText(raw, kind);
+	if (entry === null) return null;
+	return {
+		op: { op: 'updateBrlEntry', entryId, entry },
+		check: { check: 'brlEntry', date, entryId, entry },
+	};
+}
+
+/**
+ * La operación de BORRAR una entrada que ya existe. `check.entry: null` es lo
+ * que pide `MutationCheck` para "la entrada debe estar AUSENTE" (ver su
+ * JSDoc), que es justo lo que confirma un borrado.
+ */
+export function removeBrlEntryMutation(date: string, entryId: string): BrlMutation {
+	return {
+		op: { op: 'removeBrlEntry', entryId },
+		check: { check: 'brlEntry', date, entryId, entry: null },
+	};
 }
 
 /**

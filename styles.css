@@ -554,6 +554,110 @@
 	font-size: var(--font-ui-small);
 }
 
+/* ── Entradas del BRL, dentro del bloque ──────────────────────────────────── */
+
+.lumbre-brl__entries {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-2);
+}
+
+.lumbre-brl__entry {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: var(--size-4-2);
+	padding: var(--size-4-1) 0;
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.lumbre-brl__entries > .lumbre-brl__entry:first-child {
+	border-top: none;
+	padding-top: 0;
+}
+
+.lumbre-brl__entry--thought {
+	font-style: italic;
+}
+
+.lumbre-brl__entry--busy {
+	opacity: 0.7;
+}
+
+.lumbre-brl__entry--deleting .lumbre-brl__entry-text {
+	text-decoration: line-through;
+}
+
+.lumbre-brl__entry-main {
+	flex: 1 1 auto;
+	min-width: 0;
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: var(--size-4-2);
+}
+
+.lumbre-brl__entry-time {
+	flex: 0 0 auto;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-variant-numeric: tabular-nums;
+}
+
+.lumbre-brl__entry-text {
+	flex: 1 1 auto;
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+.lumbre-brl__entry-text > :first-child {
+	margin-top: 0;
+}
+
+.lumbre-brl__entry-text > :last-child {
+	margin-bottom: 0;
+}
+
+.lumbre-brl__entry-actions {
+	flex: 0 0 auto;
+	display: flex;
+	gap: var(--size-4-1);
+}
+
+.lumbre-brl__entry-action {
+	padding: var(--size-4-1);
+}
+
+.lumbre-brl__entry--editing {
+	flex-direction: column;
+	align-items: stretch;
+}
+
+.lumbre-brl__entry-input {
+	width: 100%;
+	min-height: 4.5em;
+	resize: vertical;
+	font-family: inherit;
+}
+
+.lumbre-brl__entry-kinds {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-1);
+}
+
+.lumbre-brl__entry-hint {
+	color: var(--text-warning, var(--text-muted));
+	font-size: var(--font-ui-smaller);
+}
+
+.lumbre-brl--mobile .lumbre-brl__entry-action {
+	min-height: 44px;
+	min-width: 44px;
+	justify-content: center;
+}
+
 /* ── Modal de anotar en el BRL ────────────────────────────────────────────── */
 
 .lumbre-brl-modal {
@@ -578,6 +682,28 @@
 .lumbre-brl-modal__hint {
 	color: var(--text-muted);
 	font-size: var(--font-ui-smaller);
+}
+
+/* ── Modal de borrar una entrada del BRL ──────────────────────────────────── */
+
+.lumbre-brl-delete-modal__preview {
+	margin-bottom: var(--size-4-2);
+	padding: var(--size-4-2);
+	border-radius: var(--radius-s);
+	background-color: var(--background-secondary);
+	overflow-wrap: anywhere;
+}
+
+.lumbre-brl-delete-modal__warning {
+	margin-bottom: var(--size-4-3);
+	color: var(--text-warning, var(--text-muted));
+	font-size: var(--font-ui-smaller);
+}
+
+.lumbre-brl-delete-modal__actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
 }
 
 /* ── Modal de «Guardar esta nota en la tarea» ─────────────────────────────── */
