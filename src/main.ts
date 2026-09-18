@@ -25,6 +25,8 @@ import {
 	type BrlBlockHost,
 } from './blocks/brl-block';
 import { QueryCache } from './blocks/query-cache';
+import { RefTaskCache } from './blocks/ref-chip-cache';
+import { RefChipRenderer, type RefChipHost } from './blocks/ref-chip-postprocessor';
 import { LUMBRE_BLOCK_LANGUAGE, LumbreTaskBlock, type TaskBlockHost } from './blocks/task-block';
 import { BrlEntryModal } from './brl/brl-modal';
 import { BRL_TODAY, brlCreateOp, type BrlKind } from './brl/brl-ops';
@@ -136,6 +138,8 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	lists!: ListCache;
 	queries!: QueryCache;
 	brl!: BrlCache;
+	/** Caché de las tareas resueltas para las fichas de referencia (`[[task:ID|...]]`). */
+	refTaskCache!: RefTaskCache;
 	changeFeed!: ChangeFeed;
 
 	/**
@@ -244,6 +248,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			logger: this.logger.child('cache'),
 		});
 		this.brl = new BrlCache({ client: this.client, logger: this.logger.child('cache') });
+		this.refTaskCache = new RefTaskCache({ logger: this.logger.child('cache') });
 		// El cursor arranca en ESTE instante, en memoria: al cargar ya se hace una
 		// lectura completa (bloques y panel piden lo suyo), y uno persistido en
 		// `data.json` traería deltas de otro dispositivo si ese fichero llega por
@@ -297,6 +302,11 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 					ctx.addChild(new LumbreBrlBlock(el, source, ctx.sourcePath, this.brlBlockHost()));
 				},
 			),
+		);
+		this.registerMarkdownPostProcessor(
+			guarded(this.log, 'ficha de referencia a tarea', (el, ctx) => {
+				ctx.addChild(new RefChipRenderer(el, this.refChipHost()));
+			}),
 		);
 		this.registerView(
 			NOTE_TASKS_VIEW_TYPE,
@@ -1846,6 +1856,15 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 				this.dataListeners.add(listener);
 				return () => this.dataListeners.delete(listener);
 			},
+			logger: this.logger.child('block'),
+		};
+	}
+
+	private refChipHost(): RefChipHost {
+		return {
+			getTasksByIds: (ids: string[]) => this.client.getTasksByIds(ids),
+			cache: this.refTaskCache,
+			webOrigin: () => this.config.apiOrigin,
 			logger: this.logger.child('block'),
 		};
 	}
