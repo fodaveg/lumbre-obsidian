@@ -16,13 +16,21 @@
 
 import { ItemView, Notice, Platform, setIcon, type TFile, type WorkspaceLeaf } from 'obsidian';
 
+import { AttachmentDeleteModal } from '../attachments/attachment-delete-modal';
+import {
+	attachmentsSectionFor,
+	attachmentsToggleLabel,
+	deleteButtonLabel,
+} from '../attachments/attachment-list';
+import { AttachmentPreviewModal } from '../attachments/attachment-preview-modal';
+import { formatBytes } from '../attachments/upload';
 import { partialNote } from '../blocks/block-footer';
 import type { Logger } from '../diagnostics/logger';
 import type { LinkStore, LumbreTaskLink } from '../links/link-store';
 import { describeFailure, MAX_TASKS_LIMIT, type LumbreClient } from '../lumbre/client';
 import type { ListCache } from '../lumbre/list-cache';
 import type { OperationQueue, QueuedOperation } from '../lumbre/queue';
-import { taskDeepLinks, type LumbreTask } from '../lumbre/types';
+import { taskDeepLinks, type LumbreAttachment, type LumbreTask } from '../lumbre/types';
 import { linkChipState, pendingOperationFor, type ChipState } from './link-chip-state';
 import { openTaskInLumbre } from './open-in-lumbre';
 import { operationActions } from './operation-actions';
@@ -99,6 +107,10 @@ export class NoteTasksView extends ItemView {
 	private searchPartial = false;
 	private searching = false;
 	private confirmingUnlink: string | null = null;
+	/** Ids de VÍNCULO cuya lista de adjuntos está desplegada. Plegada por defecto. */
+	private readonly expandedAttachments = new Set<string>();
+	/** Ids de ADJUNTO cuyo `DELETE` está en vuelo, para deshabilitar sus botones. */
+	private readonly deletingAttachments = new Set<string>();
 	private project: ProjectState | null = null;
 	private unsubscribe: (() => void) | null = null;
 
@@ -172,6 +184,7 @@ export class NoteTasksView extends ItemView {
 		this.searchQuery = '';
 		this.searchResults = null;
 		this.confirmingUnlink = null;
+		this.expandedAttachments.clear();
 		this.project = null;
 		this.host.logger.info('El panel cambia de nota', {
 			notePath: file?.path ?? null,
@@ -304,6 +317,8 @@ export class NoteTasksView extends ItemView {
 		});
 		attach.disabled = link.syncState !== 'materialized';
 
+		this.renderAttachments(row, link);
+
 		if (operation !== undefined) {
 			const actions = operationActions(operation, {
 				retry: (id: string) => {
@@ -355,6 +370,85 @@ export class NoteTasksView extends ItemView {
 				this.render();
 			},
 		});
+	}
+
+	/**
+	 * Los adjuntos de una tarea vinculada: un botón que despliega la lista
+	 * (plegada por defecto, ver `expandedAttachments`) y, desplegada, una fila
+	 * por adjunto con «Abrir» y «Borrar».
+	 *
+	 * Sin red: la lista sale de `link.task.attachments`, que ya viaja en la
+	 * misma lectura que trae la tarea. Solo `AttachmentPreviewModal` (al abrir)
+	 * y `deleteAttachment` (al borrar) gastan una petición.
+	 *
+	 * Decisión de este lote (no pedida explícitamente): AUSENTE y vacío no
+	 * pintan nada, ni siquiera el botón; con adjuntos, PLEGADA por defecto para
+	 * no alargar cada fila de tarea con una lista que la mayoría de veces no
+	 * hace falta mirar.
+	 */
+	private renderAttachments(
+		row: { row: HTMLElement; actions: HTMLElement },
+		link: LumbreTaskLink,
+	): void {
+		const section = attachmentsSectionFor(link.task);
+		if (section.kind !== 'list') return;
+
+		const expanded = this.expandedAttachments.has(link.id);
+		this.button(row.actions, {
+			text: attachmentsToggleLabel(section.attachments.length),
+			icon: expanded ? 'chevron-up' : 'paperclip',
+			onClick: () => {
+				if (expanded) this.expandedAttachments.delete(link.id);
+				else this.expandedAttachments.add(link.id);
+				this.render();
+			},
+		});
+		if (!expanded) return;
+
+		const list = row.row.createDiv({ cls: 'lumbre-attachments' });
+		for (const attachment of section.attachments) {
+			this.renderAttachmentRow(list, link.task, attachment);
+		}
+	}
+
+	/** Una fila de adjunto: nombre, tamaño y los botones «Abrir» y «Borrar». */
+	private renderAttachmentRow(
+		parent: HTMLElement,
+		task: LumbreTask,
+		attachment: LumbreAttachment,
+	): void {
+		const row = parent.createDiv({ cls: 'lumbre-attachments__row' });
+		row.createSpan({ cls: 'lumbre-attachments__name', text: attachment.filename });
+		row.createSpan({ cls: 'lumbre-attachments__size', text: formatBytes(attachment.size) });
+
+		const deleting = this.deletingAttachments.has(attachment.id);
+
+		const open = this.button(row, {
+			text: 'Abrir',
+			icon: 'external-link',
+			onClick: () => {
+				this.host.logger.info('Acción del usuario', {
+					action: 'abrir adjunto',
+					taskId: task.id,
+					attachmentId: attachment.id,
+				});
+				new AttachmentPreviewModal(this.app, { client: this.host.client, attachment }).open();
+			},
+		});
+		open.disabled = deleting;
+
+		const remove = this.button(row, {
+			text: deleteButtonLabel(deleting),
+			icon: 'trash-2',
+			cls: 'lumbre-button--danger',
+			onClick: () => {
+				new AttachmentDeleteModal(this.app, {
+					filename: attachment.filename,
+					onConfirm: () => this.deleteAttachment(task, attachment),
+				}).open();
+			},
+		});
+		remove.disabled = deleting;
 	}
 
 	/**
@@ -629,6 +723,41 @@ export class NoteTasksView extends ItemView {
 		this.host.logger.info('Acción del usuario', { action: 'desvincular', id: link.id });
 		await this.host.unlinkTask(link);
 		this.confirmingUnlink = null;
+		this.render();
+	}
+
+	/**
+	 * Borra el adjunto (`DELETE /api/attachments/<id>`, ya confirmado por el
+	 * modal). No va por la cola: es una escritura directa, igual que subir.
+	 * Tras un borrado bueno relee la tarea (mismo camino que `toggleDone`) para
+	 * que el panel refleje la lista sin recargar a mano.
+	 */
+	private async deleteAttachment(task: LumbreTask, attachment: LumbreAttachment): Promise<void> {
+		this.host.logger.info('Acción del usuario', {
+			action: 'borrar adjunto',
+			taskId: task.id,
+			attachmentId: attachment.id,
+		});
+		this.deletingAttachments.add(attachment.id);
+		this.render();
+
+		const result = await this.host.client.deleteAttachment(attachment.id);
+		this.deletingAttachments.delete(attachment.id);
+
+		if (!result.ok) {
+			this.host.logger.warn('No se pudo borrar el adjunto', {
+				attachmentId: attachment.id,
+				reason: result.reason,
+				status: result.status,
+			});
+			new Notice(`No se pudo borrar el adjunto. ${describeFailure(result.reason, result.status)}`);
+			this.render();
+			return;
+		}
+
+		new Notice(`${attachment.filename} borrado`);
+		await this.refreshLinks();
+		await this.loadProject(true);
 		this.render();
 	}
 

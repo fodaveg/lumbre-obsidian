@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 import { Logger, type LogLevel } from '../diagnostics/logger';
 import {
 	AGENT_RATE_LIMIT,
+	ATTACHMENT_DELETE_RATE_LIMIT,
+	ATTACHMENT_READ_RATE_LIMIT,
 	EXPORT_RATE_LIMIT,
 	LumbreClient,
 	MAX_ATTACHMENT_BYTES,
@@ -1155,6 +1157,168 @@ describe('LumbreClient.uploadAttachment', () => {
 
 		expect(result).toEqual({ ok: false, reason: 'bad_request' });
 		expect(calls).toHaveLength(0);
+	});
+});
+
+describe('LumbreClient.getAttachment', () => {
+	it('pide GET /api/attachments/<id> y devuelve los bytes tal cual', async () => {
+		const bytes = new Uint8Array([9, 8, 7]).buffer;
+		const calls: LumbreRequestInit[] = [];
+		const client = clientWith(async (init) => {
+			calls.push(init);
+			return { status: 200, arrayBuffer: bytes };
+		});
+
+		const result = await client.getAttachment('att-1');
+
+		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/attachments/att-1');
+		expect(calls[0]?.method).toBe('GET');
+		expect(calls[0]?.headers).toEqual({ Authorization: 'Bearer tok-123' });
+		expect(result).toEqual({ ok: true, value: bytes });
+	});
+
+	it('el id se URL-encodea en la ruta, nunca en un ?token= (el servidor no lo acepta)', async () => {
+		const { client, calls } = recordingClient();
+
+		await client.getAttachment('a/b c');
+
+		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/attachments/a%2Fb%20c');
+		expect(calls[0]?.url).not.toContain('token=');
+	});
+
+	it('va por el pestillo de lecturas: un 401 lo echa para todo el cliente', async () => {
+		const request = vi.fn(async () => ({ status: 401, json: [] }));
+		const client = clientWith(request);
+
+		const first = await client.getAttachment('att-1');
+		expect(first).toEqual({ ok: false, reason: 'unauthorized', status: 401 });
+		expect(client.readsAreLocked).toBe(true);
+
+		// Otra superficie de lectura, aunque no tenga nada que ver con adjuntos,
+		// tampoco gasta petición: el pestillo es del CLIENTE, no del endpoint.
+		const second = await client.listTasks();
+		expect(second).toEqual({ ok: false, reason: 'unauthorized', status: 401 });
+		expect(request).toHaveBeenCalledTimes(1);
+	});
+
+	it('con el pestillo YA echado por otra lectura, no gasta petición', async () => {
+		const request = vi.fn(async () => ({ status: 401, json: [] }));
+		const client = clientWith(request);
+		await client.listTasks();
+		expect(client.readsAreLocked).toBe(true);
+
+		const result = await client.getAttachment('att-1');
+		expect(result).toEqual({ ok: false, reason: 'unauthorized', status: 401 });
+		expect(request).toHaveBeenCalledTimes(1);
+	});
+
+	it('un 429 sale como rate_limited, con los segundos de espera si los manda el servidor', async () => {
+		const client = clientWith(async () => ({
+			status: 429,
+			json: [],
+			headers: { 'retry-after': '7' },
+		}));
+
+		const result = await client.getAttachment('att-1');
+
+		expect(result).toEqual({
+			ok: false,
+			reason: 'rate_limited',
+			status: 429,
+			retryAfterSeconds: 7,
+		});
+	});
+});
+
+describe('LumbreClient.deleteAttachment', () => {
+	it('pide DELETE /api/attachments/<id>', async () => {
+		const { client, calls } = recordingClient({ ok: true });
+
+		const result = await client.deleteAttachment('att-1');
+
+		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/attachments/att-1');
+		expect(calls[0]?.method).toBe('DELETE');
+		expect(calls[0]?.headers).toEqual({ Authorization: 'Bearer tok-123' });
+		expect(result).toEqual({ ok: true, value: undefined });
+	});
+
+	it('es una ESCRITURA: el pestillo de lecturas no la afecta', async () => {
+		const request = vi.fn(async () => ({ status: 401, json: [] }));
+		const client = clientWith(request);
+		await client.listTasks();
+		expect(client.readsAreLocked).toBe(true);
+
+		request.mockResolvedValueOnce({ status: 200, json: [] });
+		const result = await client.deleteAttachment('att-1');
+
+		expect(result).toEqual({ ok: true, value: undefined });
+		expect(request).toHaveBeenCalledTimes(2);
+	});
+
+	it('un 404 sale como not_found: el adjunto ya no existe, o es de otra cuenta', async () => {
+		const result = await clientWith(respondWith(404)).deleteAttachment('att-1');
+		expect(result).toEqual({ ok: false, reason: 'not_found', status: 404 });
+	});
+
+	it('un 429 en el borrado sale como rate_limited', async () => {
+		const result = await clientWith(respondWith(429)).deleteAttachment('att-1');
+		expect(result).toMatchObject({ reason: 'rate_limited', status: 429 });
+	});
+});
+
+describe('LumbreClient: cubo de los adjuntos por id, propio de GET y de DELETE', () => {
+	it('distintos ids del MISMO método comparten el mismo cubo: si no, el aviso nunca llegaría', async () => {
+		const logger = Logger.create({ console: null, level: 'info' });
+		const client = new LumbreClient({
+			apiOrigin: ORIGIN,
+			getToken: async () => 'tok-123',
+			request: async () => ({ status: 200, arrayBuffer: new ArrayBuffer(0) }),
+			logger: logger.child('http'),
+			now: () => 1000,
+		});
+
+		for (let index = 0; index < warnThreshold(ATTACHMENT_READ_RATE_LIMIT) + 1; index += 1) {
+			await client.getAttachment(`att-${index}`);
+		}
+
+		const warnings = logger
+			.recent()
+			.filter((event) => event.message === 'Muchas peticiones en un minuto');
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.data).toMatchObject({
+			limit: warnThreshold(ATTACHMENT_READ_RATE_LIMIT),
+			serverLimit: ATTACHMENT_READ_RATE_LIMIT,
+			method: 'GET',
+			path: '/api/attachments/:id',
+		});
+	});
+
+	it('el cubo de DELETE es PROPIO, más estricto y no comparte cuenta con el de GET', async () => {
+		const logger = Logger.create({ console: null, level: 'info' });
+		const client = new LumbreClient({
+			apiOrigin: ORIGIN,
+			getToken: async () => 'tok-123',
+			request: async () => ({ status: 200, json: { ok: true } }),
+			logger: logger.child('http'),
+			now: () => 1000,
+		});
+
+		// El GET no ha avisado (por debajo de su propio umbral), y aun así el
+		// DELETE avisa con SU umbral, más bajo: son cubos independientes.
+		for (let index = 0; index < warnThreshold(ATTACHMENT_DELETE_RATE_LIMIT) + 1; index += 1) {
+			await client.deleteAttachment(`att-${index}`);
+		}
+
+		const warnings = logger
+			.recent()
+			.filter((event) => event.message === 'Muchas peticiones en un minuto');
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]?.data).toMatchObject({
+			limit: warnThreshold(ATTACHMENT_DELETE_RATE_LIMIT),
+			serverLimit: ATTACHMENT_DELETE_RATE_LIMIT,
+			method: 'DELETE',
+			path: '/api/attachments/:id',
+		});
 	});
 });
 
