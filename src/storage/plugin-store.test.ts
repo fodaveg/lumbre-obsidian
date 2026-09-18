@@ -148,6 +148,55 @@ describe('PluginStore: migración desde el data.json viejo', () => {
 		expect((await store.load()).settings.exportFolder).toBe('Respaldo/Lumbre');
 	});
 
+	it('un data.json de la versión 5 (sin habitNames) migra con el array vacío, sin perder lo demás', async () => {
+		const host = memoryHost({
+			version: 5,
+			settings: { apiOrigin: 'https://lumbre.casa', exportFolder: 'Respaldo/Lumbre' },
+			token: 'tok-1',
+			queue: [],
+			links: [],
+			noteListLinks: [],
+		});
+		const store = new PluginStore(host);
+
+		const data = await store.load();
+
+		expect(data.version).toBe(PLUGIN_DATA_VERSION);
+		expect(data.settings.habitNames).toEqual([]);
+		// Nada de lo que ya había en la versión 5 se pierde en la migración.
+		expect(data.settings.apiOrigin).toBe('https://lumbre.casa');
+		expect(data.settings.exportFolder).toBe('Respaldo/Lumbre');
+		expect(data.token).toBe('tok-1');
+	});
+
+	it('un data.json de la versión 6 conserva los nombres de hábito guardados', async () => {
+		const host = memoryHost({
+			version: PLUGIN_DATA_VERSION,
+			settings: { habitNames: ['Correr', 'Leer'] },
+			token: null,
+			queue: [],
+			links: [],
+			noteListLinks: [],
+		});
+		const store = new PluginStore(host);
+
+		const data = await store.load();
+
+		expect(data.settings.habitNames).toEqual(['Correr', 'Leer']);
+	});
+
+	it('una entrada de habitNames que no es texto se descarta sin tumbar la migración', async () => {
+		const host = memoryHost({
+			version: PLUGIN_DATA_VERSION,
+			settings: { habitNames: ['Correr', 42, null] },
+		});
+		const store = new PluginStore(host);
+
+		const data = await store.load();
+
+		expect(data.settings.habitNames).toEqual(['Correr']);
+	});
+
 	it('un data.json de la versión 2 (sin noteListLinks) migra con el registro vacío', async () => {
 		const host = memoryHost({ version: 2, settings: {}, token: null, queue: [], links: [] });
 		const store = new PluginStore(host);

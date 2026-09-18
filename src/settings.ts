@@ -7,6 +7,7 @@ import {
 	type LogLevel,
 	type Logger,
 } from './diagnostics/logger';
+import { normalizeHabitName } from './habits/habit-name';
 import { describeFailure, type LumbreClient } from './lumbre/client';
 import type { TokenStore } from './token-store';
 
@@ -31,6 +32,14 @@ export interface LumbreSettings {
 	 * vault, y no en la raíz.
 	 */
 	exportFolder: string;
+	/**
+	 * Nombres de hábito guardados para no teclearlos cada vez en «Registrar
+	 * hábito». El plugin NO puede listar los hábitos de la cuenta (ver
+	 * `src/habits/habit-name.ts`), así que esto es memoria LOCAL del usuario,
+	 * no un catálogo de Lumbre: los nombres se escriben a mano aquí y el
+	 * comando solo los ofrece como sugerencia.
+	 */
+	habitNames: string[];
 }
 
 export const DEFAULT_SETTINGS: LumbreSettings = {
@@ -38,6 +47,7 @@ export const DEFAULT_SETTINGS: LumbreSettings = {
 	logLevel: DEFAULT_LOG_LEVEL,
 	liveLog: false,
 	exportFolder: 'Lumbre/exportaciones',
+	habitNames: [],
 };
 
 /**
@@ -175,6 +185,8 @@ export class LumbreSettingTab extends PluginSettingTab {
 					}),
 			);
 
+		this.renderHabitNames(containerEl);
+
 		new Setting(containerEl)
 			.setName('Probar conexión')
 			.setDesc('Pide una tarea a Lumbre para comprobar el origen y el token.')
@@ -199,6 +211,59 @@ export class LumbreSettingTab extends PluginSettingTab {
 			);
 
 		this.renderDiagnostics(containerEl);
+	}
+
+	/**
+	 * Los nombres de hábito guardados para «Registrar hábito», con un botón para
+	 * quitar cada uno y un campo para añadir otro. Se repinta la pestaña entera
+	 * al cambiar la lista (`display()`), que es el idioma habitual de Obsidian
+	 * para una lista corta que cambia poco.
+	 */
+	private renderHabitNames(containerEl: HTMLElement): void {
+		new Setting(containerEl).setName('Hábitos').setHeading();
+
+		for (const name of this.host.config.habitNames) {
+			new Setting(containerEl).setName(name).addExtraButton((button) =>
+				button
+					.setIcon('trash')
+					.setTooltip('Quitar')
+					.onClick(async () => {
+						this.host.config.habitNames = this.host.config.habitNames.filter(
+							(candidate) => candidate !== name,
+						);
+						await this.host.saveSettings();
+						this.log.info('Nombre de hábito quitado');
+						this.display();
+					}),
+			);
+		}
+
+		let draft = '';
+		new Setting(containerEl)
+			.setName('Añadir un nombre de hábito')
+			.setDesc('Para no teclearlo cada vez en «Registrar hábito». No es un catálogo de Lumbre: solo tuyo.')
+			.addText((text) =>
+				text.setPlaceholder('Nombre del hábito').onChange((value) => {
+					draft = value;
+				}),
+			)
+			.addButton((button) =>
+				button.setButtonText('Añadir').onClick(async () => {
+					const normalized = normalizeHabitName(draft);
+					if (normalized === null) {
+						new Notice('El nombre no puede estar vacío.');
+						return;
+					}
+					if (this.host.config.habitNames.includes(normalized)) {
+						new Notice('Ese nombre ya está guardado.');
+						return;
+					}
+					this.host.config.habitNames = [...this.host.config.habitNames, normalized];
+					await this.host.saveSettings();
+					this.log.info('Nombre de hábito añadido');
+					this.display();
+				}),
+			);
 	}
 
 	/**

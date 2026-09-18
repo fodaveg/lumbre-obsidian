@@ -46,6 +46,8 @@ import { buildReport, DEFAULT_REPORT_EVENTS, type CacheStats } from './diagnosti
 import { guarded, unhandledEvent } from './diagnostics/unhandled';
 import { exportFilePath } from './export/export-path';
 import { fileMenuItems } from './file-menu/file-menu-items';
+import { registerHabit, todayDate } from './habits/register-habit-flow';
+import { RegisterHabitModal } from './habits/register-habit-modal';
 import { buildObsidianDeepLink, noteLinkLabel } from './links/deep-link';
 import {
 	LinkStore,
@@ -876,6 +878,17 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		});
 
 		this.addCommand({
+			id: 'register-habit',
+			name: 'Registrar hábito',
+			callback: this.command('register-habit', () => {
+				new RegisterHabitModal(this.app, {
+					savedNames: this.config.habitNames,
+					onSubmit: (name: string) => this.registerHabitEntry(name),
+				}).open();
+			}),
+		});
+
+		this.addCommand({
 			id: 'soplo-selection',
 			name: 'Soplo con la selección',
 			editorCallback: this.command(
@@ -1011,6 +1024,49 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		return (...args: Args): void => {
 			wrapped(...args);
 		};
+	}
+
+	// ── Hábitos ──────────────────────────────────────────────────────────────
+
+	/**
+	 * «Registrar hábito»: encola la ocurrencia de HOY con el nombre que
+	 * escribió el usuario (`src/habits/register-habit-flow.ts`, que documenta
+	 * por qué ese nombre viaja tal cual como `habitId`). Sin lectura de
+	 * hábitos posible con un token personal, el único aviso fiable tras drenar
+	 * es si Lumbre la ha aplicado (`outcome`) o la ha aparcado sin poder
+	 * confirmarla.
+	 */
+	private async registerHabitEntry(name: string): Promise<void> {
+		this.log.info('Acción del usuario', { action: 'registrar hábito', length: name.length });
+
+		const file = this.app.workspace.getActiveFile();
+		const target: LinkTarget = {
+			notePath: file?.path ?? '',
+			label: file?.basename ?? 'Sin nota',
+			excerpt: null,
+		};
+		const date = todayDate(new Date());
+		const outcome = await registerHabit({ queue: this.queue }, name, date, target);
+		if (!outcome.ok) {
+			new Notice('El nombre del hábito no puede estar vacío.');
+			return;
+		}
+
+		new Notice(`Hábito «${name}» registrado`);
+		this.notifyDataChange();
+
+		await this.queue.flush();
+		const after = this.queue.pending().find((candidate) => candidate.id === outcome.operation.id);
+		if (after?.state === 'rejected') {
+			this.log.error('Lumbre rechazó el hábito', { id: outcome.operation.id, error: after.error });
+			new Notice(after.error ?? 'Lumbre rechazó el hábito.');
+		} else if (after?.state === 'recoverable_error') {
+			this.log.warn('Lumbre aceptó el hábito sin confirmarlo', { id: outcome.operation.id });
+			new Notice(
+				'Lumbre aceptó el hábito, pero el plugin no puede comprobar si se aplicó. Revísalo en Lumbre.',
+			);
+		}
+		this.notifyDataChange();
 	}
 
 	// ── BRL ──────────────────────────────────────────────────────────────────
