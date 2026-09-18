@@ -8,7 +8,7 @@ import type { CreateOperation, LinkTarget, StatusOperation } from '../lumbre/que
 import type { LumbreList, LumbreTask, TaskDraft } from '../lumbre/types';
 import { LumbreApi, TASKS_CHANGED_EVENT, type LumbreApiDeps } from './lumbre-api';
 
-function task(id: string, content = 'Comprar pan'): LumbreTask {
+function task(id: string, content = 'Comprar pan', effectiveTags?: string[]): LumbreTask {
 	return {
 		id,
 		content,
@@ -25,6 +25,7 @@ function task(id: string, content = 'Comprar pan'): LumbreTask {
 		section: null,
 		rolloverCount: 0,
 		parentId: null,
+		...(effectiveTags !== undefined ? { effectiveTags } : {}),
 	};
 }
 
@@ -50,7 +51,7 @@ function harness(overrides: Partial<LumbreApiDeps> = {}): {
 	const log: QueueLog = { creates: [], statuses: [], flushes: 0 };
 	const opened: string[] = [];
 	const triggered: string[] = [];
-	const tasks = [task('1', 'Comprar pan #casa'), task('2', 'Escribir el informe')];
+	const tasks = [task('1', 'Comprar pan', ['casa']), task('2', 'Escribir el informe')];
 
 	const cache = new QueryCache({
 		client: {

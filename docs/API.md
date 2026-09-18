@@ -103,12 +103,24 @@ await lumbre.listTasks({ scope: 'upcoming', days: 7 });
 | `list` | Nombre o id de lista. Nombrarla sin `scope` significa la lista entera. | ninguna |
 | `section` | Nombre de una sección dentro de `list`. | ninguna |
 | `days` | Días de la ventana. **Solo** con `scope: upcoming`. | los del servidor |
-| `tag` | Etiqueta dentro del título, con o sin `#`. Una etiqueta padre casa con sus hijas. | ninguna |
+| `tag` | Etiqueta dentro de `task.effectiveTags` (propias más heredadas de lista o sección), con o sin `#`. Una etiqueta padre casa con sus hijas (`casa` encuentra `casa/cocina`). | ninguna |
+| `priority` | `p1` a `p4`, o varias separadas por coma (`p1,p2`). | ninguna |
+| `deadline` | `hoy`, `vencido`, `ninguno` (sin fecha límite) o `Nd` (p. ej. `7d`: entre hoy y hoy+N días). | ninguna |
 | `includeDone` | `true` o `false`. | `false` |
 | `limit` | Tope de tareas. | el tope del servidor (500) |
 | `notes` | `none` o `full`. Con `none`, `task.notes` sale SIEMPRE `null`. | `none` |
+| `context` | `none` o `full`. Con `full`, `notes` se pisa a `full` (ver más abajo). | `none` |
+| `title` | Texto libre. No afecta a `listTasks` (es la cabecera del bloque); se acepta porque comparte el mismo parser. | ninguno |
+| `sort` | `date`, `deadline`, `priority` (cada uno con sufijo `-desc` para el sentido contrario) o `server` (equivale a no escribirla). | orden del servidor |
+| `group` | `section`, `list`, `date` o `none`. **Solo afecta al bloque**: `listTasks` la acepta pero la ignora y devuelve siempre una lista plana. | ninguno (ver «`group` en el bloque») |
 
 Una consulta que no se entiende lanza un `Error` con el problema en una línea.
+
+`priority` y `deadline` son filtros de **cliente**: `GET /api/tasks` no los conoce, así que se piden todas las tareas del `scope` (hasta el tope del servidor) y se filtran aquí, igual que `tag`. Lo mismo pasa con `sort`: para ordenar de verdad hace falta ver todas las tareas antes de recortar por `limit`, así que un `sort` escrito también fuerza a pedir el tope del servidor en vez del `limit` propio (el recorte a `limit` se aplica DESPUÉS de ordenar).
+
+### `group` en el bloque
+
+`group` solo tiene efecto pintando el bloque ```` ```lumbre ```` (agrupa las tareas con un título de grupo); `listTasks` la acepta para que un objeto de consulta compartido con un bloque no falle al parsear, pero el array que devuelve es siempre plano. Sin escribir `group`, el bloque agrupa por sección SOLO cuando la consulta nombra una `list` (el comportamiento de siempre); con una `list` y `group: list` o `group: date` se agrupa por lista o por fecha programada en su lugar, y `group: none` fuerza la lista plana incluso con `list`.
 
 ### `notes`: por qué `task.notes` suele venir vacío
 

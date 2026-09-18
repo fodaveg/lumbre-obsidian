@@ -57,6 +57,10 @@ describe('parseQuery', () => {
 		expect(query.scope).toBe('today');
 		expect(query.scopeExplicit).toBe(false);
 		expect(query.list).toBeNull();
+		expect(query.priority).toBeNull();
+		expect(query.deadline).toBeNull();
+		expect(query.sort).toBeNull();
+		expect(query.group).toBe('auto');
 	});
 
 	it('las líneas en blanco y los espacios de sobra no cuentan', () => {
@@ -71,10 +75,14 @@ describe('parseQuery', () => {
 				'list: Casa',
 				'section: Cocina',
 				'tag: #compras',
+				'priority: p1,p2',
+				'deadline: 7d',
 				'includeDone: true',
 				'limit: 20',
 				'notes: full',
 				'context: full',
+				'sort: deadline-desc',
+				'group: list',
 				'title: Lo que viene',
 			].join('\n'),
 		);
@@ -86,11 +94,15 @@ describe('parseQuery', () => {
 			list: 'Casa',
 			section: 'Cocina',
 			tag: 'compras',
+			priority: ['p1', 'p2'],
+			deadline: { kind: 'window', days: 7 },
 			includeDone: true,
 			limit: 20,
 			notes: 'full',
 			notesExplicit: true,
 			context: 'full',
+			sort: { field: 'deadline', direction: 'desc' },
+			group: 'list',
 			title: 'Lo que viene',
 		});
 	});
@@ -173,6 +185,88 @@ describe('parseQuery', () => {
 	});
 });
 
+describe('parseQuery · priority', () => {
+	it('acepta un valor y varios separados por coma', () => {
+		expect(parsed('priority: p1').priority).toEqual(['p1']);
+		expect(parsed('priority: p1,p2,p3').priority).toEqual(['p1', 'p2', 'p3']);
+	});
+
+	it('ignora mayúsculas y espacios alrededor de la coma', () => {
+		expect(parsed('priority: P1, p2').priority).toEqual(['p1', 'p2']);
+	});
+
+	it('descarta repetidos', () => {
+		expect(parsed('priority: p1,p1,p2').priority).toEqual(['p1', 'p2']);
+	});
+
+	it('rechaza un nivel que no existe', () => {
+		expect(errorOf('priority: p5')).toContain('priority');
+		expect(errorOf('priority: urgente')).toContain('priority');
+	});
+
+	it('rechaza una lista vacía o con huecos', () => {
+		expect(errorOf('priority: p1,,p2')).toContain('priority');
+	});
+});
+
+describe('parseQuery · deadline', () => {
+	it('acepta hoy, vencido, ninguno y una ventana de días', () => {
+		expect(parsed('deadline: hoy').deadline).toEqual({ kind: 'today' });
+		expect(parsed('deadline: vencido').deadline).toEqual({ kind: 'overdue' });
+		expect(parsed('deadline: ninguno').deadline).toEqual({ kind: 'none' });
+		expect(parsed('deadline: 7d').deadline).toEqual({ kind: 'window', days: 7 });
+	});
+
+	it('es insensible a mayúsculas', () => {
+		expect(parsed('deadline: HOY').deadline).toEqual({ kind: 'today' });
+	});
+
+	it('rechaza una ventana de cero o negativa, y basura', () => {
+		expect(errorOf('deadline: 0d')).toContain('deadline');
+		expect(errorOf('deadline: manana')).toContain('deadline');
+		expect(errorOf('deadline: 7')).toContain('deadline');
+	});
+});
+
+describe('parseQuery · sort', () => {
+	it('acepta los tres campos, con y sin -desc, y server', () => {
+		expect(parsed('sort: date').sort).toEqual({ field: 'date', direction: 'asc' });
+		expect(parsed('sort: date-desc').sort).toEqual({ field: 'date', direction: 'desc' });
+		expect(parsed('sort: deadline').sort).toEqual({ field: 'deadline', direction: 'asc' });
+		expect(parsed('sort: deadline-desc').sort).toEqual({ field: 'deadline', direction: 'desc' });
+		expect(parsed('sort: priority').sort).toEqual({ field: 'priority', direction: 'asc' });
+		expect(parsed('sort: priority-desc').sort).toEqual({ field: 'priority', direction: 'desc' });
+		expect(parsed('sort: server').sort).toBeNull();
+	});
+
+	it('sin escribir sort, el valor es null (orden del servidor)', () => {
+		expect(parsed('').sort).toBeNull();
+	});
+
+	it('rechaza un campo que no existe', () => {
+		expect(errorOf('sort: title')).toContain('sort');
+		expect(errorOf('sort: date-asc')).toContain('sort');
+	});
+});
+
+describe('parseQuery · group', () => {
+	it('acepta section, list, date y none', () => {
+		expect(parsed('group: section').group).toBe('section');
+		expect(parsed('group: list').group).toBe('list');
+		expect(parsed('group: date').group).toBe('date');
+		expect(parsed('group: none').group).toBe('none');
+	});
+
+	it('sin escribir group, el valor es auto', () => {
+		expect(parsed('').group).toBe('auto');
+	});
+
+	it('rechaza un valor que no existe, incluido "auto" (no es escribible a mano)', () => {
+		expect(errorOf('group: auto')).toContain('group');
+		expect(errorOf('group: whatever')).toContain('group');
+	});
+});
+
 describe('resolveQuery', () => {
 	it('sin lista y sin nota vinculada, manda el scope escrito', () => {
 		expect(resolveQuery(parsed('scope: week'), BARE).scope).toBe('week');
@@ -217,6 +311,17 @@ describe('resolveQuery', () => {
 	it('si la lista no se puede traducir, se manda tal cual', () => {
 		expect(resolveQuery(parsed('list: Lo que sea'), BARE).list).toBe('Lo que sea');
 	});
+
+	it('priority, deadline, sort y group llegan igual a la consulta resuelta', () => {
+		const query = resolveQuery(
+			parsed('priority: p1\ndeadline: hoy\nsort: date-desc\ngroup: list'),
+			BARE,
+		);
+		expect(query.priority).toEqual(['p1']);
+		expect(query.deadline).toEqual({ kind: 'today' });
+		expect(query.sort).toEqual({ field: 'date', direction: 'desc' });
+		expect(query.group).toBe('list');
+	});
 });
 
 describe('queryParams', () => {
@@ -236,6 +341,32 @@ describe('queryParams', () => {
 		expect(queryParams(resolveQuery(parsed('limit: 5\ntag: casa'), BARE)).limit).toBe(
 			MAX_TASKS_LIMIT,
 		);
+	});
+
+	it('con priority manda el TOPE, no el limit escrito', () => {
+		expect(queryParams(resolveQuery(parsed('limit: 5\npriority: p1'), BARE)).limit).toBe(
+			MAX_TASKS_LIMIT,
+		);
+	});
+
+	it('con deadline manda el TOPE, no el limit escrito', () => {
+		expect(queryParams(resolveQuery(parsed('limit: 5\ndeadline: hoy'), BARE)).limit).toBe(
+			MAX_TASKS_LIMIT,
+		);
+	});
+
+	it('con sort manda el TOPE, no el limit escrito', () => {
+		expect(queryParams(resolveQuery(parsed('limit: 5\nsort: date'), BARE)).limit).toBe(
+			MAX_TASKS_LIMIT,
+		);
+	});
+
+	it('sort: server no fuerza el tope: no es un sort de cliente', () => {
+		expect(queryParams(resolveQuery(parsed('limit: 5\nsort: server'), BARE)).limit).toBe(5);
+	});
+
+	it('group NO fuerza el tope: no cambia qué se pide, solo cómo se pinta', () => {
+		expect(queryParams(resolveQuery(parsed('limit: 5\ngroup: list'), BARE)).limit).toBe(5);
 	});
 
 	it('sin limit escrito pide el tope, no el default de 200 del servidor', () => {
@@ -284,21 +415,47 @@ describe('queryKey', () => {
 			queryKey(resolveQuery(parsed('notes: full'), BARE)),
 		);
 	});
+
+	it('priority no cambia la clave: es un filtro de cliente', () => {
+		expect(queryKey(resolveQuery(parsed('priority: p1'), BARE))).toBe(
+			queryKey(resolveQuery(parsed(''), BARE)),
+		);
+	});
+
+	it('deadline no cambia la clave: es un filtro de cliente', () => {
+		expect(queryKey(resolveQuery(parsed('deadline: hoy'), BARE))).toBe(
+			queryKey(resolveQuery(parsed(''), BARE)),
+		);
+	});
+
+	it('sort no cambia la clave: es de cliente', () => {
+		expect(queryKey(resolveQuery(parsed('sort: date-desc'), BARE))).toBe(
+			queryKey(resolveQuery(parsed(''), BARE)),
+		);
+	});
+
+	it('group no cambia la clave: solo decide cómo se pinta', () => {
+		expect(queryKey(resolveQuery(parsed('group: list'), BARE))).toBe(
+			queryKey(resolveQuery(parsed(''), BARE)),
+		);
+	});
 });
 
-describe('applyClientFilters', () => {
+describe('applyClientFilters · tag (effectiveTags)', () => {
 	const tasks = [
-		task({ id: '1', content: 'Comprar pan #casa' }),
-		task({ id: '2', content: 'Llamar al fontanero #casa/cocina' }),
-		task({ id: '3', content: 'Escribir el informe #trabajo' }),
-		task({ id: '4', content: 'Sin etiqueta' }),
+		task({ id: '1', effectiveTags: ['casa'] }),
+		task({ id: '2', effectiveTags: ['casa/cocina'] }),
+		task({ id: '3', effectiveTags: ['trabajo'] }),
+		task({ id: '4', effectiveTags: [] }),
+		// effectiveTags AUSENTE a propósito: simula un Lumbre anterior a `106d124f3`.
+		task({ id: '5' }),
 	];
 
 	it('sin filtros devuelve todo', () => {
-		expect(applyClientFilters(tasks, resolveQuery(parsed(''), BARE))).toHaveLength(4);
+		expect(applyClientFilters(tasks, resolveQuery(parsed(''), BARE))).toHaveLength(5);
 	});
 
-	it('la etiqueta filtra por el título, y la padre casa con la hija', () => {
+	it('filtra por effectiveTags, y la etiqueta padre casa con la hija', () => {
 		const filtered = applyClientFilters(tasks, resolveQuery(parsed('tag: casa'), BARE));
 		expect(filtered.map((item) => item.id)).toEqual(['1', '2']);
 	});
@@ -308,9 +465,169 @@ describe('applyClientFilters', () => {
 		expect(filtered).toHaveLength(0);
 	});
 
+	it('effectiveTags vacío es un dato: no casa, pero es distinto de ausente', () => {
+		const filtered = applyClientFilters(tasks, resolveQuery(parsed('tag: trabajo'), BARE));
+		expect(filtered.map((item) => item.id)).toEqual(['3']);
+	});
+
+	it('una tarea sin effectiveTags (Lumbre viejo) no casa con ningún tag: fail-closed', () => {
+		const filtered = applyClientFilters(tasks, resolveQuery(parsed('tag: casa'), BARE));
+		expect(filtered.map((item) => item.id)).not.toContain('5');
+	});
+
 	it('el tope se aplica después de filtrar por etiqueta', () => {
 		const filtered = applyClientFilters(tasks, resolveQuery(parsed('tag: casa\nlimit: 1'), BARE));
 		expect(filtered.map((item) => item.id)).toEqual(['1']);
+	});
+});
+
+describe('applyClientFilters · priority', () => {
+	const tasks = [
+		task({ id: '1', priority: 'p1' }),
+		task({ id: '2', priority: 'p2' }),
+		task({ id: '3', priority: 'p3' }),
+		task({ id: '4', priority: 'p4' }),
+	];
+
+	it('sin priority devuelve todo', () => {
+		expect(applyClientFilters(tasks, resolveQuery(parsed(''), BARE))).toHaveLength(4);
+	});
+
+	it('filtra por una sola prioridad', () => {
+		const filtered = applyClientFilters(tasks, resolveQuery(parsed('priority: p1'), BARE));
+		expect(filtered.map((item) => item.id)).toEqual(['1']);
+	});
+
+	it('filtra por varias prioridades separadas por coma', () => {
+		const filtered = applyClientFilters(tasks, resolveQuery(parsed('priority: p1,p3'), BARE));
+		expect(filtered.map((item) => item.id)).toEqual(['1', '3']);
+	});
+});
+
+describe('applyClientFilters · deadline', () => {
+	// 18 sep 2026, en hora LOCAL: mismo criterio que `localIsoDate`.
+	const now = new Date(2026, 8, 18);
+	const tasks = [
+		task({ id: 'today', deadline: '2026-09-18' }),
+		task({ id: 'tomorrow', deadline: '2026-09-19' }),
+		task({ id: 'edge-of-window', deadline: '2026-09-25' }),
+		task({ id: 'past-window', deadline: '2026-09-26' }),
+		task({ id: 'past', deadline: '2026-09-01' }),
+		task({ id: 'none', deadline: null }),
+	];
+
+	it('hoy: solo la que vence exactamente hoy', () => {
+		const filtered = applyClientFilters(tasks, resolveQuery(parsed('deadline: hoy'), BARE), now);
+		expect(filtered.map((item) => item.id)).toEqual(['today']);
+	});
+
+	it('vencido: solo lo anterior a hoy', () => {
+		const filtered = applyClientFilters(
+			tasks,
+			resolveQuery(parsed('deadline: vencido'), BARE),
+			now,
+		);
+		expect(filtered.map((item) => item.id)).toEqual(['past']);
+	});
+
+	it('ninguno: solo lo que no tiene fecha límite', () => {
+		const filtered = applyClientFilters(tasks, resolveQuery(parsed('deadline: ninguno'), BARE), now);
+		expect(filtered.map((item) => item.id)).toEqual(['none']);
+	});
+
+	it('Nd: entre hoy y hoy+N, los dos bordes incluidos', () => {
+		const filtered = applyClientFilters(tasks, resolveQuery(parsed('deadline: 7d'), BARE), now);
+		expect(filtered.map((item) => item.id)).toEqual(['today', 'tomorrow', 'edge-of-window']);
+	});
+
+	it('priority y deadline juntos son un Y, no un O', () => {
+		const combo = [
+			task({ id: 'match', deadline: '2026-09-18', priority: 'p1' }),
+			task({ id: 'wrong-priority', deadline: '2026-09-18', priority: 'p4' }),
+			// Fuera de la ventana de 7 días (que llega hasta el 25): solo falla
+			// «deadline», no «priority».
+			task({ id: 'wrong-deadline', deadline: '2026-09-30', priority: 'p1' }),
+		];
+		const filtered = applyClientFilters(
+			combo,
+			resolveQuery(parsed('deadline: 7d\npriority: p1'), BARE),
+			now,
+		);
+		expect(filtered.map((item) => item.id)).toEqual(['match']);
+	});
+});
+
+describe('applyClientFilters · sort', () => {
+	it('sort: date ordena ascendente, con las ausentes al final', () => {
+		const tasks = [
+			task({ id: 'c', date: '2026-09-20' }),
+			task({ id: 'a', date: '2026-09-10' }),
+			task({ id: 'none', date: null }),
+			task({ id: 'b', date: '2026-09-15' }),
+		];
+		const sorted = applyClientFilters(tasks, resolveQuery(parsed('sort: date'), BARE));
+		expect(sorted.map((item) => item.id)).toEqual(['a', 'b', 'c', 'none']);
+	});
+
+	it('sort: date-desc invierte el orden, pero las ausentes SIGUEN al final', () => {
+		const tasks = [
+			task({ id: 'c', date: '2026-09-20' }),
+			task({ id: 'a', date: '2026-09-10' }),
+			task({ id: 'none', date: null }),
+			task({ id: 'b', date: '2026-09-15' }),
+		];
+		const sorted = applyClientFilters(tasks, resolveQuery(parsed('sort: date-desc'), BARE));
+		expect(sorted.map((item) => item.id)).toEqual(['c', 'b', 'a', 'none']);
+	});
+
+	it('sort: deadline sigue la misma regla de ausentes que date', () => {
+		const tasks = [
+			task({ id: 'later', deadline: '2026-09-20' }),
+			task({ id: 'none', deadline: null }),
+			task({ id: 'sooner', deadline: '2026-09-10' }),
+		];
+		const sorted = applyClientFilters(tasks, resolveQuery(parsed('sort: deadline'), BARE));
+		expect(sorted.map((item) => item.id)).toEqual(['sooner', 'later', 'none']);
+	});
+
+	it('sort: priority pone p1 primero', () => {
+		const tasks = [
+			task({ id: 'low', priority: 'p4' }),
+			task({ id: 'high', priority: 'p1' }),
+			task({ id: 'mid', priority: 'p2' }),
+		];
+		const sorted = applyClientFilters(tasks, resolveQuery(parsed('sort: priority'), BARE));
+		expect(sorted.map((item) => item.id)).toEqual(['high', 'mid', 'low']);
+	});
+
+	it('sort: priority-desc pone p4 primero', () => {
+		const tasks = [task({ id: 'low', priority: 'p4' }), task({ id: 'high', priority: 'p1' })];
+		const sorted = applyClientFilters(tasks, resolveQuery(parsed('sort: priority-desc'), BARE));
+		expect(sorted.map((item) => item.id)).toEqual(['low', 'high']);
+	});
+
+	it('sort: server es un no-op explícito, igual que no escribir sort', () => {
+		const tasks = [task({ id: 'a' }), task({ id: 'b' })];
+		expect(applyClientFilters(tasks, resolveQuery(parsed('sort: server'), BARE))).toEqual(
+			applyClientFilters(tasks, resolveQuery(parsed(''), BARE)),
+		);
+	});
+
+	it('sin sort, se conserva el orden de llegada (el del servidor)', () => {
+		const tasks = [task({ id: 'z' }), task({ id: 'a' })];
+		expect(
+			applyClientFilters(tasks, resolveQuery(parsed(''), BARE)).map((item) => item.id),
+		).toEqual(['z', 'a']);
+	});
+
+	it('el limit se aplica DESPUÉS de ordenar', () => {
+		const tasks = [
+			task({ id: 'c', priority: 'p3' }),
+			task({ id: 'a', priority: 'p1' }),
+			task({ id: 'b', priority: 'p2' }),
+		];
+		const sorted = applyClientFilters(tasks, resolveQuery(parsed('sort: priority\nlimit: 2'), BARE));
+		expect(sorted.map((item) => item.id)).toEqual(['a', 'b']);
 	});
 });
 
