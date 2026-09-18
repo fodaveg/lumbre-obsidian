@@ -725,6 +725,29 @@
 	gap: var(--size-4-2);
 }
 
+/* ── Modal de «Registrar hábito» ──────────────────────────────────────────── */
+
+.lumbre-habit-modal {
+	display: flex;
+	flex-direction: column;
+	gap: var(--size-4-3);
+}
+
+.lumbre-habit-modal__input {
+	width: 100%;
+}
+
+.lumbre-habit-modal__actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-2);
+}
+
+.lumbre-habit-modal__hint {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
 /* ── Modal de «Guardar esta nota en la tarea» ─────────────────────────────── */
 
 .lumbre-save-note-modal__info {
@@ -837,6 +860,7 @@
    táctil y los botones ocupan su línea. */
 .is-mobile .lumbre-soplo .lumbre-button,
 .is-mobile .lumbre-brl-modal .lumbre-button,
+.is-mobile .lumbre-habit-modal .lumbre-button,
 .is-mobile .lumbre-save-note-modal .lumbre-button {
 	min-height: 44px;
 	flex: 1 1 10em;

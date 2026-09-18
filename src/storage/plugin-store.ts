@@ -44,8 +44,11 @@ import {
  * - 5: los ajustes ganan `exportFolder`, la carpeta de «Guardar una copia de
  *   exportación en el vault». Un `data.json` anterior no lo trae y lo estrena
  *   en su valor por defecto (`Lumbre/exportaciones`), sin perder nada.
+ * - 6: los ajustes ganan `habitNames`, los nombres de hábito guardados para
+ *   «Registrar hábito». Un `data.json` anterior no lo trae y empieza con el
+ *   array vacío, sin perder nada.
  */
-export const PLUGIN_DATA_VERSION = 5;
+export const PLUGIN_DATA_VERSION = 6;
 
 export interface PluginData {
 	version: number;
@@ -359,6 +362,14 @@ export function migrate(raw: unknown): PluginData {
 			? rawExportFolder
 			: DEFAULT_SETTINGS.exportFolder;
 
+	// `habitNames` entró en la versión 6. Un `data.json` anterior no lo trae y
+	// estrena el array vacío; una entrada que no sea texto se descarta, no
+	// tumba la migración entera.
+	const rawHabitNames = settings?.['habitNames'];
+	const habitNames = Array.isArray(rawHabitNames)
+		? rawHabitNames.filter((name): name is string => typeof name === 'string')
+		: DEFAULT_SETTINGS.habitNames;
+
 	return {
 		version: PLUGIN_DATA_VERSION,
 		// Los ajustes se COPIAN enteros sobre los de fábrica y solo se corrigen los
@@ -373,6 +384,7 @@ export function migrate(raw: unknown): PluginData {
 			logLevel,
 			liveLog: settings?.['liveLog'] === true,
 			exportFolder,
+			habitNames,
 		},
 		token: asString(row['token']),
 		queue: asArray<QueuedOperation>(row['queue']),

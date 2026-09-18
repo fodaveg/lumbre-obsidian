@@ -48,6 +48,23 @@ describe('listFromApi', () => {
 	});
 });
 
+describe('listFromApi y notes', () => {
+	it('sin la clave notes, AUSENTE (no se inventa)', () => {
+		const list = listFromApi({ id: 'list-1', name: 'Casa', taskCount: 0 });
+		expect(list === null ? false : 'notes' in list).toBe(false);
+	});
+
+	it('con la clave notes a null, null (borrada o nunca escrita)', () => {
+		const list = listFromApi({ id: 'list-1', name: 'Casa', taskCount: 0, notes: null });
+		expect(list?.notes).toBeNull();
+	});
+
+	it('con texto, el texto tal cual', () => {
+		const list = listFromApi({ id: 'list-1', name: 'Casa', taskCount: 0, notes: 'lo que sea' });
+		expect(list?.notes).toBe('lo que sea');
+	});
+});
+
 describe('taskFromApi y los adjuntos', () => {
 	it('cuenta los adjuntos cuando la respuesta trae el array', () => {
 		const task = taskFromApi({
