@@ -21,6 +21,7 @@ import type { ListCache } from '../lumbre/list-cache';
 import type { OperationQueue, QueuedOperation } from '../lumbre/queue';
 import type { LumbreTask } from '../lumbre/types';
 import { linkChipState, pendingOperationFor } from '../ui/link-chip-state';
+import { mountTaskMenu, type TaskMenuHost } from '../ui/task-menu';
 import { groupTasksForQuery } from '../ui/task-sections';
 import { taskStateLabels } from '../ui/task-state-labels';
 import { contextSubtasksLimitedNote, partialNote, staleNote } from './block-footer';
@@ -51,6 +52,12 @@ export interface TaskBlockHost {
 	queue: Pick<OperationQueue, 'pending'>;
 	/** Encola completar o reabrir, drena y avisa. El bloque no habla con la cola. */
 	setTaskDone(task: LumbreTask, done: boolean, notePath: string): Promise<void>;
+	/**
+	 * Lo que necesita el menú corto por tarea, que es EL MISMO que el del panel
+	 * (ver `src/ui/task-menu.ts`). El bloque sigue sin escribir en la nota: el
+	 * menú solo encola mutaciones por la cola durable.
+	 */
+	taskMenu: TaskMenuHost;
 	/** El `lumbre-list` de la nota donde vive el bloque, o `null`. */
 	noteListId(notePath: string): string | null;
 	/** Avisa cuando cambian la cola o los vínculos. Devuelve cómo desuscribirse. */
@@ -251,7 +258,13 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		// agrupar por sección juntaría secciones de listas distintas.
 		const groups = groupTasksForQuery(tasks, query.group, query.list !== null);
 		if (groups === null) {
-			this.renderTaskList(fragment.createDiv({ cls: 'lumbre-list' }), tasks, operations, query.context);
+			this.renderTaskList(
+				fragment.createDiv({ cls: 'lumbre-list' }),
+				tasks,
+				operations,
+				query.context,
+				tasks,
+			);
 		} else {
 			for (const group of groups) {
 				const block = fragment.createDiv({ cls: 'lumbre-block__group' });
@@ -261,6 +274,10 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 					group.tasks,
 					operations,
 					query.context,
+					// Las secciones candidatas del menú salen de TODAS las tareas
+					// pintadas, no solo de las de este grupo: agrupado por sección, cada
+					// grupo conoce una sola y no habría a dónde mover.
+					tasks,
 				);
 			}
 		}
@@ -274,8 +291,9 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		tasks: readonly LumbreTask[],
 		operations: readonly QueuedOperation[],
 		context: TaskContextMode,
+		siblings: readonly LumbreTask[],
 	): void {
-		for (const task of tasks) this.renderTask(list, task, operations, context);
+		for (const task of tasks) this.renderTask(list, task, operations, context, siblings);
 	}
 
 	private renderTask(
@@ -283,6 +301,7 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		task: LumbreTask,
 		operations: readonly QueuedOperation[],
 		context: TaskContextMode,
+		siblings: readonly LumbreTask[],
 	): void {
 		const chip = linkChipState(
 			{ syncState: 'materialized', error: null },
@@ -328,6 +347,19 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 			});
 			if (chip.reason !== null) label.setAttribute('title', chip.reason);
 		}
+
+		// El menú corto por tarea, el MISMO que el del panel. Solo encola
+		// mutaciones; el bloque sigue sin tocar el Markdown de la nota.
+		mountTaskMenu({
+			component: this,
+			row,
+			anchor: main,
+			task,
+			notePath: this.notePath,
+			pending: chip.tone === 'pending',
+			siblings,
+			host: this.host.taskMenu,
+		});
 
 		this.renderMeta(row, task);
 		if (context === 'full') this.renderTaskContext(row, task);

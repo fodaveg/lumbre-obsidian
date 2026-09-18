@@ -162,6 +162,25 @@
 	gap: var(--size-4-1);
 }
 
+/* ── Menú corto por tarea ─────────────────────────────────────────────────── */
+
+/*
+ * El botón «⋯» de la fila. Es lo que hace que el menú se pueda abrir en MÓVIL,
+ * donde no hay clic derecho, así que no se esconde tras un `:hover`: en táctil
+ * no existe y el menú quedaría inalcanzable.
+ */
+.lumbre-task__menu {
+	flex: 0 0 auto;
+	padding: 0 var(--size-4-1);
+}
+
+/* Área de toque holgada donde se usa con el dedo. */
+.lumbre-block--mobile .lumbre-task__menu,
+.lumbre-panel--mobile .lumbre-task__menu {
+	min-width: var(--size-4-8);
+	min-height: var(--size-4-8);
+}
+
 /* ── Contexto de la tarea (`context: full`) ──────────────────────────────── */
 
 .lumbre-task__context {

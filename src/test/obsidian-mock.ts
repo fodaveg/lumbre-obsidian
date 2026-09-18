@@ -53,6 +53,25 @@ export class SuggestModal {}
 export class ItemView {}
 
 /**
+ * Lo mínimo del menú contextual. Ningún test lo ABRE (para eso haría falta el
+ * DOM de Obsidian): basta con que la clase exista para que `ui/task-menu.ts`
+ * se pueda cargar desde el bloque o el panel.
+ */
+export class Menu extends Component {
+	addItem(): this {
+		return this;
+	}
+
+	addSeparator(): this {
+		return this;
+	}
+
+	showAtMouseEvent(): this {
+		return this;
+	}
+}
+
+/**
  * Solo para el `instanceof TFile` de `main.ts` al escribir la exportación en
  * el vault (`vault.getAbstractFileByPath` puede devolver uno). Ningún test
  * monta una instancia real: basta con que la CLASE exista para que la
