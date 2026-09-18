@@ -1,6 +1,6 @@
 # Estado
 
-- **Versión**: 0.1.9 (publicada para BRAT).
+- **Versión**: 0.1.13 (publicada para BRAT).
 - **Qué hay**: esqueleto del plugin, ajustes (origen + token), botón de prueba de conexión, gate
   `npm run check`, CI y workflow de release para BRAT con los tres assets sueltos.
 - **Qué hay (lote A)**: cliente HTTP completo (`listTasks`, `getTask`, `getTasksByIds`, `listLists`,
@@ -23,7 +23,7 @@
   - Módulos puros con tests: `src/ui/draft-from-editor.ts`, `src/ui/link-chip-state.ts`,
     `src/ui/search-filter.ts`, `src/ui/task-sections.ts` y `src/lumbre/list-cache.ts`.
 - **Qué hay (lote C, el bloque y la API)**:
-  - Bloque de código ```` ```lumbre ```` (`registerMarkdownCodeBlockProcessor`), renderizado en vivo
+  - Bloque de código ` ```lumbre ` (`registerMarkdownCodeBlockProcessor`), renderizado en vivo
     y sin tocar el Markdown: consulta en líneas `clave: valor` (`scope`, `list`, `section`, `days`,
     `tag`, `includeDone`, `limit`, `title`), cabecera con título o descripción y botón «Actualizar»,
     casilla que completa o reabre por la cola, punto de prioridad, fecha o «Algún día», deadline con
@@ -41,8 +41,7 @@
   - Comando **Anotar en el BRL**: modal mínimo (un campo de texto prefijado con la selección y dos
     botones, «Nota» y «Pensamiento»). Encola un `createBrlEntry` por la cola durable, con su
     relectura propia (`GET /api/brl/<fecha>?format=json`, buscando el id que fijó el plugin), y
-- **Versión**: 0.1.12 (publicada para BRAT).
-  - Bloque de código ```` ```lumbre-brl ````: cuerpo opcional `date: today|YYYY-MM-DD`, el Markdown
+  - Bloque de código ` ```lumbre-brl `: cuerpo opcional `date: today|YYYY-MM-DD`, el Markdown
     del registro pintado con `MarkdownRenderer.render`, pie con «Datos de HH:MM» y botón
     «Actualizar». Caché propia con el mismo TTL de 30 s (`BrlCache`), clave por día.
   - Comando **Insertar el BRL de hoy como texto**: pega el Markdown en el cursor. Foto fija.
@@ -405,7 +404,7 @@
     `src/blocks/block-footer.ts`). Un `getTask` que falla para una tarea concreta no tira la lectura
     entera: esa tarea sencillamente se queda sin subtareas.
   - `QueryCacheOptions.client` acepta `getTask` como OPCIONAL (`Partial<Pick<LumbreClient,
-    'getTask'>>`, a diferencia de `listTasks`): sin él (o con `context: none`), la caché nunca lo
+'getTask'>>`, a diferencia de `listTasks`): sin él (o con `context: none`), la caché nunca lo
     llama, así que un test que no toca `context: full` no tiene que simularlo.
   - Test de forma sobre el DOM del bloque (`src/blocks/task-block.test.ts`, nuevo): con
     `context: full`, ninguna línea es una casilla de Markdown (la única `<input type="checkbox">`
@@ -424,7 +423,7 @@
     que no lo pidió. `contextStateLabel` (`task-context.ts`) reutiliza `taskStateLabels` y solo
     añade el caso que le falta.
 - **Lote L: sondeo de cambios por `updatedSince`** (tarea `5800b32a` de Lumbre, paso 4): el panel
-  y los bloques ```lumbre``` se enteran de lo que cambia FUERA de Obsidian (completada, archivada o
+  y los bloques `lumbre` se enteran de lo que cambia FUERA de Obsidian (completada, archivada o
   movida desde la app o el móvil) sin releerlo todo a ciegas.
   - `LumbreClient.tasksUpdatedSince` (`src/lumbre/client.ts`): `GET /api/tasks?updatedSince=`, la
     misma ruta que `listTasks` (comparte pestillo de lecturas y cubo de 120/min), pero una forma
@@ -468,7 +467,7 @@
   - **El tope, medido en el repo de Lumbre el 5 sep 2026**: `MAX_NOTES_LEN = 10000`
     (`src/lib/ingest-structured.ts:29`). Por encima de eso el servidor NO rechaza: recorta el campo en
     SILENCIO (`src/lib/server/repos/mutations.ts:357`, `out.notes = body.notes.trim().slice(0,
-    MAX_NOTES_LEN)`), así que el plugin decide el recorte ANTES de mandar nada. Si la foto no cabe, el
+MAX_NOTES_LEN)`), así que el plugin decide el recorte ANTES de mandar nada. Si la foto no cabe, el
     modal lo dice y ofrece recortar (el TEXTO de la foto, nunca lo existente ni la cabecera, con una
     marca `TRUNCATION_MARK`) o cancelar. El cuerpo de `POST /api/mutations` tiene además un tope de
     64 KiB (`src/routes/api/mutations/+server.ts:106`), pero en caracteres de `notes` el de arriba se
@@ -495,7 +494,7 @@
   sin `GET /api/export`, tratándolos como ausentes.
   - **`outcome`**: `client.mutate()` (`src/lumbre/client.ts`) devuelve ahora
     `LumbreResult<{ outcome?: MutationOutcome }>`, con `outcome` uno de `'applied' | 'noop' |
-    'not-found' | 'queued'` si el JSON de la respuesta lo trae y es uno de los cuatro valores;
+'not-found' | 'queued'` si el JSON de la respuesta lo trae y es uno de los cuatro valores;
     `undefined` en cualquier otro caso (campo ausente, valor que no reconoce, o un Lumbre anterior al
     contrato). La cola (`src/lumbre/queue.ts`) lo interpreta SOLO para `status` y `notes` (`outcomeOf`):
     con `applied`/`noop` pasa a `materialized` DIRECTAMENTE, sin releer (`materializeByOutcome`); con
@@ -533,3 +532,80 @@
     `mutate`: su relectura es OTRA (el JSON del día, no `getTask`) y su target no es una tarea
     existente. El registro de la exportación apunta bytes y milisegundos, nunca el contenido (que
     puede llevar títulos y notas de tareas).
+- **Lote P: tipos ampliados, menú de tareas, filtros del bloque, edición del BRL, panel de estado,
+  ficha de referencia, listas y hábitos, adjuntos completos** (once lotes empujados a `main`, cada
+  uno con `npm run check` en verde sobre el árbol integrado: 56 ficheros de test, 918 tests,
+  `verify-release` coherente y build OK):
+  - **P1** Tipos de tarea ampliados: `recurrence`, `seriesId`, `tags`, `effectiveTags` y
+    `attachments` (interfaz `LumbreAttachment` nueva) en `LumbreTask` y `taskFromApi`
+    (`src/lumbre/types.ts`). Los cinco los sirve hoy el servidor, comprobado leyendo
+    `serializeTask` del repo de Lumbre; van OPCIONALES para distinguir «el servidor no lo dice» de
+    «la tarea no lo tiene».
+  - **P2** Tipo genérico de mutación en la cola (`src/lumbre/queue.ts`): tipo `'mutation'`, método
+    `enqueueMutation`, la `MutationOp` viaja verbatim, confirmación por `outcome` y descriptor de
+    relectura `MutationCheck` persistido en la operación, con nueve casos. Cinco ops nuevas en
+    `src/lumbre/client.ts` (`createList`, `setListNotes`, `updateBrlEntry`, `removeBrlEntry`,
+    `registerHabit`) más `listNotes(listId)`, base de P6, P9, P10 y P11.
+  - **P3** Captura de varias líneas seleccionadas como tareas en un solo `POST /api/batch`:
+    `linesFromSelection` (`src/ui/draft-from-editor.ts`) y el módulo nuevo
+    `src/send-lines/send-lines-flow.ts`, más el comando **Enviar como tareas**. Sin selección usa la
+    línea del cursor, que es la variante sin modal.
+  - **P4** Menú de acciones por tarea, el mismo en el panel y en el bloque
+    (`src/ui/task-menu-items.ts`, `task-menu-ops.ts`, `task-menu.ts`, `task-menu-modals.ts`,
+    consumidos por `src/blocks/task-block.ts` y `src/ui/note-tasks-view.ts`): reprogramar, cancelar,
+    restaurar, mover de sección o de lista, añadir y completar subtareas. Sin reprogramar en
+    recurrentes (movería la serie entera) ni «Algún día» (ninguna op pone `someday`).
+  - **P5** Filtros `priority` y `deadline` y claves `sort` y `group` en el bloque ` ```lumbre `
+    (`src/blocks/query-parser.ts`, `src/ui/task-sections.ts`), con `group: auto` por defecto que
+    reproduce el comportamiento anterior. Incluye el ARREGLO del filtro `tag`, que buscaba «#tag» en
+    el texto del título y ahora filtra por `effectiveTags`. `docs/API.md` y `LumbreQueryInput` al
+    día con esas claves y con `notes`, `context` y `title`, que el parser ya aceptaba y la doc no
+    declaraba.
+  - **P6** Editar y borrar entradas del BRL desde el bloque ` ```lumbre-brl `
+    (`src/brl/brl-ops.ts` ampliado, `src/brl/brl-entry-state.ts` y `brl-delete-modal.ts` nuevos,
+    interfaz en `src/blocks/brl-block.ts`). La relectura es obligatoria aquí porque el servidor
+    responde `applied` exista o no la entrada.
+  - **P7** Barra de estado de la cola, entradas en el menú del explorador de ficheros y manejador
+    `obsidian://lumbre` (`src/status-bar/status-bar.ts`, `src/file-menu/file-menu-items.ts`,
+    `src/protocol/protocol-router.ts`, `src/attachments/task-suggest-modal.ts`). La barra no se
+    registra en móvil, donde no existe.
+  - **P8** Ficha viva para las referencias a tarea que copia la app, en MODO LECTURA:
+    `src/blocks/ref-chip-parser.ts`, `ref-chip-cache.ts`, `ref-chip-format.ts` y
+    `ref-chip-postprocessor.ts`. El clic abre la tarea en Lumbre en vez de sacar el aviso de nombre
+    de fichero inválido. La vista previa en vivo (extensión de CodeMirror) queda FUERA y sin
+    sondear.
+  - **P9** Comando **Crear una lista con el nombre de esta nota y vincularla**
+    (`src/lists/create-list-from-note.ts`). Manda el nombre literal de la nota, prefijo
+    Johnny.Decimal incluido. Si la nota ya tiene `lumbre-list`, no crea nada.
+  - **P10** Comando **Guardar esta nota como notas de la lista** (`src/lists/list-notes-flow.ts` y
+    `save-list-notes-modal.ts`, más el campo `notes` en `LumbreList`). Foto fija a petición, no
+    sincronización.
+  - **P11** Comando **Registrar hábito** (`src/habits/habit-name.ts`, `register-habit-flow.ts`,
+    `register-habit-modal.ts`, sección «Hábitos» en `src/settings.ts`) y `PLUGIN_DATA_VERSION` de 5
+    a 6 con su migración. Campo de texto con `datalist` y no un selector porque el plugin NO puede
+    listar hábitos: no salen en `GET /api/tasks` y los endpoints de hoy y próximos dan 401 con el
+    token personal.
+  - **P12** Adjuntos de una tarea en el panel: listar, abrir y borrar con confirmación
+    (`src/attachments/attachment-list.ts`, `attachment-viewer.ts`, `attachment-delete-modal.ts`,
+    `attachment-preview-modal.ts`), más `arrayBuffer` en `LumbreResponse` y los métodos
+    `getAttachment` y `deleteAttachment` en `src/lumbre/client.ts`, con cubo de cupo propio por ruta
+    normalizada. Cupos verificados contra el repo de Lumbre: 120/min el GET, 60/min el DELETE.
+  - **P13** `rereadRequired` de la cola cubre ahora `listNotes`: un `setListNotes` sobre una lista
+    borrada responde `outcome: 'noop'`, no `not-found`, y sin relectura obligatoria se habría
+    materializado una escritura que no ocurrió.
+  - **P14** El refresco del bloque ` ```lumbre-brl ` gastaba dos peticiones a
+    `GET /api/brl/[date]` (el mismo cubo de cupo) y el Markdown ya no lo usa nadie más que el
+    comando de insertar. Ahora el bloque gasta una y el comando tiene su propio camino
+    (`BrlCache.getMarkdown`), con un test que cuenta las peticiones de cada uno.
+  - **P15** La sección de Hábitos de los ajustes repintaba la pestaña entera con `display()`,
+    deprecado en Obsidian 1.13 y con el manifest en `minAppVersion` 1.11.4. Ahora repinta solo la
+    lista de nombres. El gate queda con cero avisos de lint.
+  - **Límites del lote P**:
+    - Nadie ha abierto Obsidian: no hay QA manual de este lote, ni en escritorio ni en móvil. En
+      concreto quedan sin comprobar en vivo el menú por tarea (P4) en táctil y el modal que abre un
+      adjunto (P12, imagen, PDF y texto por `Blob` más `URL.createObjectURL`), sin descartar que la
+      CSP de Obsidian bloquee un `iframe` con `blob:`.
+    - La ficha de referencia (P8) queda a medias por decisión: solo modo lectura.
+    - Queda fuera del lote, y bloqueada, la función de empujar la URL de la nota activa a Lumbre
+      para el autofill de la captura: necesita un endpoint que hoy no existe en el servidor. Pedido
+      a la sesión de Lumbre.
