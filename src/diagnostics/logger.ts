@@ -53,6 +53,7 @@ export type LogModule =
 	| 'api'
 	| 'settings'
 	| 'vault'
+	| 'protocol'
 	| 'main';
 
 export const LOG_MODULES: readonly LogModule[] = [
@@ -66,6 +67,7 @@ export const LOG_MODULES: readonly LogModule[] = [
 	'api',
 	'settings',
 	'vault',
+	'protocol',
 	'main',
 ];
 

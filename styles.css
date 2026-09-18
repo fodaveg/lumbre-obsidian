@@ -704,6 +704,14 @@
 	height: 22px;
 }
 
+/* ── Barra de estado ──────────────────────────────────────────────────────── */
+
+/* `main.ts` la oculta con `toggle()` cuando no hay nada que contar; esto solo
+   le da la pinta de que se puede pulsar (abre el diagnóstico). */
+.lumbre-status-bar {
+	cursor: pointer;
+}
+
 /* ── Diagnóstico ──────────────────────────────────────────────────────────
    El resumen de estado de los ajustes y el modal de «Mostrar diagnóstico».
    La lista de eventos va monoespaciada y con scroll propio: son líneas largas
