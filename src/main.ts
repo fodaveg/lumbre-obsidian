@@ -5,18 +5,21 @@ import {
 	Platform,
 	Plugin,
 	requestUrl,
+	setTooltip,
 	TFile,
 	type Editor,
 	type MarkdownFileInfo,
 	type MarkdownPostProcessorContext,
 	type MarkdownView,
 	type Menu,
+	type ObsidianProtocolData,
 	type TAbstractFile,
 	type WorkspaceLeaf,
 } from 'obsidian';
 
 import { LumbreApi } from './api/lumbre-api';
 import { FileSuggestModal } from './attachments/file-suggest-modal';
+import { TaskSuggestModal } from './attachments/task-suggest-modal';
 import { checkUploadSize, formatBytes, mimeForExtension } from './attachments/upload';
 import { BrlCache } from './blocks/brl-cache';
 import {
@@ -30,7 +33,6 @@ import { BrlEntryModal } from './brl/brl-modal';
 import { BRL_TODAY, brlCreateOp, type BrlKind } from './brl/brl-ops';
 import { DiagnosticsModal } from './diagnostics/diagnostics-modal';
 import { describeError } from './diagnostics/errors';
-import { exportFilePath } from './export/export-path';
 import {
 	LiveLog,
 	logsFolder,
@@ -40,6 +42,8 @@ import {
 import { formatEvent, Logger, shortTitle, type LogEvent, type LogLevel } from './diagnostics/logger';
 import { buildReport, DEFAULT_REPORT_EVENTS, type CacheStats } from './diagnostics/report';
 import { guarded, unhandledEvent } from './diagnostics/unhandled';
+import { exportFilePath } from './export/export-path';
+import { fileMenuItems } from './file-menu/file-menu-items';
 import { buildObsidianDeepLink, noteLinkLabel } from './links/deep-link';
 import {
 	LinkStore,
@@ -74,6 +78,7 @@ import {
 import { QUEUE_DRAIN_INTERVAL_MS, startQueueDrain } from './lumbre/queue-drain';
 import { NoteTaskSuggestModal } from './notes/note-task-suggest-modal';
 import { SaveNoteModal } from './notes/save-note-modal';
+import { routeForAction } from './protocol/protocol-router';
 import {
 	collectWeeklySnapshot,
 	type WeeklySnapshotDeps,
@@ -88,6 +93,7 @@ import {
 	type LumbreSettings,
 	type LumbreSettingsHost,
 } from './settings';
+import { startStatusBar } from './status-bar/status-bar';
 import { PluginStore, type DeviceIdStore } from './storage/plugin-store';
 import { PluginDataTokenStore, type TokenStore } from './token-store';
 import { draftFromEditor, type EditorContext } from './ui/draft-from-editor';
@@ -397,6 +403,50 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			),
 		);
 
+		// Las mismas dos acciones que ya existían (vincular a una lista, adjuntar
+		// a una tarea) desde el clic derecho en el explorador, sin tener la nota
+		// abierta. `fileMenuItems` decide QUÉ entradas le tocan a este fichero; una
+		// carpeta (`file` no es `TFile`) no lleva ninguna.
+		this.registerEvent(
+			this.app.workspace.on(
+				'file-menu',
+				guarded(
+					this.logger.child('vault'),
+					'menú contextual del explorador',
+					(menu: Menu, file: TAbstractFile) => {
+						if (!(file instanceof TFile)) return;
+						for (const kind of fileMenuItems({ extension: file.extension })) {
+							if (kind === 'linkToList') {
+								menu.addItem((item) =>
+									item
+										.setTitle('Vincular a una lista')
+										.setIcon(NOTE_TASKS_ICON)
+										.onClick(() => {
+											this.log.info('Acción del usuario', {
+												action: 'vincular a lista (menú explorador)',
+											});
+											void this.linkNoteToList(file);
+										}),
+								);
+							} else {
+								menu.addItem((item) =>
+									item
+										.setTitle('Adjuntar a una tarea de Lumbre')
+										.setIcon('paperclip')
+										.onClick(() => {
+											this.log.info('Acción del usuario', {
+												action: 'adjuntar a tarea (menú explorador)',
+											});
+											this.attachFileFromMenu(file);
+										}),
+								);
+							}
+						}
+					},
+				),
+			),
+		);
+
 		// Al volver la red hay que drenar lo que se encoló sin conexión.
 		this.registerDomEvent(window, 'online', () => {
 			this.log.info('La red ha vuelto');
@@ -460,6 +510,9 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 				void this.backfillTaskLinks();
 			}, QUEUE_DRAIN_INTERVAL_MS),
 		);
+		// La barra de estado NO existe en móvil: Obsidian no la pinta ahí.
+		if (!Platform.isMobile) this.setupStatusBar();
+		this.registerProtocolHandlers();
 		this.registerUnhandled();
 
 		this.log.info('Plugin cargado', {
@@ -794,6 +847,94 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 				}).open();
 			}),
 		});
+	}
+
+	/**
+	 * Crea el elemento de la barra de estado y lo engancha a `startStatusBar`
+	 * (`status-bar/status-bar.ts`, pura): esa función decide EL TEXTO, aquí solo
+	 * se pinta y se abre el diagnóstico al clic, igual que el comando
+	 * `show-diagnostics`.
+	 */
+	private setupStatusBar(): void {
+		const item = this.addStatusBarItem();
+		item.addClass('lumbre-status-bar');
+		this.registerDomEvent(item, 'click', () => {
+			this.log.info('Acción del usuario', { action: 'abrir diagnóstico (barra de estado)' });
+			new DiagnosticsModal(this.app, {
+				statusLines: () => this.statusLines(),
+				events: (count: number) => this.logger.recent(count),
+				buildReport: () => this.buildReport(),
+				saveReport: () => this.saveReport(),
+			}).open();
+		});
+		startStatusBar({
+			queue: this.queue,
+			isOnline: () => navigator.onLine,
+			isTokenRejected: () => this.client.readsAreLocked,
+			render: (state) => {
+				item.setText(state.text);
+				item.toggle(state.text.length > 0);
+				setTooltip(item, state.tooltip);
+			},
+			// El mismo canal que ya usan el panel y los bloques: la cola no avisa sola
+			// salvo al materializar.
+			onDataChange: (listener) => {
+				this.dataListeners.add(listener);
+			},
+			onConnectionChange: (listener) => {
+				this.registerDomEvent(window, 'online', listener);
+				this.registerDomEvent(window, 'offline', listener);
+			},
+		});
+	}
+
+	/**
+	 * `obsidian://lumbre/send` y `obsidian://lumbre/open`, para poder disparar
+	 * el plugin desde Atajos de iOS. Ver `protocol/protocol-router.ts`: las dos
+	 * rutas reales, más `lumbre` a secas como red de un Atajo viejo o mal
+	 * escrito, que cae en `unknown` y se apunta sin lanzar.
+	 */
+	private registerProtocolHandlers(): void {
+		for (const action of ['lumbre/send', 'lumbre/open', 'lumbre']) {
+			this.registerObsidianProtocolHandler(
+				action,
+				guarded(
+					this.logger.child('protocol'),
+					`obsidian://${action}`,
+					(params: ObsidianProtocolData) => {
+						const route = routeForAction(action, params);
+						switch (route.kind) {
+							case 'send':
+								this.log.info('Acción del usuario', {
+									action: 'enviar desde obsidian://lumbre/send',
+								});
+								// El título lo escribió el usuario FUERA de Obsidian: solo en
+								// `debug` y recortado a 80, igual que cualquier título de tarea.
+								if (this.logger.enabled('debug')) {
+									this.logger.child('protocol').debug('Título recibido', {
+										title: shortTitle(route.title),
+									});
+								}
+								void this.openSendModal(this.app.workspace.getActiveFile(), {
+									selection: route.title,
+									line: '',
+								});
+								return;
+							case 'open':
+								this.log.info('Acción del usuario', {
+									action: 'abrir panel desde obsidian://lumbre/open',
+								});
+								void this.openNoteTasksView();
+								return;
+							case 'unknown':
+								this.logger
+									.child('protocol')
+									.warn('Ruta de protocolo desconocida', { action: route.action });
+						}
+					},
+				),
+			);
+		}
 	}
 
 	/**
@@ -1269,6 +1410,18 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	 */
 	private attachFileToTask(task: LumbreTask): void {
 		new FileSuggestModal(this.app, (file: TFile) => {
+			void this.uploadAttachment(task, file);
+		}).open();
+	}
+
+	/**
+	 * El camino inverso al de arriba: desde «Adjuntar a una tarea de Lumbre» en
+	 * el menú del explorador ya se sabe el FICHERO, así que lo que falta elegir
+	 * es la tarea. Mismo destino, `uploadAttachment`: nada de esto duplica el
+	 * tope de 25 MB ni la subida.
+	 */
+	private attachFileFromMenu(file: TFile): void {
+		new TaskSuggestModal(this.app, this.client, (task: LumbreTask) => {
 			void this.uploadAttachment(task, file);
 		}).open();
 	}
