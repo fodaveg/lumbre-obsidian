@@ -15,28 +15,34 @@
  * día del registro. Comparten la constante del TTL, que es lo que de verdad
  * tiene que ir a la vez.
  *
- * Un día se lee por DOS caminos a la vez, en paralelo: `GET /api/brl/<date>`
- * (Markdown, lo que consume el comando «Insertar el BRL de hoy como texto») y
- * `GET /api/brl/<date>?format=json` (las mismas entradas CON su id, lo que
- * necesita el bloque en vivo para poder editar o borrar una entrada
- * concreta). Los dos caminos comparten cuenta y token, así que fallan y
- * aciertan juntos en la práctica; tratarlos como UNA sola lectura (si
- * cualquiera de los dos falla, no se pisa lo que ya hubiera de ninguno de los
- * dos) es más simple que llevar dos `fetchedAt` sueltos por día para un caso
- * que casi nunca se da suelto.
+ * Un día del registro se sirve por DOS caminos, y esta clase los trata como
+ * dos cosas DISTINTAS a propósito (medido el 18 sep 2026: mientras fueron un
+ * único `Promise.all`, cada refresco del bloque gastaba las DOS peticiones del
+ * mismo cubo, `GET /api/brl/[date]`, aunque solo una de las dos tuviera algún
+ * consumidor):
+ *
+ * - `get`/`peek`/`subscribe`/`refreshAll` (lo que usa el bloque en vivo,
+ *   `LumbreBrlBlock`): UNA petición por refresco, `GET
+ *   /api/brl/<date>?format=json`, las entradas CON su id, que es lo único que
+ *   pinta el bloque desde que edita y borra entradas sueltas. Cacheado, TTL de
+ *   30 s, una petición en vuelo por día, se invalida al materializar.
+ * - `getMarkdown` (lo único que usa el comando «Insertar el BRL de hoy como
+ *   texto», `insertBrlToday` en `main.ts`): UNA petición POR LLAMADA, `GET
+ *   /api/brl/<date>` sin `?format=json`. SIN caché a propósito: es una foto
+ *   fija que el usuario pide a mano y que ESCRIBE en la nota, así que la
+ *   última lectura buena de hace un rato no vale (ver su JSDoc); cachearla
+ *   aquí solo complicaría este fichero con un estado que nadie más comparte.
  *
  * No importa `obsidian`: recibe el cliente por inyección, igual que el resto.
  */
 
 import type { Logger } from '../diagnostics/logger';
-import { describeFailure, type BrlEntryRow, type LumbreClient } from '../lumbre/client';
+import { describeFailure, type BrlEntryRow, type LumbreClient, type LumbreFailure } from '../lumbre/client';
 import { DEFAULT_QUERY_TTL_MS, IDLE_ENTRY_TTL_MS, type CacheSnapshotStats } from './query-cache';
 
-/** Lo que ve un bloque de su día. */
+/** Lo que ve un bloque de su día. Sin Markdown: el bloque pinta entrada por entrada (ver `brl-block.ts`). */
 export interface BrlSnapshot {
-	/** Último Markdown confirmado. Vacío solo si nunca hubo lectura buena. */
-	markdown: string;
-	/** Las mismas entradas, con su id: lo que hace falta para editar o borrar una. */
+	/** Las entradas del día, con su id: lo que hace falta para editar o borrar una. */
 	entries: BrlEntryRow[];
 	/** Epoch ms de esa lectura, o `null` si todavía no ha habido ninguna buena. */
 	fetchedAt: number | null;
@@ -44,6 +50,16 @@ export interface BrlSnapshot {
 	error: string | null;
 	/** Hay una petición en vuelo para este día. */
 	loading: boolean;
+}
+
+/** Lo que devuelve `getMarkdown`: una lectura SUELTA, sin caché (ver el JSDoc del fichero). */
+export interface BrlMarkdownSnapshot {
+	/** El Markdown, o cadena vacía si la lectura falló. */
+	markdown: string;
+	/** Epoch ms de ESTA lectura, o `null` si ha fallado. */
+	fetchedAt: number | null;
+	/** Motivo del fallo, en castellano, o `null`. Nunca lleva el token. */
+	error: string | null;
 }
 
 export type BrlSubscriber = (snapshot: BrlSnapshot) => void;
@@ -59,7 +75,6 @@ export interface BrlCacheOptions {
 
 interface BrlEntry {
 	date: string;
-	markdown: string;
 	entries: BrlEntryRow[];
 	fetchedAt: number | null;
 	error: string | null;
@@ -146,7 +161,6 @@ export class BrlCache {
 
 		const created: BrlEntry = {
 			date,
-			markdown: '',
 			entries: [],
 			fetchedAt: null,
 			error: null,
@@ -207,50 +221,58 @@ export class BrlCache {
 		entry.loading = true;
 		this.notify(entry);
 
-		// Los DOS caminos a la vez: el Markdown para la foto fija y las entradas
-		// CON id para poder editar o borrar una en concreto (ver el JSDoc del
-		// fichero). Si cualquiera de los dos falla, no se pisa lo que ya hubiera de
-		// ninguno de los dos: es una sola lectura de cara a quien la pide.
-		const [markdownRead, entriesRead] = await Promise.all([
-			this.options.client.brl(entry.date),
-			this.options.client.brlJson(entry.date),
-		]);
+		// UNA petición, `?format=json`: es lo único que necesita el bloque en vivo
+		// (ver el JSDoc del fichero sobre por qué el Markdown va aparte, en
+		// `getMarkdown`, y ni se pide aquí).
+		const read = await this.options.client.brlJson(entry.date);
 		entry.loading = false;
 
-		if (markdownRead.ok && entriesRead.ok) {
-			entry.markdown = markdownRead.value;
-			entry.entries = entriesRead.value.entries;
+		if (read.ok) {
+			entry.entries = read.value.entries;
 			entry.fetchedAt = this.now();
 			entry.stale = false;
 			entry.error = null;
-			// El Markdown del registro NO se apunta: es texto del usuario. Solo cuánto.
-			this.log?.info('Registro del día leído', {
-				date: entry.date,
-				chars: markdownRead.value.length,
-				entries: entriesRead.value.entries.length,
-			});
+			this.log?.info('Registro del día leído', { date: entry.date, entries: read.value.entries.length });
 		} else {
-			// Cualquiera de los dos que haya fallado explica el fallo: los dos
-			// caminos comparten cuenta y token, así que casi siempre fallan juntos.
-			const failure = !markdownRead.ok ? markdownRead : !entriesRead.ok ? entriesRead : null;
-			if (failure !== null) {
-				// Lo leído NO se borra: sin red se sigue enseñando la última lectura
-				// confirmada con su hora, igual que en el bloque de tareas.
-				entry.error =
-					failure.reason === 'unauthorized' && failure.status === 403
-						? 'El add-on BRL está desactivado en tu cuenta de Lumbre.'
-						: describeFailure(failure.reason, failure.status);
-				this.log?.warn('Registro del día fallido, se conserva la última lectura', {
-					date: entry.date,
-					reason: failure.reason,
-					status: failure.status,
-					hadPrevious: entry.fetchedAt !== null,
-				});
-			}
+			// Lo leído NO se borra: sin red se sigue enseñando la última lectura
+			// confirmada con su hora, igual que en el bloque de tareas.
+			entry.error = this.describeBrlFailure(read);
+			this.log?.warn('Registro del día fallido, se conserva la última lectura', {
+				date: entry.date,
+				reason: read.reason,
+				status: read.status,
+				hadPrevious: entry.fetchedAt !== null,
+			});
 		}
 
 		this.notify(entry);
 		return snapshot(entry);
+	}
+
+	/**
+	 * El Markdown de un día, en UNA petición suelta y SIN caché (ver el JSDoc del
+	 * fichero): el único consumidor es «Insertar el BRL de hoy como texto», que
+	 * siempre quiere una lectura fresca y nunca la última buena.
+	 */
+	async getMarkdown(date: string): Promise<BrlMarkdownSnapshot> {
+		const read = await this.options.client.brl(date);
+		if (read.ok) {
+			this.log?.info('Markdown del BRL leído', { date, chars: read.value.length });
+			return { markdown: read.value, fetchedAt: this.now(), error: null };
+		}
+		this.log?.warn('Markdown del BRL fallido', { date, reason: read.reason, status: read.status });
+		return { markdown: '', fetchedAt: null, error: this.describeBrlFailure(read) };
+	}
+
+	/**
+	 * El motivo de un fallo, en castellano. Con el add-on BRL apagado Lumbre
+	 * responde 403 a los DOS caminos (`brl` y `brlJson`), así que el mensaje
+	 * especial se comparte entre `fetch` y `getMarkdown`.
+	 */
+	private describeBrlFailure(failure: LumbreFailure): string {
+		return failure.reason === 'unauthorized' && failure.status === 403
+			? 'El add-on BRL está desactivado en tu cuenta de Lumbre.'
+			: describeFailure(failure.reason, failure.status);
 	}
 
 	private notify(entry: BrlEntry): void {
@@ -261,12 +283,11 @@ export class BrlCache {
 
 /** Lo que ve quien pregunta por un día del que no hay nada guardado. */
 function emptySnapshot(): BrlSnapshot {
-	return { markdown: '', entries: [], fetchedAt: null, error: null, loading: false };
+	return { entries: [], fetchedAt: null, error: null, loading: false };
 }
 
 function snapshot(entry: BrlEntry): BrlSnapshot {
 	return {
-		markdown: entry.markdown,
 		entries: entry.entries,
 		fetchedAt: entry.fetchedAt,
 		error: entry.error,

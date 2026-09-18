@@ -1087,10 +1087,12 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	 * el texto es suyo, no se vuelve a tocar.
 	 */
 	private async insertBrlToday(editor: Editor): Promise<void> {
-		const read = await this.brl.get(BRL_TODAY, true);
-		// Aquí NO vale la última lectura buena, a diferencia del bloque: esto
-		// ESCRIBE en la nota, y un texto de hace media hora pegado en el fichero ya
-		// no se distingue del de ahora. Si la lectura falla, no se pega nada.
+		// `getMarkdown` y no `get`/`brl` de la caché del bloque a propósito: aquí NO
+		// vale la última lectura buena, esto ESCRIBE en la nota, y un texto de hace
+		// media hora pegado en el fichero ya no se distingue del de ahora. Por eso
+		// no tiene caché (ver su JSDoc en `brl-cache.ts`). Si la lectura falla, no
+		// se pega nada.
+		const read = await this.brl.getMarkdown(BRL_TODAY);
 		if (read.error !== null || read.fetchedAt === null) {
 			this.log.warn('No se pega el BRL: la lectura falló', { error: read.error });
 			new Notice(read.error ?? 'No se pudo leer el BRL de hoy.');
