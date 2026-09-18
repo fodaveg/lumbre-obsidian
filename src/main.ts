@@ -60,6 +60,7 @@ import {
 	NoteListLinkStore,
 	orphansPastGrace,
 } from './links/note-list-link-store';
+import { createListFromNote } from './lists/create-list-from-note';
 import {
 	describeFailure,
 	LumbreClient,
@@ -800,6 +801,19 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 				const file = this.app.workspace.getActiveFile();
 				if (file === null || readNoteListId(this.app, file) === null) return false;
 				if (!checking) this.command('unlink-note-from-list', () => this.unlinkNoteFromList(file))();
+				return true;
+			},
+		});
+
+		this.addCommand({
+			id: 'create-list-from-note',
+			name: 'Crear lista en Lumbre con el nombre de esta nota y vincularla',
+			checkCallback: (checking: boolean) => {
+				const file = this.app.workspace.getActiveFile();
+				if (file === null) return false;
+				if (!checking) {
+					this.command('create-list-from-note', () => this.createListFromNoteCommand(file))();
+				}
 				return true;
 			},
 		});
@@ -1662,6 +1676,33 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		if (outcome.rejected.length === 0) {
 			new Notice(`${outcome.total} ${outcome.total === 1 ? 'tarea enviada' : 'tareas enviadas'} a Lumbre`);
 		}
+	}
+
+	/**
+	 * «Crear lista en Lumbre con el nombre de esta nota y vincularla»: crea la
+	 * lista (`src/lists/create-list-from-note.ts`) y, SOLO si Lumbre la
+	 * confirma dentro de ese mismo `flush()`, la vincula con `applyListLink`
+	 * (el mismo camino que usa «Vincular esta nota a una lista»).
+	 */
+	private async createListFromNoteCommand(file: TFile): Promise<void> {
+		const existingListId = readNoteListId(this.app, file);
+		const target: LinkTarget = { notePath: file.path, label: file.basename, excerpt: null };
+		const outcome = await createListFromNote({ queue: this.queue }, file.basename, existingListId, target);
+
+		if (!outcome.ok) {
+			if (outcome.reason === 'already-linked') {
+				new Notice('Esta nota ya está vinculada a una lista.');
+				return;
+			}
+			this.log.error('No se pudo confirmar la lista nueva', { notePath: file.path, error: outcome.error });
+			new Notice(
+				outcome.error ?? 'Lumbre no ha confirmado la lista todavía; vuelve a intentarlo en un momento.',
+			);
+			return;
+		}
+
+		this.lists.invalidate();
+		await this.applyListLink(file, outcome.listId, outcome.name);
 	}
 
 	/**
