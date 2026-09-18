@@ -27,8 +27,12 @@ import {
 	applyClientFilters,
 	parseQuery,
 	resolveQuery,
+	type GroupMode,
 	type LumbreScope,
+	type QueryNotes,
 	type ResolvedQuery,
+	type SortInput,
+	type TaskContextMode,
 } from '../blocks/query-parser';
 import type { LumbreTaskLink, LinkStore } from '../links/link-store';
 import { describeFailure, type LumbreClient } from '../lumbre/client';
@@ -51,10 +55,24 @@ export interface LumbreQueryInput {
 	list?: string;
 	section?: string;
 	days?: number;
-	/** Etiqueta dentro del título, con o sin almohadilla. */
+	/** Etiqueta dentro de `effectiveTags`, con o sin almohadilla. Etiqueta padre casa con sus hijas. */
 	tag?: string;
+	/** `p1` a `p4`, o varias separadas por coma (`'p1,p2'`). Ver `docs/API.md`. */
+	priority?: string;
+	/** `hoy`, `vencido`, `ninguno` o `Nd` (p. ej. `'7d'`). Ver `docs/API.md`. */
+	deadline?: string;
 	includeDone?: boolean;
 	limit?: number;
+	/** Cuánto cuerpo de la tarea trae cada resultado. `none` por defecto. */
+	notes?: QueryNotes;
+	/** Cuánto contexto trae cada tarea (chip de estado, extracto, subtareas). `none` por defecto. */
+	context?: TaskContextMode;
+	/** Texto libre, no lo usa `listTasks` (es la cabecera del bloque); se acepta por compartir el mismo parser. */
+	title?: string;
+	/** Orden de cliente. Sin escribir, el orden es el que trae el servidor. */
+	sort?: SortInput;
+	/** Cómo se agruparían las tareas en el bloque. `listTasks` lo acepta pero lo ignora: devuelve una lista plana. */
+	group?: Exclude<GroupMode, 'auto'>;
 }
 
 /** A qué parte del vault pertenece una tarea creada desde la API. */

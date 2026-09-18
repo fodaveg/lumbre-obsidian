@@ -21,7 +21,7 @@ import type { ListCache } from '../lumbre/list-cache';
 import type { OperationQueue, QueuedOperation } from '../lumbre/queue';
 import type { LumbreTask } from '../lumbre/types';
 import { linkChipState, pendingOperationFor } from '../ui/link-chip-state';
-import { groupBySection } from '../ui/task-sections';
+import { groupTasksForQuery } from '../ui/task-sections';
 import { taskStateLabels } from '../ui/task-state-labels';
 import { contextSubtasksLimitedNote, partialNote, staleNote } from './block-footer';
 import { logInvalidBlock } from './block-log';
@@ -245,13 +245,15 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		const fragment = createFragment();
 		const operations = this.host.queue.pending();
 
-		if (query.list === null) {
+		// `group` decide la agrupación; sin escribirla (`auto`), agrupa por sección
+		// solo cuando la consulta es de una lista, EXACTAMENTE como antes de que
+		// existiera esta clave (ver `groupTasksForQuery`). Fuera de una lista,
+		// agrupar por sección juntaría secciones de listas distintas.
+		const groups = groupTasksForQuery(tasks, query.group, query.list !== null);
+		if (groups === null) {
 			this.renderTaskList(fragment.createDiv({ cls: 'lumbre-list' }), tasks, operations, query.context);
 		} else {
-			// Solo se agrupa por sección cuando la consulta es de una lista: fuera de
-			// una lista, las secciones son de listas distintas y agrupar juntaría
-			// cosas que no van juntas.
-			for (const group of groupBySection(tasks)) {
+			for (const group of groups) {
 				const block = fragment.createDiv({ cls: 'lumbre-block__group' });
 				block.createDiv({ cls: 'lumbre-group__title', text: group.name });
 				this.renderTaskList(
