@@ -10,7 +10,7 @@
  * aunque el vínculo tenga guardada una lectura antigua en verde.
  */
 
-import type { OperationState, QueuedOperation } from '../lumbre/queue';
+import type { MutationCheck, OperationState, QueuedOperation } from '../lumbre/queue';
 
 /** Lo que hace falta del vínculo. Lo cumple `LumbreTaskLink`. */
 export interface ChipInput {
@@ -44,6 +44,9 @@ export interface ChipState {
  * Y tampoco un `taskLink`: aunque SÍ liga con una tarea, es un registro de
  * trazabilidad hacia Lumbre, no un cambio de la tarea en sí, así que no debe
  * tapar su chip de "Enviando…"/"Rechazada" con el estado de ese registro.
+ *
+ * Una `mutation` afecta a la tarea que nombre su comprobación, si nombra alguna
+ * (ver `mutationTaskId`).
  */
 export function pendingOperationFor(
 	operations: readonly QueuedOperation[],
@@ -70,6 +73,34 @@ function affectsTask(operation: QueuedOperation, taskId: string): boolean {
 		case 'listLink':
 		case 'taskLink':
 			return false;
+		case 'mutation':
+			return mutationTaskId(operation.check) === taskId;
+	}
+}
+
+/**
+ * La tarea a la que apunta una mutación genérica, o `null` si no apunta a
+ * ninguna (una lista, una entrada del BRL, un hábito).
+ *
+ * Se lee del `check` y no de la op: el descriptor de comprobación es justo quien
+ * nombra el objetivo, y así esto no vuelve a interpretar el payload. Una
+ * mutación sobre una SUBTAREA se enseña en el chip de su padre, que es la tarea
+ * que puede estar vinculada a la nota.
+ */
+function mutationTaskId(check: MutationCheck): string | null {
+	switch (check.check) {
+		case 'taskField':
+		case 'taskFieldSet':
+		case 'taskRef':
+			return check.taskId;
+		case 'subtasksInclude':
+		case 'subtaskDone':
+			return check.parentId;
+		case 'listExists':
+		case 'listNotes':
+		case 'brlEntry':
+		case 'none':
+			return null;
 	}
 }
 

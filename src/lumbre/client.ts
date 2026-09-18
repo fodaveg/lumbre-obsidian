@@ -190,9 +190,17 @@ export interface TasksUpdatedSinceParams {
 export type MutationOutcome = 'applied' | 'noop' | 'not-found' | 'queued';
 
 /**
- * Una mutación sobre una tarea que YA existe. Es la superficie del plugin, no
- * la del servidor: `translateOp` la traduce al `{ taskId, kind, payload }` que
- * acepta `POST /api/mutations` (ver `MUTATION_KINDS` en el repo de Lumbre).
+ * Una mutación sobre algo que YA existe (o, en las altas con id de llamador,
+ * sobre algo que va a existir con el id que se manda). Es la superficie del
+ * plugin, no la del servidor: `translateOp` la traduce al
+ * `{ taskId, kind, payload }` que acepta `POST /api/mutations` (ver
+ * `MUTATION_KINDS` en el repo de Lumbre).
+ *
+ * La columna `taskId` del servidor es GENÉRICA: transporta el id del objetivo,
+ * sea una tarea, una subtarea, una lista, una entrada del BRL o un hábito. Aquí
+ * cada op lo nombra por lo que ES (`listId`, `entryId`, `habitId`), igual que ya
+ * hacían `completeSubtask` y `createBrlEntry`, y es `translateOp` quien lo pone
+ * en `taskId`.
  */
 export type MutationOp =
 	| { op: 'complete'; taskId: string; done?: boolean }
@@ -219,7 +227,51 @@ export type MutationOp =
 	 * (`- nota`, `= pensamiento`); el servidor lo canonicaliza. `time` NO se manda:
 	 * la resuelve Lumbre con la zona horaria de la cuenta.
 	 */
-	| { op: 'createBrlEntry'; entryId: string; date: string; entry: string };
+	| { op: 'createBrlEntry'; entryId: string; date: string; entry: string }
+	/**
+	 * Una lista de "Algún día" NUEVA. El id lo genera el llamador y viaja como
+	 * `taskId`, igual que `createBrlEntry`: el materializador no crea una segunda
+	 * lista si ya hay una fila con ese id, así que reenviar es seguro.
+	 *
+	 * `name` es obligatorio (el servidor rechaza con 400 un nombre vacío tras
+	 * recortar espacios). `color` acepta la paleta cerrada de Lumbre o un hex, y
+	 * `null` explícito significa "sin color"; `icon` acepta un emoji o un nombre
+	 * de Tabler con prefijo (`tabler:flame`). `listKind` omitido = `project`, que
+	 * es el defecto del servidor.
+	 */
+	| {
+			op: 'createList';
+			listId: string;
+			name: string;
+			color?: string | null;
+			icon?: string | null;
+			listKind?: 'area' | 'project';
+	  }
+	/**
+	 * La nota libre de una lista o proyecto. `notes` es el texto FINAL, porque el
+	 * campo se REEMPLAZA igual que en un `update` de tarea, y vacío o `null` lo
+	 * borra.
+	 *
+	 * `revive: true` es la ÚNICA vía para volver a encender una nota ya borrada:
+	 * escribir contenido sin él la deja apagada (el borrado es PEGAJOSO, con su
+	 * propio tombstone `notesDeletedAt`, ver `setListNotesOp` en el repo de
+	 * Lumbre). Sin `revive`, una nota que se borró antes sigue leyéndose `null`
+	 * por mucho texto nuevo que se mande.
+	 */
+	| { op: 'setListNotes'; listId: string; notes: string | null; revive?: boolean }
+	/**
+	 * Reemplaza el texto de una entrada del BRL que ya existe. Cambiar el
+	 * marcador cambia el tipo (`-` nota, `=` pensamiento), igual que en la
+	 * interfaz de Lumbre. Los ids salen de `GET /api/brl/<date>?format=json`.
+	 */
+	| { op: 'updateBrlEntry'; entryId: string; entry: string }
+	/** Borra una entrada del BRL. Su id sale del mismo sitio que en `updateBrlEntry`. */
+	| { op: 'removeBrlEntry'; entryId: string }
+	/**
+	 * Apunta la ocurrencia de un hábito en `date` (`YYYY-MM-DD`). Es el mismo
+	 * verbo que "registrar" en la interfaz, con su cascada hábito → tarea.
+	 */
+	| { op: 'registerHabit'; habitId: string; date: string };
 
 /**
  * Una operación de `POST /api/batch`: crear una tarea, mutar una existente, o
@@ -648,6 +700,31 @@ export class LumbreClient {
 		const response = await this.gated('GET', path, () => this.send('GET', path));
 		if (!response.ok) return response;
 		return { ok: true, value: listsFromApi(response.value) };
+	}
+
+	/**
+	 * La nota de UNA lista, del mismo `GET /api/tasks?includeLists=1` que
+	 * `listLists()` y por su mismo cubo.
+	 *
+	 * Va aparte y parsea el catálogo por su cuenta porque `LumbreList`
+	 * (`src/lumbre/types.ts`) todavía no modela `notes`, y el endpoint SÍ lo
+	 * sirve. Lo usa la cola para confirmar un `setListNotes` releyendo, que es
+	 * la única relectura posible de esa mutación.
+	 *
+	 * `found: false` es "esa lista no está en el catálogo" (borrada, o de otra
+	 * cuenta) y es DISTINTO de `notes: null`, que es "está y no tiene nota".
+	 * Quien confirma necesita separarlos: lo primero no se confirma nunca, lo
+	 * segundo puede ser justo lo que se pedía (borrar la nota). El `null` llega
+	 * ya con el tombstone aplicado por el servidor: una nota borrada se lee
+	 * `null` aunque la celda conserve texto residual.
+	 */
+	async listNotes(
+		listId: string,
+	): Promise<LumbreResult<{ found: boolean; notes: string | null }>> {
+		const path = '/api/tasks?includeLists=1';
+		const response = await this.gated('GET', path, () => this.send('GET', path));
+		if (!response.ok) return response;
+		return { ok: true, value: listNotesFrom(response.value, listId) };
 	}
 
 	/**
@@ -1147,6 +1224,28 @@ export function translateOp(op: MutationOp): ServerMutation {
 			// servidor (lo mismo hacen `removeList` o `createList`). `time` no se
 			// manda a propósito, la resuelve el encolado con la zona de la cuenta.
 			return { taskId: op.entryId, kind: 'createBrlEntry', payload: { date: op.date, entry: op.entry } };
+		case 'createList': {
+			// Los opcionales solo viajan si el llamador los puso: `validateCreateListPayload`
+			// mira `'color' in body`, así que un `undefined` explícito no es lo mismo
+			// que no mandar el campo.
+			const payload: Record<string, unknown> = { name: op.name };
+			if (op.color !== undefined) payload['color'] = op.color;
+			if (op.icon !== undefined) payload['icon'] = op.icon;
+			if (op.listKind !== undefined) payload['listKind'] = op.listKind;
+			return { taskId: op.listId, kind: 'createList', payload };
+		}
+		case 'setListNotes': {
+			// `notes` es obligatorio (aunque sea `null`); `revive` solo si se pidió.
+			const payload: Record<string, unknown> = { notes: op.notes };
+			if (op.revive !== undefined) payload['revive'] = op.revive;
+			return { taskId: op.listId, kind: 'setListNotes', payload };
+		}
+		case 'updateBrlEntry':
+			return { taskId: op.entryId, kind: 'updateBrlEntry', payload: { entry: op.entry } };
+		case 'removeBrlEntry':
+			return { taskId: op.entryId, kind: 'removeBrlEntry', payload: {} };
+		case 'registerHabit':
+			return { taskId: op.habitId, kind: 'registerHabit', payload: { date: op.date } };
 	}
 }
 
@@ -1279,6 +1378,23 @@ function outcomeFrom(raw: unknown): MutationOutcome | undefined {
 	return typeof value === 'string' && MUTATION_OUTCOMES.has(value)
 		? (value as MutationOutcome)
 		: undefined;
+}
+
+/**
+ * Busca una lista dentro del catálogo de `?includeLists=1` y devuelve si está y
+ * qué nota tiene. Ver el JSDoc de `LumbreClient.listNotes` para por qué no pasa
+ * por `listsFromApi`.
+ */
+function listNotesFrom(raw: unknown, listId: string): { found: boolean; notes: string | null } {
+	const lists = asRow(raw)?.['lists'];
+	if (!Array.isArray(lists)) return { found: false, notes: null };
+	for (const item of lists) {
+		const row = asRow(item);
+		if (row === null || row['id'] !== listId) continue;
+		const notes = row['notes'];
+		return { found: true, notes: typeof notes === 'string' ? notes : null };
+	}
+	return { found: false, notes: null };
 }
 
 /** El JSON del BRL a `BrlDay`, descartando lo que no sea una entrada. */

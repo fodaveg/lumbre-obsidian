@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import type { CreateOperation, OperationState, QueuedOperation, StatusOperation } from '../lumbre/queue';
+import type {
+	CreateOperation,
+	MutationCheck,
+	OperationState,
+	QueuedOperation,
+	StatusOperation,
+} from '../lumbre/queue';
 import { linkChipState, pendingOperationFor } from './link-chip-state';
 
 function base(state: OperationState, error: string | null = null): Omit<CreateOperation, 'kind'> {
@@ -38,6 +44,11 @@ function notesOp(state: OperationState): QueuedOperation {
 	return { ...rest, kind: 'notes', taskId: 'task-2', notes: 'da igual', header: '=== Foto ===' };
 }
 
+function mutationOp(state: OperationState, check: MutationCheck): QueuedOperation {
+	const { clientTaskId: _clientTaskId, draft: _draft, ...rest } = base(state);
+	return { ...rest, kind: 'mutation', op: { op: 'restore', taskId: 'task-2' }, check };
+}
+
 function taskLinkOp(state: OperationState, taskId = 'task-1'): QueuedOperation {
 	const { clientTaskId: _clientTaskId, draft: _draft, ...rest } = base(state);
 	return { ...rest, kind: 'taskLink', type: 'link', taskId, url: 'obsidian://open?vault=v&file=x', label: 'x' };
@@ -64,6 +75,38 @@ describe('pendingOperationFor', () => {
 
 	it('un taskLink no tapa el chip de SU PROPIA tarea: es un registro de trazabilidad, no un cambio de la tarea', () => {
 		expect(pendingOperationFor([taskLinkOp('sent', 'task-1')], 'task-1')).toBeUndefined();
+	});
+
+	it('una mutación se busca por la tarea que nombra su comprobación', () => {
+		const operation = mutationOp('sent', {
+			check: 'taskFieldSet',
+			taskId: 'task-2',
+			field: 'cancelledAt',
+			set: false,
+		});
+		expect(pendingOperationFor([operation], 'task-2')?.kind).toBe('mutation');
+		expect(pendingOperationFor([operation], 'task-1')).toBeUndefined();
+	});
+
+	it('una mutación sobre una subtarea se enseña en el chip de su PADRE', () => {
+		const operation = mutationOp('sent', {
+			check: 'subtaskDone',
+			parentId: 'task-2',
+			subtaskId: 'sub-1',
+			done: true,
+		});
+		expect(pendingOperationFor([operation], 'task-2')?.kind).toBe('mutation');
+		expect(pendingOperationFor([operation], 'sub-1')).toBeUndefined();
+	});
+
+	it('una mutación que no apunta a una tarea no afecta a ninguna', () => {
+		// Una lista, una entrada del BRL o un hábito no son una tarea.
+		expect(
+			pendingOperationFor([mutationOp('sent', { check: 'listExists', listId: 'list-1' })], 'task-2'),
+		).toBeUndefined();
+		expect(
+			pendingOperationFor([mutationOp('sent', { check: 'none' })], 'task-2'),
+		).toBeUndefined();
 	});
 
 	it('con varias sobre la misma tarea gana la MÁS RECIENTE', () => {
