@@ -1,6 +1,6 @@
 # Estado
 
-- **Versión**: 0.1.13 (publicada para BRAT).
+- **Versión**: 0.1.14 (publicada para BRAT).
 - **Qué hay**: esqueleto del plugin, ajustes (origen + token), botón de prueba de conexión, gate
   `npm run check`, CI y workflow de release para BRAT con los tres assets sueltos.
 - **Qué hay (lote A)**: cliente HTTP completo (`listTasks`, `getTask`, `getTasksByIds`, `listLists`,
@@ -619,21 +619,37 @@ MAX_NOTES_LEN)`), así que el plugin decide el recorte ANTES de mandar nada. Si 
     2026: ningún `.sdef`, ni `NSAppleScriptEnabled`, ni `OSAScriptingDefinition` en su `Info.plist`, y
     `osascript` devuelve error -1728), así que el lector de enlaces de Lumbre no puede sacar la URL de
     la nota por Apple Events.
-  - **Límites de P16**: `POST /api/foreground-link` está construido y su contrato cerrado, pero está
-    commiteado en una rama de Lumbre, NO en su `main`, y encima el lado de LECTURA (que la ventana de
-    captura consuma el valor) sigue en construcción; hasta que esté desplegado, el empuje falla y se
-    descarta en silencio, que es el comportamiento diseñado. El cupo `FOREGROUND_LINK_RATE_LIMIT = 60`
-    SÍ está medido (60/min por credencial, con un test que llena el bucket a 60 y comprueba que la 61
-    da 429 sin tocar la fila); lo pendiente es alinear el cliente con el resto del contrato final:
-    longitud máxima de la url en 2048, título entre 1 y 300 caracteres, cabecera
-    `Content-Type: application/json` obligatoria, y atar la procedencia de la constante del cupo a esa
-    medición.
+  - **P17** Alinea el cliente con el contrato FINAL de `POST /api/foreground-link` (tarea `c178a4e7`):
+    `src/lumbre/foreground-link.ts` gana `FOREGROUND_LINK_MAX_URL_LENGTH` (2048); si la url de la nota
+    se pasa de ahí, NO se empuja y se apunta un aviso en el registro, en vez de gastar una petición
+    para un 400 seguro. `composeTitle` omite el título si queda vacío o de solo espacios (ausente es
+    válido para el servidor) y lo recorta a `FOREGROUND_LINK_MAX_TITLE_LENGTH` (300) si se pasa: antes
+    reutilizaba `noteLinkLabel`, el tope de `/api/list-links`, que coincide en el valor pero es otro
+    contrato, así que ahora tiene el suyo. El JSDoc de `FOREGROUND_LINK_RATE_LIMIT` en
+    `src/lumbre/client.ts` ya no dice «pendiente de confirmar»: son 60/min por credencial, confirmados
+    por la sesión de Lumbre el 18 sep 2026 con un test que llena el cubo a 60 y comprueba que la 61 da 429. Tests nuevos en `foreground-link.test.ts` y `client.test.ts`: url justo en 2048 y en 2049,
+    título vacío y de más de 300, y la cabecera `Content-Type: application/json` de la petición (ya la
+    ponía `LumbreClient.request` para cualquier POST con cuerpo; lo nuevo es fijarlo por test para este
+    endpoint).
+  - **Límites de P16**: `POST /api/foreground-link` YA ESTÁ DESPLEGADO en producción, medido el 18 sep
+    2026 (`GET https://app.lumbre.pro/api/version` → `web: c6e968c`; `POST` y `GET` a
+    `/api/foreground-link` responden 401 «No autenticado», o sea que la ruta existe y autentica). El
+    lado de LECTURA también está: `GET /api/foreground-link` devuelve
+    `{ link: { kind, url, title, updatedAt } | null }`, con auth SOLO de sesión de cookie, más estrecha
+    que la del POST a propósito porque el consumidor es la propia app; la ventana de captura ya lo
+    consume. Lo que QUEDA, y es lo importante: la función no funciona de punta a punta todavía porque
+    hizo falta un comando nativo nuevo en Lumbre (`frontmost_app_bundle_id_hint`), ya que el bundle id
+    de la app frontal no llegaba al JavaScript (ni `frontmost_app_link` ni `frontmost_app_name_hint` lo
+    exponían: los dos filtran por apps con diccionario AppleScript y Obsidian cae a None en ambos). La
+    build de macOS instalada, la 84, no lleva ese comando; hasta que David instale una build nueva, la
+    captura no enlazará la nota aunque el plugin empuje bien.
   - **Límites del lote P**:
     - Nadie ha abierto Obsidian: no hay QA manual de este lote, ni en escritorio ni en móvil. En
       concreto quedan sin comprobar en vivo el menú por tarea (P4) en táctil y el modal que abre un
       adjunto (P12, imagen, PDF y texto por `Blob` más `URL.createObjectURL`), sin descartar que la
       CSP de Obsidian bloquee un `iframe` con `blob:`.
     - La ficha de referencia (P8) queda a medias por decisión: solo modo lectura.
-    - El enlace de la nota activa (P16) no se puede comprobar de punta a punta: `POST
-/api/foreground-link` está construido pero no desplegado en `main` de Lumbre, así que el empuje
-      queda sin verificar hasta que la sesión de Lumbre lo publique.
+    - El enlace de la nota activa (P16/P17) sigue sin poder comprobarse de punta a punta: `POST` y
+      `GET /api/foreground-link` YA están desplegados en producción, pero falta el comando nativo
+      `frontmost_app_bundle_id_hint` en la build de macOS instalada (la 84); hasta que David instale
+      una build nueva que lo lleve, la captura no enlaza la nota aunque el plugin empuje bien.
