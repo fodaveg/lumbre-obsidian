@@ -1,5 +1,6 @@
 import {
 	apiVersion,
+	MarkdownView,
 	normalizePath,
 	Notice,
 	Platform,
@@ -10,7 +11,6 @@ import {
 	type Editor,
 	type MarkdownFileInfo,
 	type MarkdownPostProcessorContext,
-	type MarkdownView,
 	type Menu,
 	type ObsidianProtocolData,
 	type TAbstractFile,
@@ -61,6 +61,8 @@ import {
 	orphansPastGrace,
 } from './links/note-list-link-store';
 import { createListFromNote } from './lists/create-list-from-note';
+import { saveListNotesSnapshot } from './lists/list-notes-flow';
+import { SaveListNotesModal } from './lists/save-list-notes-modal';
 import {
 	describeFailure,
 	LumbreClient,
@@ -857,6 +859,23 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		});
 
 		this.addCommand({
+			id: 'save-note-to-list',
+			name: 'Guardar esta nota como notas de la lista',
+			checkCallback: (checking: boolean) => {
+				const file = this.app.workspace.getActiveFile();
+				const listId = file === null ? null : readNoteListId(this.app, file);
+				if (file === null || listId === null) return false;
+				if (!checking) {
+					const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+					if (view !== null) {
+						this.command('save-note-to-list', () => this.saveNoteToList(file, listId, view.editor))();
+					}
+				}
+				return true;
+			},
+		});
+
+		this.addCommand({
 			id: 'soplo-selection',
 			name: 'Soplo con la selección',
 			editorCallback: this.command(
@@ -1270,6 +1289,71 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		if (after?.state === 'rejected') {
 			this.log.error('Lumbre rechazó la foto de la nota', { id: operation.id, error: after.error });
 			new Notice(after.error ?? 'Lumbre rechazó la foto de la nota.');
+		}
+		this.notifyDataChange();
+	}
+
+	/**
+	 * «Guardar esta nota como notas de la lista»: gemelo de `saveNoteToTask`
+	 * para la lista vinculada por `lumbre-list`. Relee el catálogo (invalidando
+	 * la caché) para tener las notas de VERDAD antes de abrir el modal: el
+	 * conteo de fotos anteriores y el hueco que queda dependen de lo que YA hay.
+	 */
+	private async saveNoteToList(file: TFile, listId: string, editor: Editor): Promise<void> {
+		const selection = editor.getSelection();
+		const scope: 'selection' | 'note' = selection.trim().length > 0 ? 'selection' : 'note';
+		const text = scope === 'selection' ? selection : editor.getValue();
+		if (text.trim().length === 0) {
+			new Notice('La nota está vacía.');
+			return;
+		}
+
+		this.lists.invalidate();
+		const lists = await this.lists.get();
+		const list = lists.find((candidate) => candidate.id === listId);
+		if (list === undefined) {
+			new Notice('Esa lista ya no existe en Lumbre.');
+			return;
+		}
+
+		new SaveListNotesModal(this.app, {
+			notePath: file.path,
+			scope,
+			text,
+			listName: list.name,
+			existingNotes: list.notes ?? null,
+			onSave: ({ notes, header }) => this.saveListNotesEntry(listId, list.name, notes, header, file),
+		}).open();
+	}
+
+	/** Encola la foto de la lista por la cola durable, avisa y drena. */
+	private async saveListNotesEntry(
+		listId: string,
+		listName: string,
+		notes: string,
+		header: string,
+		file: TFile,
+	): Promise<void> {
+		// El TEXTO no se apunta: es el contenido de la nota. Solo cuánto ocupa.
+		this.logger.child('modal').info('Acción del usuario', {
+			action: 'guardar la nota como notas de la lista',
+			listId,
+			notePath: file.path,
+			length: notes.length,
+		});
+
+		const outcome = await saveListNotesSnapshot({ queue: this.queue }, listId, notes, header, {
+			notePath: file.path,
+			label: file.basename,
+			excerpt: null,
+		});
+		new Notice(`Foto guardada en las notas de «${listName}»`);
+		this.notifyDataChange();
+		this.lists.invalidate();
+
+		if (outcome.rejected) {
+			this.log.error('Lumbre rechazó la foto de la lista', { listId, error: outcome.error });
+			new Notice(outcome.error ?? 'Lumbre rechazó la foto de la lista.');
 		}
 		this.notifyDataChange();
 	}

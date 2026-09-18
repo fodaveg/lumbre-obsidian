@@ -701,6 +701,49 @@ describe('OperationQueue: una mutación genérica', () => {
 		expect(storage.operations[0]).toMatchObject({ state: 'sent', attempts: 1 });
 	});
 
+	it('el outcome noop de un setListNotes NO confirma nada: manda la relectura', async () => {
+		// `setListNotes` sobre una lista borrada responde `noop`, igual que
+		// `setListNotes` sobre una lista viva con el mismo texto que ya tenía: el
+		// `outcome` no distingue los dos casos (ver el JSDoc de `rereadRequired`).
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'noop' } });
+		// La lista ya no está en el catálogo: la relectura NO confirma.
+		client.listNotes.mockResolvedValue({ ok: true, value: { found: false, notes: null } });
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(
+			{ op: 'setListNotes', listId: 'list-1', notes: 'texto final' },
+			{ check: 'listNotes', listId: 'list-1', header: '=== Foto de la nota ===' },
+			TARGET,
+		);
+
+		await queue.flush();
+
+		// Dos relecturas (con su espera en medio) y NADA materializado.
+		expect(client.listNotes).toHaveBeenCalledTimes(2);
+		expect(storage.operations[0]).toMatchObject({ state: 'sent', attempts: 1 });
+	});
+
+	it('el outcome noop de un setListNotes SÍ confirma cuando la relectura encuentra la cabecera', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'noop' } });
+		client.listNotes.mockResolvedValue({
+			ok: true,
+			value: { found: true, notes: '=== Foto de la nota === ya estaba' },
+		});
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(
+			{ op: 'setListNotes', listId: 'list-1', notes: 'texto final' },
+			{ check: 'listNotes', listId: 'list-1', header: '=== Foto de la nota ===' },
+			TARGET,
+		);
+
+		await queue.flush();
+
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
 	it('el outcome applied de un updateBrlEntry NO confirma nada: manda la relectura', async () => {
 		// Medido en el repo de Lumbre (`inbound-materialize.ts`, `origin/main`): los
 		// tres kinds del BRL devuelven `applied` exista o no la entrada.

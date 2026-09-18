@@ -163,6 +163,15 @@ export interface LumbreList {
 	pinned: boolean;
 	/** Tareas de primer nivel vivas en la lista. `0` es un valor legítimo. */
 	taskCount: number;
+	/**
+	 * Nota libre de la lista (`setListNotes`, ver `client.ts`). AUSENTE
+	 * (`undefined`) si la fila cruda no trae la clave `notes`, que es "este
+	 * Lumbre todavía no la sirve en este endpoint", NO "la lista no tiene
+	 * nota"; `null` si la trae pero está vacía o borrada (un `setListNotes`
+	 * sin `revive` deja un tombstone pegajoso); string con contenido si tiene
+	 * una nota de verdad. Mismo criterio AUSENTE que `LumbreTask.rolloverCount`.
+	 */
+	notes?: string | null;
 }
 
 /** Lo que hace falta para crear una tarea con `POST /api/ingest`. */
@@ -352,11 +361,21 @@ export function tasksFromApi(raw: unknown): LumbreTask[] {
 	return out;
 }
 
+/**
+ * La nota de una lista, o AUSENTE si la fila no trae la clave. Mismo criterio
+ * que `recurrenceFrom`: distinguir "no la sirve" de "la sirve vacía".
+ */
+function listNotesField(row: Record<string, unknown>): string | null | undefined {
+	if (!('notes' in row)) return undefined;
+	return asString(row['notes']);
+}
+
 /** Una lista del JSON de `?includeLists=1`. */
 export function listFromApi(raw: unknown): LumbreList | null {
 	const row = asRecord(raw);
 	const id = asString(row?.['id']);
 	if (row === null || id === null || id.length === 0) return null;
+	const notes = listNotesField(row);
 	return {
 		id,
 		name: asString(row['name']) ?? id,
@@ -365,6 +384,7 @@ export function listFromApi(raw: unknown): LumbreList | null {
 		parentListId: asString(row['parentListId']) ?? asString(row['parentId']),
 		pinned: row['pinned'] === true,
 		taskCount: typeof row['taskCount'] === 'number' ? row['taskCount'] : 0,
+		...(notes !== undefined ? { notes } : {}),
 	};
 }
 

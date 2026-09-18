@@ -1463,13 +1463,22 @@ function outcomeOf(
  * `true` si la comprobación no acepta el `outcome` como evidencia y hay que
  * releer de todas formas.
  *
- * Hoy solo el BRL: el materializador de Lumbre responde `applied` a
+ * `brlEntry`: el materializador de Lumbre responde `applied` a
  * `updateBrlEntry` y `removeBrlEntry` exista o no la entrada, así que su
  * `outcome` no distingue el cambio de la nada (ver el JSDoc del caso
  * `brlEntry`).
+ *
+ * `listNotes`: `setListNotes` sobre una lista BORRADA devuelve `outcome:
+ * 'noop'`, no `not-found` (medido en `src/lib/sync/inbound-materialize.ts`
+ * del repo de Lumbre, `origin/main`: el materializador de `setListNotes` no
+ * comprueba que la lista siga viva antes de aplicar). Con la regla general
+ * ese `noop` materializaría una escritura que en realidad no ocurrió, porque
+ * `noop` también es "se mandó el mismo texto que ya había" en el caso normal.
+ * La relectura obligatoria distingue los dos: solo confirma si la cabecera de
+ * la foto aparece de verdad en la lista releída.
  */
 function rereadRequired(check: MutationCheck): boolean {
-	return check.check === 'brlEntry';
+	return check.check === 'brlEntry' || check.check === 'listNotes';
 }
 
 /**
