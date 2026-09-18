@@ -233,6 +233,19 @@
 	color: var(--text-error);
 }
 
+/* ── Ficha sobre una referencia a tarea ───────────────────────────────────── */
+
+/* La referencia sigue siendo un `a.internal-link.is-unresolved` de Obsidian
+   (ver `ref-chip-postprocessor.ts`): esto solo la enseña como viva, no rota. */
+.lumbre-ref-chip {
+	cursor: pointer;
+}
+
+.lumbre-ref-chip__state {
+	margin-left: var(--size-4-1);
+	cursor: pointer;
+}
+
 /* ── Botones ──────────────────────────────────────────────────────────────── */
 
 .lumbre-button {
