@@ -106,6 +106,13 @@ export interface LumbreResponse {
 	 * `text/markdown` y no JSON.
 	 */
 	text?: string;
+	/**
+	 * Cuerpo binario. En `requestUrl` también es un getter, así que se lee
+	 * dentro de un try igual que `json`/`text` (ver `readArrayBuffer`). Lo usa
+	 * `getAttachment`, la única lectura de este cliente cuyo cuerpo no es
+	 * texto ni JSON.
+	 */
+	arrayBuffer?: ArrayBuffer;
 	/** Cabeceras de la respuesta, en minúsculas. De aquí sale el `retry-after`. */
 	headers?: Record<string, string>;
 }
@@ -521,6 +528,19 @@ export const TASK_LINKS_READ_RATE_LIMIT = 120;
 export const EXPORT_RATE_LIMIT = 10;
 
 /**
+ * Límite de `GET /api/attachments/<id>`: cupo PROPIO para leer los BYTES de un
+ * adjunto, distinto del de `POST /api/attachments` (la subida). Contrato dado
+ * en el encargo de esta tarea (`9e7d031d`), no releído del repo de Lumbre.
+ */
+export const ATTACHMENT_READ_RATE_LIMIT = 120;
+
+/**
+ * Límite de `DELETE /api/attachments/<id>`: soft-delete, cupo PROPIO y más
+ * estricto que el de lectura. Mismo origen que `ATTACHMENT_READ_RATE_LIMIT`.
+ */
+export const ATTACHMENT_DELETE_RATE_LIMIT = 60;
+
+/**
  * Proporción del límite de un cubo a partir de la que se avisa. Con el cubo
  * único de antes era 100 de 120 (5/6); se mantiene la misma proporción por
  * endpoint, así que el de `/api/agent` (30) avisa a partir de 25 y no espera a
@@ -544,6 +564,8 @@ const RATE_LIMITS: ReadonlyMap<string, number> = new Map([
 	['POST /api/task-links', TASK_LINKS_WRITE_RATE_LIMIT],
 	['GET /api/task-links', TASK_LINKS_READ_RATE_LIMIT],
 	['GET /api/export', EXPORT_RATE_LIMIT],
+	['GET /api/attachments/:id', ATTACHMENT_READ_RATE_LIMIT],
+	['DELETE /api/attachments/:id', ATTACHMENT_DELETE_RATE_LIMIT],
 ]);
 
 /** Ventana del contador de peticiones. */
@@ -897,6 +919,42 @@ export class LumbreClient {
 		});
 		if (!response.ok) return response;
 		return { ok: true, value: attachmentFrom(response.value) };
+	}
+
+	/**
+	 * `GET /api/attachments/<id>`: los BYTES del adjunto, proxeados por Lumbre.
+	 * El servidor nunca devuelve una URL firmada y no acepta `?token=`: el
+	 * Bearer va SIEMPRE en la cabecera `Authorization`, igual que el resto de
+	 * este cliente.
+	 *
+	 * Va por el pestillo de lecturas, igual que el resto de lecturas: un 401
+	 * aquí también apaga las demás superficies. Su cubo es PROPIO
+	 * (`ATTACHMENT_READ_RATE_LIMIT`), no el de `/api/tasks`.
+	 *
+	 * Quien llama no pide esto hasta que el usuario pide abrir el adjunto: un
+	 * fichero puede pesar hasta `MAX_ATTACHMENT_BYTES` y cargarlo antes de que
+	 * haga falta sería gastar red y memoria sin motivo.
+	 */
+	async getAttachment(id: string): Promise<LumbreResult<ArrayBuffer>> {
+		const path = attachmentPath(id);
+		const response = await this.gated('GET', path, () => this.request('GET', path));
+		if (!response.ok) return response;
+		return { ok: true, value: readArrayBuffer(response.value) };
+	}
+
+	/**
+	 * `DELETE /api/attachments/<id>`: borra el adjunto. Es un SOFT-delete en el
+	 * servidor (queda el tombstone; el adjunto deja de salir en `attachments`).
+	 *
+	 * Va DIRECTO, como `uploadAttachment`: no pasa por la cola durable (no hay
+	 * bytes ni nada que persistir en `data.json` para un borrado) ni por el
+	 * pestillo de lecturas, que solo envuelve lecturas. Su cubo es PROPIO
+	 * (`ATTACHMENT_DELETE_RATE_LIMIT`), más estricto que el de lectura.
+	 */
+	async deleteAttachment(id: string): Promise<LumbreResult<void>> {
+		const response = await this.send('DELETE', attachmentPath(id));
+		if (!response.ok) return response;
+		return { ok: true, value: undefined };
 	}
 
 	/**
@@ -1302,10 +1360,24 @@ function retryAfterOf(headers?: Record<string, string>): number | null {
 	return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
 }
 
-/** La ruta sin sus parámetros: lo que se apunta en el registro por defecto. */
+/**
+ * La ruta sin sus parámetros: lo que se apunta en el registro por defecto.
+ *
+ * El id de un adjunto va EN la ruta (`/api/attachments/<id>`), no en la
+ * query, así que aquí se normaliza a `/api/attachments/:id`: el cubo de
+ * peticiones y el registro tienen que tratar TODOS los adjuntos como el
+ * mismo endpoint, igual que `?id=` ya hace con las tareas.
+ */
 function routeOf(path: string): string {
 	const mark = path.indexOf('?');
-	return mark < 0 ? path : path.slice(0, mark);
+	const base = mark < 0 ? path : path.slice(0, mark);
+	if (base.startsWith('/api/attachments/')) return '/api/attachments/:id';
+	return base;
+}
+
+/** La ruta de UN adjunto por id: `GET`/`DELETE /api/attachments/<id>`. */
+function attachmentPath(id: string): string {
+	return `/api/attachments/${encodeURIComponent(id)}`;
 }
 
 /** Los parámetros de la consulta, o `null` si no los hay. Solo se apuntan en `debug`. */
@@ -1342,6 +1414,15 @@ function readText(response: LumbreResponse): string {
 		return response.text ?? '';
 	} catch {
 		return '';
+	}
+}
+
+/** El cuerpo binario, o un buffer vacío. Mismo cuidado con el getter que `readJson`/`readText`. */
+function readArrayBuffer(response: LumbreResponse): ArrayBuffer {
+	try {
+		return response.arrayBuffer ?? new ArrayBuffer(0);
+	} catch {
+		return new ArrayBuffer(0);
 	}
 }
 
