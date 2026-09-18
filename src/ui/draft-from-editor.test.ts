@@ -4,6 +4,7 @@ import {
 	MAX_EXCERPT_LENGTH,
 	MAX_TITLE_LENGTH,
 	draftFromEditor,
+	linesFromSelection,
 	stripListMarker,
 	truncate,
 } from './draft-from-editor';
@@ -64,5 +65,51 @@ describe('draftFromEditor', () => {
 		const draft = draftFromEditor({ selection: '', line: '   ' });
 		expect(draft.title).toBe('');
 		expect(draft.excerpt).toBeNull();
+	});
+});
+
+describe('linesFromSelection', () => {
+	it('una sola línea da un solo título', () => {
+		expect(linesFromSelection('Comprar pan')).toEqual(['Comprar pan']);
+	});
+
+	it('varias líneas dan un título por línea, en orden', () => {
+		expect(linesFromSelection('Comprar pan\nLlamar a Ana\nRegar las plantas')).toEqual([
+			'Comprar pan',
+			'Llamar a Ana',
+			'Regar las plantas',
+		]);
+	});
+
+	it('las líneas vacías intercaladas se saltan, sin generar un título vacío', () => {
+		expect(linesFromSelection('Comprar pan\n\n  \nLlamar a Ana')).toEqual([
+			'Comprar pan',
+			'Llamar a Ana',
+		]);
+	});
+
+	it('quita el marcador de viñeta y de checkbox de cada línea', () => {
+		expect(linesFromSelection('- Comprar pan\n- [ ] Llamar a Ana\n* [x] Regar plantas')).toEqual([
+			'Comprar pan',
+			'Llamar a Ana',
+			'Regar plantas',
+		]);
+	});
+
+	it('recorta cada línea a MAX_TITLE_LENGTH por separado', () => {
+		const long = 'x'.repeat(1000);
+		const [first, second] = linesFromSelection(`${long}\nCorta`);
+		expect(first).toHaveLength(MAX_TITLE_LENGTH);
+		expect(second).toBe('Corta');
+	});
+
+	it('una selección de más de 200 líneas da un título por cada una', () => {
+		const lines = Array.from({ length: 250 }, (_, index) => `Tarea ${index}`);
+		expect(linesFromSelection(lines.join('\n'))).toHaveLength(250);
+	});
+
+	it('una selección que queda vacía del todo da un array vacío', () => {
+		expect(linesFromSelection('\n  \n\t\n')).toEqual([]);
+		expect(linesFromSelection('- [ ] \n*  ')).toEqual([]);
 	});
 });

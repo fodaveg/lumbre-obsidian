@@ -64,3 +64,22 @@ export function draftFromEditor(context: EditorContext): EditorDraft {
 		excerpt: source.length > 0 ? truncate(source, MAX_EXCERPT_LENGTH) : null,
 	};
 }
+
+/**
+ * Un título POR LÍNEA, para «Enviar como tareas». A diferencia de
+ * `draftFromEditor`, que colapsa la selección entera en un solo título, aquí
+ * cada línea de la selección se convierte en su propio título: se le quita el
+ * marcador de lista, se colapsa su espacio en blanco y se recorta a
+ * `MAX_TITLE_LENGTH`, igual que un título de una sola línea.
+ *
+ * Las líneas que quedan vacías tras eso (una línea en blanco entre dos ideas,
+ * o un marcador de lista sin texto detrás) se SALTAN sin más: no generan una
+ * tarea vacía ni rompen la correspondencia entre línea y tarea, porque lo que
+ * importa es el ORDEN de las que quedan, no la posición original.
+ */
+export function linesFromSelection(selection: string): string[] {
+	return selection
+		.split('\n')
+		.map((line) => truncate(collapseWhitespace(stripListMarker(line)), MAX_TITLE_LENGTH))
+		.filter((title) => title.length > 0);
+}
