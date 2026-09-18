@@ -6,12 +6,12 @@
 sobre `Plugin.loadData/saveData`. Viaja por Obsidian Sync: casi todas las decisiones de este
 módulo vienen de ahí.
 
-## Forma (`PluginData`, `PLUGIN_DATA_VERSION = 6`)
+## Forma (`PluginData`, `PLUGIN_DATA_VERSION = 7`)
 
 | Campo | Tipo | Notas |
 |---|---|---|
 | `version` | `number` | 6 |
-| `settings` | `LumbreSettings` | `apiOrigin`, `logLevel`, `liveLog`, `exportFolder`, `habitNames` |
+| `settings` | `LumbreSettings` | `apiOrigin`, `logLevel`, `liveLog`, `exportFolder`, `habitNames`, `foregroundLinkEnabled` |
 | `token` | `string \| null` | el token personal; vive aquí en todas las plataformas (decisión del 5 sep 2026, `src/token-store.ts`) |
 | `queue` | `QueuedOperation[]` | la cola durable, ya podada |
 | `links` | `LumbreTaskLink[]` | nota ↔ tarea, con caché de la tarea, `syncState`, `orphanedAt`, `deepLink?` |
@@ -20,7 +20,8 @@ módulo vienen de ahí.
 
 Historial: 1 objeto único → 2 `logLevel` + `liveLog` → 3 `noteListLinks` → 4 `deepLink` en
 `links[]` → 5 `exportFolder` → 6 `habitNames`, los nombres de hábito guardados para «Registrar
-hábito». El formato anterior a la 1 (sin `version`) se reconoce y migra conservando token y
+hábito» → 7 `foregroundLinkEnabled`, el interruptor del empuje de la url de la nota activa
+(por defecto `true`). El formato anterior a la 1 (sin `version`) se reconoce y migra conservando token y
 origen. `migratedFrom` se apunta en el registro al arrancar.
 
 ## Migración (`migrate`)

@@ -3,7 +3,7 @@
   "tool": "codebase-mapper",
   "version": "2.15.8",
   "mappedAt": "2026-09-18",
-  "gitCommit": "f3df0c4ca7717d5ccb6755f32e7e5477f8ff737d",
+  "gitCommit": "aa4d76d7960e490a1abd4d345e5f40b0ca9e2244",
   "documents": [
     "architecture.md",
     "coding-style.md",
@@ -25,11 +25,11 @@
     "communication.md": "d9ca89039b151db5e681dd04df2fc56bdc04ac3af948a1008a08f9239a1d7a3f",
     "directory-structure.md": "c272d6f5dedef9df8a1a6d6d832f360ef6228a5cc855e97fb8a64140f2aa16ed",
     "entry-points.md": "19aa9d098298c648037b8a107b759a73c9f9af05705013f5eb2117e9560d72e4",
-    "modules.md": "5f084650a1c35933f35a2cd0a8131817ff4e5384695a211f3b304b7348e8ec03",
+    "modules.md": "c49720b5db755852fb62de744356feb7d7f30828ea6c955bda813f50eb025390",
     "onboarding.md": "fbd91a3a8d8dec29df90ea2a43e07bbdf1994882a94db76a08b6aaffa499b4b5",
     "patterns.md": "4b8b80113544fe592db782ab5a3b402b3d7bbcff2c295aeebe83be283303e9c0",
     "queue-flow.md": "f5fdc62e8a57927f12184bc7492a45d151b20bcf920f2f9df955a501474746dd",
-    "storage.md": "d265964f4fc662345d6a7a56363aec0aca7952e1e4bd4ce9bb427796fbbeb0cf",
+    "storage.md": "6e9d2e2b915fae88eda162b14ce6be2f32414cf9ac1b9e99fe9770a8c0958900",
     "tech-landscape.md": "98c13aecd00c509da0ff1d333776f6e6f802071ddbaaff20644af56980948f08",
     "vault-events.md": "b4ac9ff2a369442868e16c169eea482b0139b010812fe1c572804b1f96b790f3"
   }

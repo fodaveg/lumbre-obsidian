@@ -172,7 +172,7 @@ escritorio (`main.ts` no lo registra en móvil). Ver [entry-points.md](./entry-p
 | `diagnostics-modal.ts` (UI) | `DiagnosticsModal` | 100 eventos en un solo `setText` |
 
 ### `src/storage/plugin-store.ts` (puro)
-`PluginStore`, `PLUGIN_DATA_VERSION` 6, `DeviceIdStore`. Ver [storage.md](./storage.md).
+`PluginStore`, `PLUGIN_DATA_VERSION` 7, `DeviceIdStore`. Ver [storage.md](./storage.md).
 
 ### `src/settings.ts` (UI) y `src/token-store.ts`
 `LumbreSettings` (con `habitNames`), `DEFAULT_SETTINGS`, `LumbreSettingTab`, `LumbreSettingsHost`
