@@ -533,9 +533,9 @@ MAX_NOTES_LEN)`), así que el plugin decide el recorte ANTES de mandar nada. Si 
     existente. El registro de la exportación apunta bytes y milisegundos, nunca el contenido (que
     puede llevar títulos y notas de tareas).
 - **Lote P: tipos ampliados, menú de tareas, filtros del bloque, edición del BRL, panel de estado,
-  ficha de referencia, listas y hábitos, adjuntos completos** (once lotes empujados a `main`, cada
-  uno con `npm run check` en verde sobre el árbol integrado: 56 ficheros de test, 918 tests,
-  `verify-release` coherente y build OK):
+  ficha de referencia, listas y hábitos, adjuntos completos, enlace de la nota activa** (doce lotes
+  empujados a `main`, cada uno con `npm run check` en verde sobre el árbol integrado: 56 ficheros de
+  test, 918 tests, `verify-release` coherente y build OK):
   - **P1** Tipos de tarea ampliados: `recurrence`, `seriesId`, `tags`, `effectiveTags` y
     `attachments` (interfaz `LumbreAttachment` nueva) en `LumbreTask` y `taskFromApi`
     (`src/lumbre/types.ts`). Los cinco los sirve hoy el servidor, comprobado leyendo
@@ -600,12 +600,40 @@ MAX_NOTES_LEN)`), así que el plugin decide el recorte ANTES de mandar nada. Si 
   - **P15** La sección de Hábitos de los ajustes repintaba la pestaña entera con `display()`,
     deprecado en Obsidian 1.13 y con el manifest en `minAppVersion` 1.11.4. Ahora repinta solo la
     lista de nombres. El gate queda con cero avisos de lint.
+  - **P16** Empujar la URL de la nota activa a Lumbre para el autofill de la captura rápida (tarea
+    `c178a4e7`): `client.foregroundLink(target)` (`src/lumbre/client.ts`, `POST /api/foreground-link`,
+    cubo de cupo propio) y `ForegroundLinkPusher` (`src/lumbre/foreground-link.ts`, puro), que compone
+    la url con `buildObsidianDeepLink`/`noteLinkLabel` de `src/links/deep-link.ts`, solo empuja si la
+    url CAMBIÓ y aplica un debounce de 800 ms. Enganchado en `src/main.ts` a `active-leaf-change` y
+    `file-open`, más una llamada al cargar (porque `active-leaf-change` no dispara para la hoja que ya
+    estaba abierta). Interruptor «Enlace de la nota activa» en Ajustes (`src/settings.ts`), ENCENDIDO
+    por defecto, con la descripción explícita de que manda a Lumbre la ruta de la nota abierta.
+    `PLUGIN_DATA_VERSION` de 6 a 7 con su migración. NO va por la cola de mutaciones a propósito: el
+    valor caduca a los 120 s en el servidor, así que reintentarlo más tarde no sirve de nada y meterlo
+    en la cola durable ensuciaría `data.json`, que viaja por Obsidian Sync; si el empuje falla se
+    descarta y el siguiente cambio de nota lo reintenta solo. Con un PDF o un lienzo delante no empuja
+    nada y deja que el valor anterior caduque en el servidor: rellenar la captura con un enlace
+    equivocado no se nota hasta guardar, y quedarse sin enlace es un fallo visible que no escribe nada
+    mal.
+  - **Por qué existe P16**: Obsidian es Electron y no tiene diccionario AppleScript (medido el 18 sep
+    2026: ningún `.sdef`, ni `NSAppleScriptEnabled`, ni `OSAScriptingDefinition` en su `Info.plist`, y
+    `osascript` devuelve error -1728), así que el lector de enlaces de Lumbre no puede sacar la URL de
+    la nota por Apple Events.
+  - **Límites de P16**: `POST /api/foreground-link` está construido y su contrato cerrado, pero está
+    commiteado en una rama de Lumbre, NO en su `main`, y encima el lado de LECTURA (que la ventana de
+    captura consuma el valor) sigue en construcción; hasta que esté desplegado, el empuje falla y se
+    descarta en silencio, que es el comportamiento diseñado. El cupo `FOREGROUND_LINK_RATE_LIMIT = 60`
+    SÍ está medido (60/min por credencial, con un test que llena el bucket a 60 y comprueba que la 61
+    da 429 sin tocar la fila); lo pendiente es alinear el cliente con el resto del contrato final:
+    longitud máxima de la url en 2048, título entre 1 y 300 caracteres, cabecera
+    `Content-Type: application/json` obligatoria, y atar la procedencia de la constante del cupo a esa
+    medición.
   - **Límites del lote P**:
     - Nadie ha abierto Obsidian: no hay QA manual de este lote, ni en escritorio ni en móvil. En
       concreto quedan sin comprobar en vivo el menú por tarea (P4) en táctil y el modal que abre un
       adjunto (P12, imagen, PDF y texto por `Blob` más `URL.createObjectURL`), sin descartar que la
       CSP de Obsidian bloquee un `iframe` con `blob:`.
     - La ficha de referencia (P8) queda a medias por decisión: solo modo lectura.
-    - Queda fuera del lote, y bloqueada, la función de empujar la URL de la nota activa a Lumbre
-      para el autofill de la captura: necesita un endpoint que hoy no existe en el servidor. Pedido
-      a la sesión de Lumbre.
+    - El enlace de la nota activa (P16) no se puede comprobar de punta a punta: `POST
+/api/foreground-link` está construido pero no desplegado en `main` de Lumbre, así que el empuje
+      queda sin verificar hasta que la sesión de Lumbre lo publique.
