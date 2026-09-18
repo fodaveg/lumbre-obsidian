@@ -1,6 +1,6 @@
 # Puntos de entrada
 
-*Última actualización: 2026-09-14*
+*Última actualización: 2026-09-18*
 
 Todo se registra en `LumbrePlugin.onload` (`src/main.ts`). Los comandos van envueltos en
 `this.command(id, fn)`, que apunta un evento `info` y usa `guarded` para que una excepción no se
@@ -9,16 +9,22 @@ van con `guarded(logger, acción, fn)` de `src/diagnostics/unhandled.ts`.
 
 ## Comandos de la paleta (`registerCommands`, `src/main.ts`)
 
+Los 15, en el orden REAL en que los registra `registerCommands`:
+
 | id | Nombre en la paleta (Obsidian antepone «Lumbre:») | Tipo | Qué hace |
 |---|---|---|---|
 | `send-task` | Enviar como tarea | `editorCallback` | `openSendModal` → `sendDraft` → cola `create` |
+| `send-lines-as-tasks` | Enviar como tareas | `editorCallback` | `sendSelectionAsTasks`: una `create` por línea de la selección, en lotes de `POST /api/batch` (`src/send-lines/send-lines-flow.ts`) |
 | `open-note-tasks` | Abrir las tareas de esta nota | `callback` | `openNoteTasksView` (hoja derecha) |
 | `link-note-to-list` | Vincular esta nota a una lista | `checkCallback` (nota activa) | `ListSuggestModal` → `applyListLink`: escribe `lumbre-list` y encola `listLink` |
 | `unlink-note-from-list` | Quitar el vínculo con la lista | `checkCallback` (nota con `lumbre-list`) | borra la propiedad y encola `unlink` con la url guardada |
+| `create-list-from-note` | Crear una lista con el nombre de esta nota y vincularla | `checkCallback` (nota activa) | `createListFromNoteCommand` (`src/lists/create-list-from-note.ts`): crea la lista por `enqueueMutation` y, confirmada, la vincula como `link-note-to-list` |
 | `brl-entry` | Anotar en el BRL | `editorCallback` | `BrlEntryModal` → `sendBrlEntry` → cola `brl` |
 | `insert-brl-today` | Insertar el BRL de hoy como texto | `editorCallback` | `insertBrlToday`: foto fija, no pega si la lectura falla |
 | `insert-weekly-snapshot` | Insertar la foto semanal | `editorCallback` | `insertWeeklySnapshot`: foto fija, no pega si fallan los tres apartados |
 | `save-note-to-task` | Guardar esta nota en la tarea | `editorCallback` | `saveNoteToTask` → `SaveNoteModal` → cola `notes` |
+| `save-note-to-list` | Guardar esta nota como notas de la lista | `checkCallback` (nota con `lumbre-list`) | `saveNoteToList` (`src/lists/list-notes-flow.ts`): reutiliza `note-snapshot.ts` y encola `setListNotes` por `enqueueMutation` |
+| `register-habit` | Registrar hábito | `callback` | `RegisterHabitModal` → `registerHabitEntry` (`src/habits/register-habit-flow.ts`): `habitId` = el nombre tal cual, `enqueueMutation` con `check: 'none'` |
 | `soplo-selection` | Soplo con la selección | `editorCallback` | `openSoploModal(file, soploSource(editor))` |
 | `export-to-vault` | Guardar una copia de exportación en el vault | `callback` | `runExportToVault` → `GET /api/export` → `vault.create/modify` |
 | `show-diagnostics` | Mostrar diagnóstico | `callback` | `DiagnosticsModal` |
@@ -27,6 +33,64 @@ Menú contextual del editor (`workspace.on('editor-menu')`): «Enviar a Lumbre»
 selección».
 
 Ribbon: icono `flame` (`NOTE_TASKS_ICON`) que abre el panel.
+
+## Menú contextual del explorador
+
+`workspace.on('file-menu')` sobre cualquier `TFile` (una carpeta no lleva ninguna entrada).
+`fileMenuItems` (`src/file-menu/file-menu-items.ts`, puro) decide qué entradas le tocan al
+fichero por su extensión:
+
+- **Vincular a una lista**: solo sobre un `.md` (`linkToList`). Reutiliza `linkNoteToList`
+  (`main.ts`), la misma acción que el comando `link-note-to-list`.
+- **Adjuntar a una tarea de Lumbre**: sobre CUALQUIER fichero, incluida una nota (`attachToTask`).
+  `attachFileFromMenu` abre el selector de tarea y sube por `client.uploadAttachment`; el tope de
+  25 MB lo comprueba `attachments/upload.ts` al elegir la tarea.
+
+## Barra de estado
+
+`src/status-bar/status-bar.ts` (puro) + `main.ts` (`addStatusBarItem`). Solo en escritorio:
+Obsidian no la pinta en móvil, así que `main.ts` no la registra con `Platform.isMobile`. Prioridad
+de lo que se enseña, de más a menos urgente: token rechazado, sin conexión, operaciones con error
+(rechazadas o agotadas, no se arreglan solas), operaciones pendientes. Con todo en orden el texto
+queda vacío y el elemento no ocupa sitio. Se repinta con el mismo canal que panel y bloques
+(`notifyDataChange`) y con `online`/`offline`; el clic abre `DiagnosticsModal`.
+
+## Protocolo `obsidian://lumbre/*`
+
+`src/protocol/protocol-router.ts` (puro) + `registerProtocolHandlers` (`main.ts`), para disparar
+el plugin desde Atajos de iOS sin pasar por la paleta. `registerObsidianProtocolHandler` no admite
+comodines, así que se registran tres acciones EXACTAS:
+
+- `lumbre/send` (`obsidian://lumbre/send?title=…`): abre `SendTaskModal` con el título ya puesto.
+  El título es texto EXTERNO: `parseSendTitle` lo recorta a `MAX_TITLE_LENGTH` antes de que llegue
+  a ninguna parte, y solo se apunta en `debug` recortado a 80 (`shortTitle`).
+- `lumbre/open` (`obsidian://lumbre/open`): abre el panel de tareas.
+- `lumbre` a secas: la ruta de un Atajo viejo o mal escrito. Cae en `unknown` por
+  `routeForAction`; `main.ts` la apunta y la ignora, nunca lanza.
+
+## Ficha de referencia a tarea
+
+`registerMarkdownPostProcessor` monta `RefChipRenderer` (`src/blocks/ref-chip-postprocessor.ts`)
+sobre el enlace interno SIN RESOLVER que pinta Obsidian para `[[task:ID|Etiqueta]]` (lo que copia
+la app de Lumbre al portapapeles; `list:ID` se deja fuera). Añade estado y fecha a continuación
+(`ref-chip-format.ts`, leído en lote por `RefTaskCache`, `ref-chip-cache.ts`, TTL 30 s) e
+intercepta el clic para abrir la tarea en Lumbre en vez de dejar que Obsidian intente crear el
+fichero. Nunca escribe en la nota; solo lee.
+
+## Menú por tarea
+
+`src/ui/task-menu.ts` (`mountTaskMenu`) monta el mismo menú corto en el panel y en el bloque
+```lumbre```: botón «⋯» en la fila (para móvil, sin clic derecho fiable) más el clic derecho sobre
+la fila entera. Qué entradas salen lo decide `task-menu-items.ts` (puro); qué se manda,
+`task-menu-ops.ts`. Reglas de exclusión, cada una tapa un modo de fallo medido contra el repo de
+Lumbre:
+
+- **Archivada**: ningún menú.
+- **Cancelada**: solo «Restaurar».
+- **Recurrente** (`recurrence` o `seriesId` presentes): sin reprogramar, porque el id visible es
+  la semilla de la serie entera desde el 16 sep 2026.
+- **Subtarea** (`parentId` no nulo): sin mover de lista, sin sección, sin subtareas propias.
+- **Sin lista**: sin «Mover a otra sección».
 
 ## Bloques de código
 
@@ -79,10 +143,11 @@ Además: `window` `online` → `flushIfConnected`; `window` `error` y `unhandled
 `weeklySnapshot` y `exportToVault` delegan en `main.ts`. Emite `lumbre:tasks-changed` en el
 workspace (`TASKS_CHANGED_EVENT`) y ofrece `on('tasks-changed' | 'connection-changed')`.
 
-Desajustes conocidos entre código y `docs/API.md` (medidos el 14 sep 2026): `LumbreQueryInput`
-no declara `notes`, `context` ni `title` aunque el parser los acepta y la doc los usa; la doc de
-`weeklySnapshot` dice «una petición por lista» pero ese es solo el camino de repliegue cuando el
-pool `scope: all` falla o llega recortado.
+Desajuste conocido entre código y `docs/API.md` (medido el 18 sep 2026, corrige el que constaba
+aquí el 14 sep 2026): `LumbreQueryInput` YA declara `notes`, `context` y `title`, más `priority`,
+`deadline`, `sort` y `group`. Sigue sin comprobar: la doc de `weeklySnapshot` dice «una petición
+por lista» pero ese es solo el camino de repliegue cuando el pool `scope: all` falla o llega
+recortado.
 
 ## Flujo representativo: Soplo
 

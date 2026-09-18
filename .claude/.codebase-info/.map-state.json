@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "tool": "codebase-mapper",
   "version": "2.15.8",
-  "mappedAt": "2026-09-14",
-  "gitCommit": "0d072d2a60bf05c4600c4fb684d20de002188a5a",
+  "mappedAt": "2026-09-18",
+  "gitCommit": "f3df0c4ca7717d5ccb6755f32e7e5477f8ff737d",
   "documents": [
     "architecture.md",
     "coding-style.md",
@@ -19,17 +19,17 @@
     "vault-events.md"
   ],
   "hashes": {
-    "INDEX.md": "03a463be2cdcc011267946765b8b874c5f68dbd3f40edc9476bc7391cfc5ea5a",
-    "architecture.md": "e1b750d87c14598ae013892567dbfa617afa12a2277d92caf74afea4533739a9",
+    "INDEX.md": "fa82d0cb2aed9dfd62447a675780d60b7a61706436f284da2c57a56c950d3cd7",
+    "architecture.md": "5d481c9e9e136c3dc3c85457517d46d8739461914a1a5f840b0c0e4c5dbcd068",
     "coding-style.md": "5312cea7ef768dfacd9610c8728bd5d2cdeb4f118e3e351c8a624785de7f9086",
-    "communication.md": "fc6514403cd350276156c76e461b374732cd1abf7072d3b8ef5022c3f1549f23",
-    "directory-structure.md": "80f4d470bd45ffce63e38fbc0254d587e6aff9ceb8afece48f97b34203749456",
-    "entry-points.md": "486faa7394fb56ae071f6310f4ae64c11ff129a1ded5bfeb049f565e17fd47eb",
-    "modules.md": "014b6bb3f67a37810a7aa523b013062068acdb82dbb7f0be6f805a0aad391e26",
+    "communication.md": "d9ca89039b151db5e681dd04df2fc56bdc04ac3af948a1008a08f9239a1d7a3f",
+    "directory-structure.md": "c272d6f5dedef9df8a1a6d6d832f360ef6228a5cc855e97fb8a64140f2aa16ed",
+    "entry-points.md": "19aa9d098298c648037b8a107b759a73c9f9af05705013f5eb2117e9560d72e4",
+    "modules.md": "5f084650a1c35933f35a2cd0a8131817ff4e5384695a211f3b304b7348e8ec03",
     "onboarding.md": "fbd91a3a8d8dec29df90ea2a43e07bbdf1994882a94db76a08b6aaffa499b4b5",
-    "patterns.md": "f23c59ee9c31387d2ea7fa5e71d6c3f1d9342a453d0dbc0a327a6bd0483e6ed3",
-    "queue-flow.md": "844667e1e12d4c8f4ad1bd39d21a3b42afcce98dd3e892e351cac5e0ab0143ab",
-    "storage.md": "8a5795cab8bccfbf688d4725dd101f5b16a701d8dc25de4709876aea890ec43d",
+    "patterns.md": "4b8b80113544fe592db782ab5a3b402b3d7bbcff2c295aeebe83be283303e9c0",
+    "queue-flow.md": "f5fdc62e8a57927f12184bc7492a45d151b20bcf920f2f9df955a501474746dd",
+    "storage.md": "d265964f4fc662345d6a7a56363aec0aca7952e1e4bd4ce9bb427796fbbeb0cf",
     "tech-landscape.md": "98c13aecd00c509da0ff1d333776f6e6f802071ddbaaff20644af56980948f08",
     "vault-events.md": "b4ac9ff2a369442868e16c169eea482b0139b010812fe1c572804b1f96b790f3"
   }

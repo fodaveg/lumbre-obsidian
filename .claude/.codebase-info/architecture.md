@@ -1,6 +1,6 @@
 # Arquitectura
 
-*Última actualización: 2026-09-14*
+*Última actualización: 2026-09-18*
 
 ## Resumen
 
@@ -44,7 +44,9 @@ Obsidian ──▶ src/main.ts (LumbrePlugin.onload)
              ├─ Cachés de lectura: QueryCache (bloques ```lumbre```), BrlCache (```lumbre-brl```),
              │   ListCache (5 min). Invalidación: queue.onMaterialized → queries.refreshSoon()
              │
-             ├─ Superficies: bloques (blocks/*-block.ts), panel NoteTasksView (ui/note-tasks-view.ts),
+             ├─ Superficies: bloques (blocks/*-block.ts), ficha de referencia (blocks/ref-chip-*.ts),
+             │   panel NoteTasksView (ui/note-tasks-view.ts), menú del explorador (file-menu/),
+             │   protocolo obsidian://lumbre/* (protocol/), barra de estado (status-bar/),
              │   modales (send, brl, soplo, save-note, suggest), pestaña de ajustes, DiagnosticsModal
              │
              ├─ Temporizadores (registerInterval, 60 s): queue-drain, change-feed, dos barridos de huérfanos
@@ -67,6 +69,7 @@ Obsidian ──▶ src/main.ts (LumbrePlugin.onload)
 | `ChangeFeed` | `src/lumbre/change-feed.ts` | Sondeo `updatedSince` con cursor en memoria; avisa a QueryCache y LinkStore | client |
 | Bloques | `src/blocks/task-block.ts`, `brl-block.ts` | `MarkdownRenderChild` que pinta y se suscribe; nunca escribe la nota | cachés, hosts |
 | Panel | `src/ui/note-tasks-view.ts` | `ItemView` que sigue a la nota activa | LinkStore, queue, client, ListCache |
+| Menú por tarea | `src/ui/task-menu.ts` + `task-menu-ops.ts` | Menú corto de una tarea (reprogramar, cancelar, mover, subtareas), consumido por el panel y por el bloque | client, queue |
 | Soplo | `src/soplo/` | Plan del agente con casillas; solo lo marcado va a `POST /api/batch` por la cola | client, queue |
 | Diagnóstico | `src/diagnostics/` | Logger con buffer de 1000, redacción, informe, ficheros de log, `guarded` | vault.adapter |
 | API pública | `src/api/lumbre-api.ts` | Superficie estable para Dataview y js-engine | queue, cachés, client |
@@ -101,7 +104,10 @@ ANTES de mandar el texto; el plan se aplica por índice, en lotes de 200, por la
   `flush()` solo procesa las propias; el id de dispositivo va al `localStorage` de Obsidian, no a
   `data.json`; el cursor del change-feed vive en memoria; la cola se poda (7 días, 50 máx.) y de lo
   releído solo se guarda `materializedAt`; `save()` relee y fusiona con lo que hay en disco.
-- Los adjuntos NO van por la cola (25 MB en base64 dentro de `data.json` sería inaceptable).
+- Los adjuntos NO van por la cola (25 MB en base64 dentro de `data.json` sería inaceptable):
+  `uploadAttachment`, `getAttachment` y `deleteAttachment` van directos contra el cliente.
+  `getAttachment` SÍ pasa por el pestillo de lecturas (es una lectura); `uploadAttachment` y
+  `deleteAttachment` no, igual que el resto de escrituras.
 - Los cupos de Lumbre son por endpoint y por token, independientes. `client.ts` lleva un cubo
   por `MÉTODO RUTA` y avisa al 5/6. Un 401 en cualquier lectura echa un pestillo global de
   lecturas; solo lo sueltan el cambio de token en Ajustes y «Reintentar» del panel.

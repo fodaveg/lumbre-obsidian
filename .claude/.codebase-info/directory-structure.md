@@ -1,9 +1,10 @@
 # Estructura de directorios
 
-*Última actualización: 2026-09-14*
+*Última actualización: 2026-09-18*
 
 Principio organizador: por dominio dentro de `src/`, con el módulo puro y su UI en la misma
-carpeta y el test al lado (`x.test.ts`). 22 420 líneas en `src/` (43 ficheros de test).
+carpeta y el test al lado (`x.test.ts`). 30 809 líneas en `src/` en 136 ficheros `.ts`, de los
+que 56 son de test.
 
 ```
 lumbre-obsidian/
@@ -14,23 +15,29 @@ lumbre-obsidian/
 │   ├── dom-events.test.ts      # test de FORMA: ningún addEventListener a pelo en src/
 │   ├── lumbre/                 # dominio de Lumbre, sin obsidian
 │   │   ├── client.ts           # HTTP, cupos por endpoint, pestillo de lecturas
-│   │   ├── queue.ts            # cola durable (7 kinds)
+│   │   ├── queue.ts            # cola durable (8 kinds)
 │   │   ├── queue-drain.ts      # drenaje periódico
 │   │   ├── change-feed.ts      # sondeo updatedSince
 │   │   ├── list-cache.ts       # listas, TTL 5 min
 │   │   └── types.ts            # LumbreTask, LumbreList, TaskDraft y traducciones
-│   ├── blocks/                 # bloques ```lumbre``` y ```lumbre-brl``` con sus cachés y parser
+│   ├── blocks/                 # bloques ```lumbre``` y ```lumbre-brl```, ficha ref-chip-*.ts, cachés y parser
 │   ├── links/                  # nota ↔ tarea, nota ↔ lista, frontmatter lumbre-list, deep links
-│   ├── ui/                     # panel lateral, modal de envío, helpers puros de UI
+│   ├── ui/                     # panel lateral, modal de envío, menú por tarea (task-menu-*.ts), helpers puros
 │   ├── soplo/                  # plan del agente → ops de batch, modal
-│   ├── brl/                    # entradas del registro del día, modal
+│   ├── brl/                    # entradas del registro del día: crear, editar y borrar, modales
 │   ├── notes/                  # foto de la nota en la tarea
 │   ├── review/                 # foto semanal
-│   ├── attachments/            # subida de ficheros (directa, sin cola)
+│   ├── attachments/            # subir, leer y borrar (directos, sin cola); visor sin guardar en el vault; listado del panel
 │   ├── export/                 # nombre del fichero de exportación
 │   ├── api/                    # API pública app.plugins.plugins.lumbre.api
 │   ├── diagnostics/            # logger, redacción, informe, ficheros de log, modal
 │   ├── storage/                # PluginStore (data.json)
+│   ├── file-menu/               # entradas de Lumbre en el menú contextual del explorador
+│   ├── habits/                  # «Registrar hábito»
+│   ├── lists/                   # crear lista desde la nota, guardar la nota como notas de la lista
+│   ├── protocol/                # enrutado de obsidian://lumbre/*
+│   ├── send-lines/              # «Enviar como tareas», una por línea de la selección
+│   ├── status-bar/              # barra de estado del escritorio
 │   └── test/                   # obsidian-mock.ts (alias), fake-dom.ts
 ├── docs/
 │   ├── ESTADO.md               # qué hay y por qué, por lotes; fuente de las decisiones

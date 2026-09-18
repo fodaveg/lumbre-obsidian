@@ -1,17 +1,17 @@
 # Almacenamiento: `data.json`
 
-*Última actualización: 2026-09-14*
+*Última actualización: 2026-09-18*
 
 Único fichero de estado del plugin, gestionado por `PluginStore` (`src/storage/plugin-store.ts`)
 sobre `Plugin.loadData/saveData`. Viaja por Obsidian Sync: casi todas las decisiones de este
 módulo vienen de ahí.
 
-## Forma (`PluginData`, `PLUGIN_DATA_VERSION = 5`)
+## Forma (`PluginData`, `PLUGIN_DATA_VERSION = 6`)
 
 | Campo | Tipo | Notas |
 |---|---|---|
-| `version` | `number` | 5 |
-| `settings` | `LumbreSettings` | `apiOrigin`, `logLevel`, `liveLog`, `exportFolder` |
+| `version` | `number` | 6 |
+| `settings` | `LumbreSettings` | `apiOrigin`, `logLevel`, `liveLog`, `exportFolder`, `habitNames` |
 | `token` | `string \| null` | el token personal; vive aquí en todas las plataformas (decisión del 5 sep 2026, `src/token-store.ts`) |
 | `queue` | `QueuedOperation[]` | la cola durable, ya podada |
 | `links` | `LumbreTaskLink[]` | nota ↔ tarea, con caché de la tarea, `syncState`, `orphanedAt`, `deepLink?` |
@@ -19,8 +19,9 @@ módulo vienen de ahí.
 | `deviceId` | `string \| null` | `null` cuando hay almacén local |
 
 Historial: 1 objeto único → 2 `logLevel` + `liveLog` → 3 `noteListLinks` → 4 `deepLink` en
-`links[]` → 5 `exportFolder`. El formato anterior a la 1 (sin `version`) se reconoce y migra
-conservando token y origen. `migratedFrom` se apunta en el registro al arrancar.
+`links[]` → 5 `exportFolder` → 6 `habitNames`, los nombres de hábito guardados para «Registrar
+hábito». El formato anterior a la 1 (sin `version`) se reconoce y migra conservando token y
+origen. `migratedFrom` se apunta en el registro al arrancar.
 
 ## Migración (`migrate`)
 Copia los ajustes enteros sobre `DEFAULT_SETTINGS` y solo corrige los que pueden venir mal

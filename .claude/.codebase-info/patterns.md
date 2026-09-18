@@ -1,6 +1,6 @@
 # Patrones y convenciones
 
-*Última actualización: 2026-09-14*
+*Última actualización: 2026-09-18*
 
 ## Organización
 
@@ -29,6 +29,7 @@
 | Un `Component` propio dentro de cada `Modal` para `registerDomEvent` | `brl-modal.ts`, `soplo-modal.ts`, `save-note-modal.ts`, `diagnostics-modal.ts` |
 | Construir el DOM desenganchado y adjuntar al final | `note-tasks-view.ts` `renderProject`, `task-block.ts` con `DocumentFragment` |
 | `window.setTimeout`/`window.setInterval`, nunca a secas (ventanas emergentes de Obsidian) | `queue.ts`, `query-cache.ts`, `main.ts` |
+| Dos caminos distintos sobre la MISMA caché según el consumidor, para no gastar dos veces el mismo cubo de cupo | `BrlCache`: `get`/`peek`/`subscribe`/`refreshAll` van por `GET /api/brl/<date>?format=json` CACHEADO (TTL 30 s) para el bloque; `getMarkdown(date)` (solo «Insertar el BRL de hoy») va por `GET /api/brl/<date>` sin `?format=json` y SIN caché. Separados desde que iban juntos y cada refresco del bloque gastaba las dos peticiones del mismo cubo sin que nadie usara la mitad; lo vigila un test que cuenta las peticiones de cada camino |
 
 ## Manejo de errores
 
@@ -63,7 +64,7 @@
 
 ## Tests
 
-- **Dónde:** junto al módulo, `x.test.ts`. 43 ficheros. `src/test/` solo tiene infraestructura.
+- **Dónde:** junto al módulo, `x.test.ts`. 56 ficheros. `src/test/` solo tiene infraestructura.
 - **Cómo corre:** `npm test` (`vitest run`). `obsidian` se resuelve por alias a
   `src/test/obsidian-mock.ts`; no hay `vi.mock('obsidian')`. `.claude/**` excluido (worktrees).
 - **Mock de Obsidian:** mínimo. Clases vacías salvo `Plugin` (construible), `TFile`/`TFolder`

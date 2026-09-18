@@ -1,6 +1,6 @@
 # Mapa del código: lumbre-obsidian
 
-*Última actualización: 2026-09-14*
+*Última actualización: 2026-09-18*
 
 Plugin de Obsidian (escritorio y móvil) que PROYECTA tareas de Lumbre dentro del vault sin
 copiarlas al Markdown. Toda escritura hacia Lumbre pasa por una cola durable que envía y RELEE

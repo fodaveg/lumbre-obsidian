@@ -529,14 +529,18 @@ export const EXPORT_RATE_LIMIT = 10;
 
 /**
  * Límite de `GET /api/attachments/<id>`: cupo PROPIO para leer los BYTES de un
- * adjunto, distinto del de `POST /api/attachments` (la subida). Contrato dado
- * en el encargo de esta tarea (`9e7d031d`), no releído del repo de Lumbre.
+ * adjunto, distinto del de `POST /api/attachments` (la subida). MEDIDO el 18 de
+ * septiembre de 2026 en el repo de Lumbre (`origin/main` `719ee852d`),
+ * `src/routes/api/attachments/[id]/+server.ts` línea 59: `rateLimit` con
+ * `limit: 120` y ventana de 60 s sobre la clave `attachment:<token>`.
  */
 export const ATTACHMENT_READ_RATE_LIMIT = 120;
 
 /**
  * Límite de `DELETE /api/attachments/<id>`: soft-delete, cupo PROPIO y más
- * estricto que el de lectura. Mismo origen que `ATTACHMENT_READ_RATE_LIMIT`.
+ * estricto que el de lectura. Medido en la misma lectura que
+ * `ATTACHMENT_READ_RATE_LIMIT`, línea 122 del mismo fichero: `limit: 60` sobre
+ * la clave `attachments-delete:<token>`.
  */
 export const ATTACHMENT_DELETE_RATE_LIMIT = 60;
 

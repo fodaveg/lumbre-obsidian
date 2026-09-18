@@ -1,6 +1,6 @@
 # Flujo de la cola de mutaciones
 
-*Última actualización: 2026-09-14*
+*Última actualización: 2026-09-18*
 
 Fichero: `src/lumbre/queue.ts` (`OperationQueue`). No importa `obsidian`. Persiste por
 `QueueStorage` (`readQueue`/`writeQueue`/`deviceId`), que cumple `PluginStore`. Recibe un
@@ -23,10 +23,28 @@ desde la 0.1.12: `POST /api/mutations` puede traer `outcome`, que ya es la confi
 | `listLink` | vincular o quitar lista, rename, barrido | `client.listLink/listUnlink` (`POST /api/list-links`) | `listLinks(listId)` contiene o no la url exacta |
 | `notes` | Guardar esta nota en la tarea | `client.mutate({op:'update', notes})` | `outcome` si viene; si no `getTask` y `notes` contiene la cabecera de la foto |
 | `taskLink` | vincular tarea existente, materialización de un `create`, rename, barrido, backfill | `client.taskLink/taskUnlink` (`POST /api/task-links`) | `taskLinks(taskId)` contiene o no la url exacta |
+| `mutation` | menú por tarea, hábitos, listas (`createList`, `setListNotes`), edición/borrado del BRL | `client.mutate(op)` (`POST /api/mutations`), `op` verbatim | la elige `check` (`MutationCheck`), viaja PERSISTIDO junto a la op |
 
 Los ids que fija el plugin (`clientTaskId`, `entryId`) hacen idempotente el reenvío. `taskLink`
 es un kind aparte de `listLink` a propósito: una cola ya persistida desde la 0.1.10 tiene
 `kind: 'listLink'` y no se traduce al vuelo.
+
+## `MutationCheck`: qué releer para confirmar una `mutation`
+
+Unión discriminada de 9 casos (`none`, `taskField`, `taskFieldSet`, `taskRef`, `subtasksInclude`,
+`subtaskDone`, `listExists`, `listNotes`, `brlEntry`). Lo elige quien encola (`enqueueMutation`),
+no la cola: viaja PERSISTIDO junto a la op dentro de `MutationQueuedOperation`, para que una cola
+ya escrita en `data.json` se confirme con el criterio que tenía al encolarse, no con el que una
+versión posterior del plugin deduciría del mismo payload.
+
+`brlEntry` y `listNotes` fuerzan la relectura pese al `outcome` (`rereadRequired` en `queue.ts`),
+cada uno por un motivo medido en el repo de Lumbre: `brlEntry` porque el materializador responde
+`applied` a `updateBrlEntry`/`removeBrlEntry` exista o no la entrada
+(`src/lib/sync/inbound-materialize.ts`, `applyInboundBrlMutation`, sin comprobar nada), así que el
+`outcome` no distingue «editada» de «no estaba»; `listNotes` porque `setListNotes` sobre una lista
+YA BORRADA devuelve `noop`, no `not-found`, y ese mismo `noop` es también «se mandó el mismo texto
+que ya había» en el caso normal, así que solo la cabecera de la foto en la lista releída distingue
+los dos.
 
 ## Estados (`OperationState`)
 
@@ -55,14 +73,20 @@ pending_local ──send ok──▶ sent ──confirm──▶ materialized (f
    máximo UNA vez por flush, y solo para operaciones que ya venían con `sentAt` de un flush
    anterior. Las recién enviadas no lo necesitan porque los endpoints de escritura ya drenan.
 4. Por operación, `process`:
-   - sin `sentAt`: `send` → `sent`; si `outcomeOf` (solo `status` y `notes`) da `applied|noop` →
-     `materializeByOutcome`; `not-found` → `rejectByOutcome` sin gastar intento; `queued` o
-     ausente → sigue a la relectura.
+   - sin `sentAt`: `send` → `sent`; si `outcomeOf` (`status`, `notes` y `mutation` salvo que su
+     `check` exija releer, ver `rereadRequired`) da `applied|noop` → `materializeByOutcome`;
+     `not-found` → `rejectByOutcome` sin gastar intento; `queued` o ausente → sigue a la relectura.
    - con `sentAt`: `drain()` y relectura.
    - `confirm` relee hasta 2 veces con `REREAD_DELAY_MS` (1 s) entre medias. `confirmed` →
      `materialized`, `materializedAt`, `onMaterialized(operation)`. `missing` → `attempts += 1`,
-     queda `sent` o pasa a `recoverable_error` al llegar a `MAX_ATTEMPTS`.
+     queda `sent` o pasa a `recoverable_error` al llegar a `MAX_ATTEMPTS`. `unverifiable` (el
+     `check` es `none` y el `outcome` no confirmó) → `parkUnverifiable`.
 5. Se para con `no_token` o `rate_limited`.
+
+`parkUnverifiable` aparca en `recoverable_error` con los intentos YA AGOTADOS (no reintenta sola:
+reenviar podría apuntar la ocurrencia dos veces), para que solo un `retry(id)` a mano la vuelva a
+comprobar. Hoy solo le pasa a `registerHabit`, cuyo `check` es `'none'`: no hay ninguna lectura de
+hábitos con un token personal, así que no hay nada que releer.
 
 ## Qué cuelga de `onMaterialized` (`src/main.ts`)
 
