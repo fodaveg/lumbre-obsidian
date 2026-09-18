@@ -4,9 +4,11 @@
  * Este módulo NO importa `obsidian` ni hace red: solo tipos y las funciones
  * puras que traducen entre la respuesta de la API y lo que el plugin maneja.
  *
- * La API se ha leído del repo de Lumbre (`src/routes/api/tasks/+server.ts`,
- * `serializeTask`) el 3 de septiembre de 2026, no de memoria. Donde el plugin
- * necesita un campo que ese endpoint todavía no manda, el JSDoc lo dice.
+ * La API se ha leído del repo de Lumbre (`serializeTask`, movida de
+ * `src/routes/api/tasks/+server.ts` a `src/routes/api/tasks/serialize.ts`) el
+ * 3 de septiembre de 2026 y releída el 18 de septiembre de 2026 (`origin/main`
+ * `3e4821dc1`), no de memoria. Donde el plugin necesita un campo que ese
+ * endpoint todavía no manda, el JSDoc lo dice.
  */
 
 /** Prioridad de cara al plugin. La API la mueve como nivel numérico `1|2|3|null`. */
@@ -88,6 +90,59 @@ export interface LumbreTask {
 	 * `ChangeFeed` (`src/lumbre/change-feed.ts`) para pedir solo lo que cambió.
 	 */
 	updatedAt?: string;
+	/**
+	 * Regla de recurrencia YA PARSEADA (mismo shape que acepta `POST
+	 * /api/ingest`), opaca para el plugin: solo se mira si es `null` para no
+	 * ofrecer «reprogramar» en una tarea recurrente. Campo `recurrence` de
+	 * `serializeTask` (repo de Lumbre, `src/routes/api/tasks/serialize.ts`,
+	 * `origin/main` `3e4821dc1`, 18 sep 2026), servido desde el 26 jul 2026.
+	 * `null` es un dato ("no es recurrente" o "el CRDT trae una regla
+	 * ilegible"); AUSENTE si la fila cruda no trae la clave `recurrence`, que
+	 * es "este Lumbre todavía no la sirve".
+	 */
+	recurrence?: Record<string, unknown> | null;
+	/**
+	 * Id de la serie a la que pertenece esta ocurrencia, `null` si la tarea no
+	 * es recurrente. Coincide con el `id` de la semilla (desde el 16 sep 2026
+	 * reprogramar mueve la serie entera, no la ocurrencia suelta). Campo
+	 * `seriesId` de `serializeTask`, mismo origen que `recurrence`. AUSENTE si
+	 * la fila cruda no trae la clave.
+	 */
+	seriesId?: string | null;
+	/**
+	 * Etiquetas propias de la tarea, sin las heredadas de lista o sección.
+	 * Campo `tags` de `serializeTask`, servido desde `106d124f3` (13 sep 2026,
+	 * "feat(tags): expose own and effective tags to server consumers"). Un
+	 * array vacío es un dato ("sin etiquetas propias"); AUSENTE si la fila
+	 * cruda no trae la clave `tags`.
+	 */
+	tags?: string[];
+	/**
+	 * Etiquetas efectivas: las propias más las heredadas de lista o sección.
+	 * Campo `effectiveTags` de `serializeTask`, mismo origen que `tags`. Un
+	 * array vacío es un dato; AUSENTE si la fila cruda no trae la clave.
+	 */
+	effectiveTags?: string[];
+	/**
+	 * Adjuntos completos (no solo el recuento de `attachmentCount`). Campo
+	 * `attachments` de `serializeTask`: hoy el endpoint SIEMPRE lo manda como
+	 * array (vacío si no hay adjuntos) en las cuatro formas de la ruta, pero
+	 * aquí sigue el mismo criterio AUSENTE que `attachmentCount` por si un
+	 * Lumbre más viejo no lo sirviera: si la fila cruda no trae la clave
+	 * `attachments`, el campo queda AUSENTE, nunca un array vacío inventado.
+	 */
+	attachments?: LumbreAttachment[];
+}
+
+/**
+ * Un adjunto de una tarea tal y como lo sirve `serializeTask` (`attachments`),
+ * sin `storageKey` ni `userId`.
+ */
+export interface LumbreAttachment {
+	id: string;
+	filename: string;
+	mime: string;
+	size: number;
 }
 
 /**
@@ -200,6 +255,46 @@ function subtasksFrom(raw: unknown): LumbreSubtask[] | undefined {
 	return out;
 }
 
+function attachmentsFrom(raw: unknown): LumbreAttachment[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const out: LumbreAttachment[] = [];
+	for (const item of raw) {
+		const row = asRecord(item);
+		const id = asString(row?.['id']);
+		if (row === null || id === null) continue;
+		out.push({
+			id,
+			filename: asString(row['filename']) ?? '',
+			mime: asString(row['mime']) ?? '',
+			size: typeof row['size'] === 'number' ? row['size'] : 0,
+		});
+	}
+	return out;
+}
+
+/** Etiquetas: array de strings si la clave viene, AUSENTE si no. */
+function stringArrayFrom(raw: unknown): string[] | undefined {
+	if (!Array.isArray(raw)) return undefined;
+	const out: string[] = [];
+	for (const item of raw) {
+		if (typeof item === 'string') out.push(item);
+	}
+	return out;
+}
+
+/**
+ * La regla de recurrencia, opaca. AUSENTE si la fila no trae la clave;
+ * `null` si la trae con valor nulo o con algo que no es un objeto (mismo
+ * criterio defensivo que `parseRecurrence` en el servidor: una regla
+ * ilegible degrada a `null`, no revienta el parseo de la tarea entera).
+ */
+function recurrenceFrom(row: Record<string, unknown>): Record<string, unknown> | null | undefined {
+	if (!('recurrence' in row)) return undefined;
+	const raw = row['recurrence'];
+	if (raw === null) return null;
+	return asRecord(raw);
+}
+
 /**
  * Una tarea del JSON de la API a `LumbreTask`. Devuelve `null` si no es una
  * tarea reconocible (sin `id` o sin `content`), para que el llamador la
@@ -212,7 +307,11 @@ export function taskFromApi(raw: unknown): LumbreTask | null {
 	if (id === null || id.length === 0) return null;
 
 	const subtasks = subtasksFrom(row['subtasks']);
-	const attachments = row['attachments'];
+	const rawAttachments = row['attachments'];
+	const attachments = attachmentsFrom(rawAttachments);
+	const tags = stringArrayFrom(row['tags']);
+	const effectiveTags = stringArrayFrom(row['effectiveTags']);
+	const recurrence = recurrenceFrom(row);
 	return {
 		id,
 		content: asString(row['content']) ?? '',
@@ -230,10 +329,15 @@ export function taskFromApi(raw: unknown): LumbreTask | null {
 		...(typeof row['rolloverCount'] === 'number'
 			? { rolloverCount: row['rolloverCount'] }
 			: {}),
-		...(Array.isArray(attachments) ? { attachmentCount: attachments.length } : {}),
+		...(Array.isArray(rawAttachments) ? { attachmentCount: rawAttachments.length } : {}),
+		...(attachments !== undefined ? { attachments } : {}),
 		...(subtasks !== undefined ? { subtasks } : {}),
 		parentId: asString(row['parentId']),
 		...(typeof row['updatedAt'] === 'string' ? { updatedAt: row['updatedAt'] } : {}),
+		...(recurrence !== undefined ? { recurrence } : {}),
+		...('seriesId' in row ? { seriesId: asString(row['seriesId']) } : {}),
+		...(tags !== undefined ? { tags } : {}),
+		...(effectiveTags !== undefined ? { effectiveTags } : {}),
 	};
 }
 

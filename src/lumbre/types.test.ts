@@ -85,3 +85,88 @@ describe('taskFromApi y updatedAt', () => {
 		expect(task === null ? false : 'updatedAt' in task).toBe(false);
 	});
 });
+
+describe('taskFromApi y recurrence/seriesId', () => {
+	it('lee la regla parseada y el id de la serie cuando la fila los trae', () => {
+		const task = taskFromApi({
+			id: 'task-1',
+			content: 'x',
+			recurrence: { freq: 'daily', interval: 1 },
+			seriesId: 'task-0',
+		});
+
+		expect(task?.recurrence).toEqual({ freq: 'daily', interval: 1 });
+		expect(task?.seriesId).toBe('task-0');
+	});
+
+	it('null es un dato: no es recurrente', () => {
+		const task = taskFromApi({ id: 'task-1', content: 'x', recurrence: null, seriesId: null });
+
+		expect(task?.recurrence).toBeNull();
+		expect(task?.seriesId).toBeNull();
+	});
+
+	it('sin las claves, AUSENTE: este Lumbre todavía no las sirve', () => {
+		const task = taskFromApi({ id: 'task-1', content: 'x' });
+
+		expect(task === null ? false : 'recurrence' in task).toBe(false);
+		expect(task === null ? false : 'seriesId' in task).toBe(false);
+	});
+});
+
+describe('taskFromApi y tags/effectiveTags', () => {
+	it('lee las propias y las efectivas cuando la fila las trae', () => {
+		const task = taskFromApi({
+			id: 'task-1',
+			content: 'x',
+			tags: ['#casa'],
+			effectiveTags: ['#casa', '#urgente'],
+		});
+
+		expect(task?.tags).toEqual(['#casa']);
+		expect(task?.effectiveTags).toEqual(['#casa', '#urgente']);
+	});
+
+	it('un array vacío es un dato: sin etiquetas', () => {
+		const task = taskFromApi({ id: 'task-1', content: 'x', tags: [], effectiveTags: [] });
+
+		expect(task?.tags).toEqual([]);
+		expect(task?.effectiveTags).toEqual([]);
+	});
+
+	it('sin las claves, AUSENTE', () => {
+		const task = taskFromApi({ id: 'task-1', content: 'x' });
+
+		expect(task === null ? false : 'tags' in task).toBe(false);
+		expect(task === null ? false : 'effectiveTags' in task).toBe(false);
+	});
+});
+
+describe('taskFromApi y attachments', () => {
+	it('lee los adjuntos completos cuando la fila los trae', () => {
+		const task = taskFromApi({
+			id: 'task-1',
+			content: 'x',
+			attachments: [{ id: 'a-1', filename: 'foto.png', mime: 'image/png', size: 1024 }],
+		});
+
+		expect(task?.attachments).toEqual([
+			{ id: 'a-1', filename: 'foto.png', mime: 'image/png', size: 1024 },
+		]);
+		expect(task?.attachmentCount).toBe(1);
+	});
+
+	it('un array vacío es cero adjuntos, en attachments y en attachmentCount', () => {
+		const task = taskFromApi({ id: 'task-1', content: 'x', attachments: [] });
+
+		expect(task?.attachments).toEqual([]);
+		expect(task?.attachmentCount).toBe(0);
+	});
+
+	it('sin la clave, AUSENTE en los dos campos', () => {
+		const task = taskFromApi({ id: 'task-1', content: 'x' });
+
+		expect(task === null ? false : 'attachments' in task).toBe(false);
+		expect(task === null ? false : 'attachmentCount' in task).toBe(false);
+	});
+});
