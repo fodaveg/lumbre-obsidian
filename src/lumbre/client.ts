@@ -430,6 +430,18 @@ export interface TaskLinkRow {
 	updatedAt: string;
 }
 
+/**
+ * Destino de `POST /api/foreground-link`: la nota activa en Obsidian, para que
+ * el autofill de la captura rápida de Lumbre la enlace cuando Obsidian es la
+ * app en primer plano. `url` es el `obsidian://open?vault=...&file=...` ya
+ * codificado; `title` es opcional y no viaja si no hay nombre que mandar. Ver
+ * `src/lumbre/foreground-link.ts`, que compone los dos y decide cuándo llamar.
+ */
+export interface ForegroundLinkBody {
+	url: string;
+	title?: string;
+}
+
 /** Cuerpo que NO es JSON, con las cabeceras que le tocan. */
 interface RawBody {
 	body: ArrayBuffer;
@@ -545,6 +557,17 @@ export const ATTACHMENT_READ_RATE_LIMIT = 120;
 export const ATTACHMENT_DELETE_RATE_LIMIT = 60;
 
 /**
+ * Límite de `POST /api/foreground-link`: cupo PROPIO, 60/min. A diferencia de
+ * `ATTACHMENT_READ_RATE_LIMIT` y compañía, esta cifra NO está medida contra el
+ * código del servidor: es el contrato ACORDADO con la sesión que mantiene
+ * Lumbre el 18 de septiembre de 2026 al cerrar el endpoint (tarea `c178a4e7`),
+ * y queda PENDIENTE de confirmar contra el `main` de ese repo el día que se
+ * pueda leer ahí, igual que hicieron `ATTACHMENT_READ_RATE_LIMIT` y
+ * `ATTACHMENT_DELETE_RATE_LIMIT` antes de medirse.
+ */
+export const FOREGROUND_LINK_RATE_LIMIT = 60;
+
+/**
  * Proporción del límite de un cubo a partir de la que se avisa. Con el cubo
  * único de antes era 100 de 120 (5/6); se mantiene la misma proporción por
  * endpoint, así que el de `/api/agent` (30) avisa a partir de 25 y no espera a
@@ -570,6 +593,7 @@ const RATE_LIMITS: ReadonlyMap<string, number> = new Map([
 	['GET /api/export', EXPORT_RATE_LIMIT],
 	['GET /api/attachments/:id', ATTACHMENT_READ_RATE_LIMIT],
 	['DELETE /api/attachments/:id', ATTACHMENT_DELETE_RATE_LIMIT],
+	['POST /api/foreground-link', FOREGROUND_LINK_RATE_LIMIT],
 ]);
 
 /** Ventana del contador de peticiones. */
@@ -1031,6 +1055,31 @@ export class LumbreClient {
 		const response = await this.gated('GET', path, () => this.send('GET', path));
 		if (!response.ok) return response;
 		return { ok: true, value: taskLinksFrom(response.value) };
+	}
+
+	/**
+	 * `POST /api/foreground-link`: empuja la url de la nota activa en Obsidian,
+	 * para que el autofill de la captura rápida de Lumbre la rellene cuando
+	 * Obsidian es la app en primer plano (ver el JSDoc de `src/lumbre/foreground-link.ts`
+	 * para el porqué: Obsidian no tiene Apple Events).
+	 *
+	 * Va DIRECTO, como `uploadAttachment` y `deleteAttachment`: NO pasa por
+	 * `OperationQueue`. El servidor guarda un solo valor por usuario y lo caduca
+	 * a los 120 s, así que reintentar más tarde un valor caducado no sirve de
+	 * nada, y persistirlo en `data.json` (que viaja por Obsidian Sync)
+	 * ensuciaría el fichero con un dato que deja de tener sentido antes de
+	 * sincronizar. Un fallo aquí se descarta en silencio: quien llama
+	 * (`ForegroundLinkPusher`) no reintenta, deja que el siguiente cambio de
+	 * nota lo intente solo.
+	 */
+	async foregroundLink(target: ForegroundLinkBody): Promise<LumbreResult<void>> {
+		const response = await this.send('POST', '/api/foreground-link', {
+			kind: 'obsidian',
+			url: target.url,
+			...(target.title === undefined ? {} : { title: target.title }),
+		});
+		if (!response.ok) return response;
+		return { ok: true, value: undefined };
 	}
 
 	/**

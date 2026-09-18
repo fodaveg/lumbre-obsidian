@@ -197,6 +197,43 @@ describe('PluginStore: migración desde el data.json viejo', () => {
 		expect(data.settings.habitNames).toEqual(['Correr']);
 	});
 
+	it('un data.json de la versión 6 (sin foregroundLinkEnabled) migra ENCENDIDO, su valor por defecto', async () => {
+		const host = memoryHost({
+			version: 6,
+			settings: { apiOrigin: 'https://lumbre.casa' },
+			token: 'tok-1',
+			queue: [],
+			links: [],
+			noteListLinks: [],
+		});
+		const store = new PluginStore(host);
+
+		const data = await store.load();
+
+		expect(data.version).toBe(PLUGIN_DATA_VERSION);
+		expect(data.settings.foregroundLinkEnabled).toBe(true);
+		expect(data.settings.foregroundLinkEnabled).toBe(DEFAULT_SETTINGS.foregroundLinkEnabled);
+		// Nada de lo que ya había en la versión 6 se pierde en la migración.
+		expect(data.settings.apiOrigin).toBe('https://lumbre.casa');
+		expect(data.token).toBe('tok-1');
+	});
+
+	it('un data.json que lo apagó a mano conserva foregroundLinkEnabled: false', async () => {
+		const host = memoryHost({
+			version: PLUGIN_DATA_VERSION,
+			settings: { foregroundLinkEnabled: false },
+			token: null,
+			queue: [],
+			links: [],
+			noteListLinks: [],
+		});
+		const store = new PluginStore(host);
+
+		const data = await store.load();
+
+		expect(data.settings.foregroundLinkEnabled).toBe(false);
+	});
+
 	it('un data.json de la versión 2 (sin noteListLinks) migra con el registro vacío', async () => {
 		const host = memoryHost({ version: 2, settings: {}, token: null, queue: [], links: [] });
 		const store = new PluginStore(host);

@@ -47,8 +47,11 @@ import {
  * - 6: los ajustes ganan `habitNames`, los nombres de hábito guardados para
  *   «Registrar hábito». Un `data.json` anterior no lo trae y empieza con el
  *   array vacío, sin perder nada.
+ * - 7: los ajustes ganan `foregroundLinkEnabled`, el interruptor del empuje
+ *   de la nota activa a `POST /api/foreground-link`. Un `data.json` anterior
+ *   no lo trae y lo estrena ENCENDIDO (su valor por defecto), sin perder nada.
  */
-export const PLUGIN_DATA_VERSION = 6;
+export const PLUGIN_DATA_VERSION = 7;
 
 export interface PluginData {
 	version: number;
@@ -370,6 +373,14 @@ export function migrate(raw: unknown): PluginData {
 		? rawHabitNames.filter((name): name is string => typeof name === 'string')
 		: DEFAULT_SETTINGS.habitNames;
 
+	// `foregroundLinkEnabled` entró en la versión 7. Un `data.json` anterior
+	// (o uno con el campo corrupto) lo estrena ENCENDIDO, su valor por defecto.
+	const rawForegroundLinkEnabled = settings?.['foregroundLinkEnabled'];
+	const foregroundLinkEnabled =
+		typeof rawForegroundLinkEnabled === 'boolean'
+			? rawForegroundLinkEnabled
+			: DEFAULT_SETTINGS.foregroundLinkEnabled;
+
 	return {
 		version: PLUGIN_DATA_VERSION,
 		// Los ajustes se COPIAN enteros sobre los de fábrica y solo se corrigen los
@@ -385,6 +396,7 @@ export function migrate(raw: unknown): PluginData {
 			liveLog: settings?.['liveLog'] === true,
 			exportFolder,
 			habitNames,
+			foregroundLinkEnabled,
 		},
 		token: asString(row['token']),
 		queue: asArray<QueuedOperation>(row['queue']),

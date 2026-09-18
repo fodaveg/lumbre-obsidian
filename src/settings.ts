@@ -40,6 +40,19 @@ export interface LumbreSettings {
 	 * comando solo los ofrece como sugerencia.
 	 */
 	habitNames: string[];
+	/**
+	 * Si el plugin empuja a Lumbre la url de la nota activa
+	 * (`POST /api/foreground-link`, ver `src/lumbre/foreground-link.ts`), para
+	 * que el autofill de la captura rápida la rellene cuando Obsidian es la
+	 * app en primer plano.
+	 *
+	 * ENCENDIDO por defecto (decisión mía, no la pidió David): el plugin YA
+	 * manda rutas de notas a Lumbre en los vínculos nota a tarea y nota a
+	 * lista (`POST /api/task-links` y `POST /api/list-links`), así que esto no
+	 * abre una superficie nueva; y encenderlo a mano rompería lo único que
+	 * justifica la función, que es que funcione sin ningún paso manual.
+	 */
+	foregroundLinkEnabled: boolean;
 }
 
 export const DEFAULT_SETTINGS: LumbreSettings = {
@@ -48,6 +61,7 @@ export const DEFAULT_SETTINGS: LumbreSettings = {
 	liveLog: false,
 	exportFolder: 'Lumbre/exportaciones',
 	habitNames: [],
+	foregroundLinkEnabled: true,
 };
 
 /**
@@ -195,6 +209,19 @@ export class LumbreSettingTab extends PluginSettingTab {
 						await this.host.saveSettings();
 						this.log.info('Carpeta de exportaciones cambiada', { folder });
 					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Enlace de la nota activa')
+			.setDesc(
+				'Manda a Lumbre la ruta de la nota que tienes abierta, para que la captura rápida rellene el enlace sola cuando Obsidian está en primer plano.',
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(this.host.config.foregroundLinkEnabled).onChange(async (value) => {
+					this.host.config.foregroundLinkEnabled = value;
+					await this.host.saveSettings();
+					this.log.info('Enlace de la nota activa', { enabled: value });
+				}),
 			);
 
 		this.renderHabitNames(containerEl);

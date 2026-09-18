@@ -87,6 +87,7 @@ import {
 	type LumbreResult,
 } from './lumbre/client';
 import { ChangeFeed, startChangeFeedPoll } from './lumbre/change-feed';
+import { ForegroundLinkPusher } from './lumbre/foreground-link';
 import { ListCache } from './lumbre/list-cache';
 import {
 	describeFailedItems,
@@ -172,6 +173,8 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	/** Caché de las tareas resueltas para las fichas de referencia (`[[task:ID|...]]`). */
 	refTaskCache!: RefTaskCache;
 	changeFeed!: ChangeFeed;
+	/** Empuja la url de la nota activa a Lumbre (ver `src/lumbre/foreground-link.ts`). */
+	foregroundLinkPusher!: ForegroundLinkPusher;
 
 	/**
 	 * API PÚBLICA del plugin, alcanzable como `app.plugins.plugins.lumbre.api` y
@@ -288,6 +291,12 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			{ client: this.client, logger: this.logger.child('cache') },
 			new Date().toISOString(),
 		);
+		this.foregroundLinkPusher = new ForegroundLinkPusher({
+			client: this.client,
+			vaultName: () => this.app.vault.getName(),
+			enabled: () => this.config.foregroundLinkEnabled,
+			logger: this.logger.child('vault'),
+		});
 		this.api = new LumbreApi({
 			version: this.manifest.version,
 			client: this.client,
@@ -482,6 +491,27 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			),
 		);
 
+		// Empuja la url de la nota activa a Lumbre en cada cambio de hoja o de
+		// fichero abierto, con debounce (ver `ForegroundLinkPusher`). Con un PDF,
+		// un lienzo o ninguna hoja abierta, `pushForegroundLink` manda `null` y no
+		// se empuja nada.
+		this.registerEvent(
+			this.app.workspace.on(
+				'active-leaf-change',
+				guarded(this.logger.child('vault'), 'empuje del enlace en primer plano', () => {
+					this.pushForegroundLink();
+				}),
+			),
+		);
+		this.registerEvent(
+			this.app.workspace.on(
+				'file-open',
+				guarded(this.logger.child('vault'), 'empuje del enlace en primer plano', () => {
+					this.pushForegroundLink();
+				}),
+			),
+		);
+
 		// Al volver la red hay que drenar lo que se encoló sin conexión.
 		this.registerDomEvent(window, 'online', () => {
 			this.log.info('La red ha vuelto');
@@ -564,6 +594,10 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 		// Y el backfill retroactivo: vínculos nota↔tarea de instalaciones
 		// anteriores a este lote que todavía no tienen su deep link registrado.
 		void this.backfillTaskLinks();
+		// `active-leaf-change` no se dispara para la hoja que ya estaba abierta
+		// cuando el plugin carga: sin este empujón inicial, un Obsidian recién
+		// arrancado se quedaría sin enlace hasta el primer cambio de nota.
+		this.pushForegroundLink();
 	}
 
 	/**
@@ -2501,6 +2535,20 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	/** Avisa al panel de que la cola o los vínculos han cambiado. */
 	private notifyDataChange(): void {
 		for (const listener of this.dataListeners) listener();
+	}
+
+	/**
+	 * Cablea `workspace.getActiveFile()` con `ForegroundLinkPusher.noteChanged`.
+	 * Solo una NOTA cuenta como nota activa: un PDF o un lienzo (`file.extension
+	 * !== 'md'`) se trata igual que no tener ninguna hoja abierta, así que no se
+	 * empuja nada (ver el JSDoc de `src/lumbre/foreground-link.ts`).
+	 */
+	private pushForegroundLink(): void {
+		const file = this.app.workspace.getActiveFile();
+		const note = file !== null && file.extension === 'md'
+			? { notePath: file.path, basename: file.basename }
+			: null;
+		void this.foregroundLinkPusher.noteChanged(note);
 	}
 
 	/** Drena la cola, pero solo si hay token: sin él no hay nada que intentar. */
