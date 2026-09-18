@@ -47,7 +47,14 @@ import {
 	saveReport as writeReportFile,
 	type LogFileAdapter,
 } from './diagnostics/log-files';
-import { formatEvent, Logger, shortTitle, type LogEvent, type LogLevel } from './diagnostics/logger';
+import {
+	formatEvent,
+	Logger,
+	shortTitle,
+	type LogEvent,
+	type LogLevel,
+	type LogModule,
+} from './diagnostics/logger';
 import { buildReport, DEFAULT_REPORT_EVENTS, type CacheStats } from './diagnostics/report';
 import { guarded, unhandledEvent } from './diagnostics/unhandled';
 import { exportFilePath } from './export/export-path';
@@ -119,6 +126,8 @@ import {
 	type NoteTasksHost,
 } from './ui/note-tasks-view';
 import { SendTaskModal } from './ui/send-modal';
+import type { TaskMenuHost } from './ui/task-menu';
+import type { TaskMutationPlan } from './ui/task-menu-ops';
 
 /** Clave del id de dispositivo en el almacenamiento LOCAL de Obsidian. */
 const DEVICE_ID_KEY = 'lumbre:device-id';
@@ -2146,6 +2155,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			queue: this.queue,
 			setTaskDone: (task: LumbreTask, done: boolean, notePath: string) =>
 				this.setTaskDone(task, done, notePath),
+			taskMenu: this.taskMenuHost('block'),
 			noteListId: (notePath: string) => {
 				const file = this.app.vault.getFileByPath(notePath);
 				return file === null ? null : readNoteListId(this.app, file);
@@ -2212,6 +2222,53 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 	}
 
 	/**
+	 * El cableado del menú corto por tarea, que es el MISMO para el bloque y para
+	 * el panel: las dos superficies montan `mountTaskMenu` y solo cambia el módulo
+	 * con el que se etiqueta el registro.
+	 */
+	private taskMenuHost(module: LogModule): TaskMenuHost {
+		return {
+			app: this.app,
+			lists: this.lists,
+			applyTaskMutation: (plan: TaskMutationPlan, notePath: string) =>
+				this.applyTaskMutation(plan, notePath, module),
+			logger: this.logger.child(module),
+		};
+	}
+
+	/**
+	 * Encola una mutación del menú por tarea. Gemela de `setTaskDone`: encola por
+	 * la cola durable, drena y solo avisa con un Notice si Lumbre RECHAZÓ la
+	 * operación; que quede pendiente de confirmar ya lo enseña el chip de la fila.
+	 *
+	 * Del plan solo se apunta su etiqueta FIJA (`plan.action`): el payload lleva
+	 * texto del usuario (nombres de lista o de sección, títulos de subtarea) y eso
+	 * no entra en el registro.
+	 */
+	private async applyTaskMutation(
+		plan: TaskMutationPlan,
+		notePath: string,
+		module: LogModule,
+	): Promise<void> {
+		const file = notePath.length === 0 ? null : this.app.vault.getFileByPath(notePath);
+		this.logger.child(module).info('Acción del usuario', { action: plan.action, notePath });
+		const operation = await this.queue.enqueueMutation(plan.op, plan.check, {
+			notePath,
+			label: file?.basename ?? 'Sin nota',
+			excerpt: null,
+		});
+		this.notifyDataChange();
+
+		await this.queue.flush();
+		const after = this.queue.pending().find((candidate) => candidate.id === operation.id);
+		if (after?.state === 'rejected') {
+			this.log.error('Lumbre rechazó la operación', { id: operation.id, error: after.error });
+			new Notice(after.error ?? 'Lumbre rechazó la operación.');
+		}
+		await this.refreshBlocks();
+	}
+
+	/**
 	 * Caduca las consultas y refresca los bloques montados, COALESCIENDO: la cola
 	 * llama a esto una vez por operación materializada, así que un lote de diez
 	 * eran diez rondas de lecturas (una por consulta montada) contra un límite de
@@ -2232,6 +2289,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			client: this.client,
 			lists: this.lists,
 			webOrigin: () => this.config.apiOrigin,
+			taskMenu: this.taskMenuHost('panel'),
 			hasToken: async () => (await this.tokenStore.get()) !== null,
 			openSettings: () => {
 				const { setting } = this.app as unknown as SettingsOpener;

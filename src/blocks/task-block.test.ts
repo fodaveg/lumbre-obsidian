@@ -51,14 +51,23 @@ function host(tasks: LumbreTask[]): TaskBlockHost {
 	const lists = new ListCache({
 		client: { listLists: async () => ({ ok: true, value: [] }) },
 	});
+	const logger = Logger.create({ console: null }).child('block');
 	return {
 		cache,
 		lists,
 		queue: { pending: () => [] },
 		setTaskDone: async () => undefined,
+		// El menú se MONTA al pintar (su botón es parte de la fila), pero ningún
+		// test de aquí lo abre: nada de esto se llega a invocar.
+		taskMenu: {
+			app: {} as never,
+			lists,
+			applyTaskMutation: async () => undefined,
+			logger,
+		},
 		noteListId: () => null,
 		onDataChange: () => (): void => undefined,
-		logger: Logger.create({ console: null }).child('block'),
+		logger,
 	};
 }
 

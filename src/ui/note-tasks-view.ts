@@ -26,6 +26,7 @@ import { taskDeepLinks, type LumbreTask } from '../lumbre/types';
 import { linkChipState, pendingOperationFor, type ChipState } from './link-chip-state';
 import { openTaskInLumbre } from './open-in-lumbre';
 import { operationActions } from './operation-actions';
+import { mountTaskMenu, type TaskMenuHost } from './task-menu';
 import { groupBySection } from './task-sections';
 import { searchTasks } from './task-search';
 import { taskStateLabels } from './task-state-labels';
@@ -49,6 +50,11 @@ export interface NoteTasksHost {
 	lists: ListCache;
 	/** Origen web de Lumbre, para el enlace de "Abrir en Lumbre". */
 	webOrigin(): string;
+	/**
+	 * Lo que necesita el menú corto por tarea, que es EL MISMO que el del bloque
+	 * ```lumbre``` (ver `src/ui/task-menu.ts`).
+	 */
+	taskMenu: TaskMenuHost;
 	hasToken(): Promise<boolean>;
 	openSettings(): void;
 	openSendModal(file: TFile | null): void;
@@ -258,17 +264,19 @@ export class NoteTasksView extends ItemView {
 
 		const operations = this.host.queue.pending();
 		const list = section.createDiv({ cls: 'lumbre-list' });
-		for (const link of links) this.renderLinkRow(list, link, operations);
+		const siblings = links.map((link) => link.task);
+		for (const link of links) this.renderLinkRow(list, link, operations, siblings);
 	}
 
 	private renderLinkRow(
 		parent: HTMLElement,
 		link: LumbreTaskLink,
 		operations: readonly QueuedOperation[],
+		siblings: readonly LumbreTask[],
 	): void {
 		const operation = pendingOperationFor(operations, link.taskId);
 		const chip = linkChipState(link, operation);
-		const row = this.renderTaskRow(parent, link.task, chip);
+		const row = this.renderTaskRow(parent, link.task, chip, siblings);
 
 		if (link.orphanedAt !== null) {
 			row.meta.createSpan({
@@ -350,13 +358,18 @@ export class NoteTasksView extends ItemView {
 	}
 
 	/**
-	 * Una fila de tarea: checkbox, título, metadatos y chip. La usan las tareas
-	 * vinculadas y las de la lista de proyecto, que se pintan igual.
+	 * Una fila de tarea: checkbox, título, metadatos, chip y el menú corto. La
+	 * usan las tareas vinculadas y las de la lista de proyecto, que se pintan
+	 * igual.
+	 *
+	 * `siblings` son las tareas de su mismo listado, de donde el menú saca las
+	 * secciones candidatas sin gastar ninguna petición.
 	 */
 	private renderTaskRow(
 		parent: HTMLElement,
 		task: LumbreTask,
 		chip: ChipState,
+		siblings: readonly LumbreTask[],
 	): { row: HTMLElement; meta: HTMLElement; actions: HTMLElement } {
 		const cancelled = task.cancelledAt !== null;
 		const row = parent.createDiv({ cls: 'lumbre-task' });
@@ -389,6 +402,21 @@ export class NoteTasksView extends ItemView {
 			});
 			if (chip.reason !== null) label.setAttribute('title', chip.reason);
 		}
+
+		// El menú corto por tarea, el MISMO que el del bloque ```lumbre```.
+		mountTaskMenu({
+			component: this,
+			row,
+			anchor: main,
+			task,
+			notePath: this.file?.path ?? '',
+			pending: chip.tone === 'pending',
+			siblings,
+			host: this.host.taskMenu,
+			onApplied: () => {
+				void this.reloadAfterMutation();
+			},
+		});
 
 		const meta = row.createDiv({ cls: 'lumbre-task__meta' });
 		for (const label of taskStateLabels(task)) {
@@ -531,7 +559,9 @@ export class NoteTasksView extends ItemView {
 					{ syncState: 'materialized', error: null },
 					pendingOperationFor(operations, task.id),
 				);
-				this.renderTaskRow(list, task, chip);
+				// Las secciones candidatas salen de la lista ENTERA, no del grupo: cada
+				// grupo conoce una sola sección y no habría a dónde mover.
+				this.renderTaskRow(list, task, chip, project.tasks);
 			}
 		}
 		section.appendChild(holder);
@@ -555,6 +585,21 @@ export class NoteTasksView extends ItemView {
 		this.render();
 
 		await this.host.queue.flush();
+		await this.refreshLinks();
+		await this.loadProject(true);
+		this.render();
+	}
+
+	/**
+	 * Relee lo del panel después de una mutación del menú por tarea: los vínculos
+	 * y la lista de proyecto.
+	 *
+	 * Hace falta porque la lista de proyecto NO vive en `QueryCache`: el
+	 * `refreshSoon` que dispara la cola al materializar refresca los bloques, pero
+	 * aquí la fila se quedaría con su fecha o su sección viejas. Es lo mismo que ya
+	 * hace `toggleDone` tras completar.
+	 */
+	private async reloadAfterMutation(): Promise<void> {
 		await this.refreshLinks();
 		await this.loadProject(true);
 		this.render();
