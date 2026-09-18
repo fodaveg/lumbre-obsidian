@@ -1,4 +1,4 @@
-import { Notice, Plugin, PluginSettingTab, Setting, type App } from 'obsidian';
+import { Notice, Plugin, PluginSettingTab, Setting, type App, type TextComponent } from 'obsidian';
 
 import {
 	DEFAULT_LOG_LEVEL,
@@ -104,6 +104,18 @@ export function normalizeOrigin(raw: string): string | null {
 export class LumbreSettingTab extends PluginSettingTab {
 	/** El registro de esta pestaña, etiquetado como `settings`. */
 	private readonly log: Logger;
+
+	/**
+	 * Contenedor de la lista de nombres de hábito guardados, para poder
+	 * repintar SOLO esa lista al añadir o quitar uno. `display()` es la vía
+	 * general de Obsidian para refrescar una pestaña entera, pero está
+	 * deprecada desde 1.13 (el manifest declara `minAppVersion` 1.11.4, así
+	 * que `getSettingDefinitions` no es una opción) y además vacía y reconstruye
+	 * TODOS los campos: en el origen, el token o la carpeta de exportaciones se
+	 * perdía el foco y el scroll de la pestaña cada vez que se tocaba un
+	 * hábito. `null` hasta que `renderHabitNames` la crea.
+	 */
+	private habitListEl: HTMLElement | null = null;
 
 	constructor(
 		app: App,
@@ -214,39 +226,27 @@ export class LumbreSettingTab extends PluginSettingTab {
 	}
 
 	/**
-	 * Los nombres de hábito guardados para «Registrar hábito», con un botón para
-	 * quitar cada uno y un campo para añadir otro. Se repinta la pestaña entera
-	 * al cambiar la lista (`display()`), que es el idioma habitual de Obsidian
-	 * para una lista corta que cambia poco.
+	 * Los nombres de hábito guardados para «Registrar hábito»: la lista con su
+	 * botón de quitar (`renderHabitList`, que se repinta sola) y el campo para
+	 * añadir otro.
 	 */
 	private renderHabitNames(containerEl: HTMLElement): void {
 		new Setting(containerEl).setName('Hábitos').setHeading();
 
-		for (const name of this.host.config.habitNames) {
-			new Setting(containerEl).setName(name).addExtraButton((button) =>
-				button
-					.setIcon('trash')
-					.setTooltip('Quitar')
-					.onClick(async () => {
-						this.host.config.habitNames = this.host.config.habitNames.filter(
-							(candidate) => candidate !== name,
-						);
-						await this.host.saveSettings();
-						this.log.info('Nombre de hábito quitado');
-						this.display();
-					}),
-			);
-		}
+		this.habitListEl = containerEl.createDiv();
+		this.renderHabitList();
 
 		let draft = '';
+		let draftInput: TextComponent | null = null;
 		new Setting(containerEl)
 			.setName('Añadir un nombre de hábito')
 			.setDesc('Para no teclearlo cada vez en «Registrar hábito». No es un catálogo de Lumbre: solo tuyo.')
-			.addText((text) =>
+			.addText((text) => {
+				draftInput = text;
 				text.setPlaceholder('Nombre del hábito').onChange((value) => {
 					draft = value;
-				}),
-			)
+				});
+			})
 			.addButton((button) =>
 				button.setButtonText('Añadir').onClick(async () => {
 					const normalized = normalizeHabitName(draft);
@@ -261,9 +261,38 @@ export class LumbreSettingTab extends PluginSettingTab {
 					this.host.config.habitNames = [...this.host.config.habitNames, normalized];
 					await this.host.saveSettings();
 					this.log.info('Nombre de hábito añadido');
-					this.display();
+					draft = '';
+					draftInput?.setValue('');
+					this.renderHabitList();
 				}),
 			);
+	}
+
+	/**
+	 * SOLO la lista de nombres guardados, cada uno con su botón de quitar. Vive
+	 * aparte de `renderHabitNames` para poder llamarse sola tras añadir o
+	 * quitar un nombre, sin tocar el resto de la pestaña.
+	 */
+	private renderHabitList(): void {
+		const listEl = this.habitListEl;
+		if (listEl === null) return;
+		listEl.empty();
+
+		for (const name of this.host.config.habitNames) {
+			new Setting(listEl).setName(name).addExtraButton((button) =>
+				button
+					.setIcon('trash')
+					.setTooltip('Quitar')
+					.onClick(async () => {
+						this.host.config.habitNames = this.host.config.habitNames.filter(
+							(candidate) => candidate !== name,
+						);
+						await this.host.saveSettings();
+						this.log.info('Nombre de hábito quitado');
+						this.renderHabitList();
+					}),
+			);
+		}
 	}
 
 	/**
