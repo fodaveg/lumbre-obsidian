@@ -961,6 +961,44 @@ describe('LumbreClient.taskLink, taskUnlink y taskLinks (gemelo de list-links)',
 	});
 });
 
+describe('LumbreClient.foregroundLink', () => {
+	it('manda kind, url y title, con Content-Type application/json', async () => {
+		const { client, calls } = recordingClient({ ok: true });
+
+		const result = await client.foregroundLink({
+			url: 'obsidian://open?vault=v&file=Cocina',
+			title: 'Cocina',
+		});
+
+		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/foreground-link');
+		expect(calls[0]?.method).toBe('POST');
+		expect(calls[0]?.headers['Content-Type']).toBe('application/json');
+		expect(jsonBody(calls[0])).toEqual({
+			kind: 'obsidian',
+			url: 'obsidian://open?vault=v&file=Cocina',
+			title: 'Cocina',
+		});
+		expect(result).toEqual({ ok: true, value: undefined });
+	});
+
+	it('sin title, el campo no viaja en el cuerpo (ausente, no null ni vacío)', async () => {
+		const { client, calls } = recordingClient({ ok: true });
+
+		await client.foregroundLink({ url: 'obsidian://open?vault=v&file=Cocina' });
+
+		expect(jsonBody(calls[0])).toEqual({
+			kind: 'obsidian',
+			url: 'obsidian://open?vault=v&file=Cocina',
+		});
+	});
+
+	it('un 429 sale como rate_limited', async () => {
+		expect(
+			await clientWith(respondWith(429)).foregroundLink({ url: 'u' }),
+		).toEqual({ ok: false, reason: 'rate_limited', status: 429 });
+	});
+});
+
 describe('LumbreClient.agent', () => {
 	it('manda el texto como prompt y empareja plan con preview por índice', async () => {
 		const { client, calls } = recordingClient({

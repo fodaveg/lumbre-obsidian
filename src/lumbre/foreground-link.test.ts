@@ -1,7 +1,23 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { buildObsidianDeepLink } from '../links/deep-link';
 import type { ForegroundLinkBody, LumbreResult } from './client';
-import { ForegroundLinkPusher } from './foreground-link';
+import {
+	FOREGROUND_LINK_MAX_TITLE_LENGTH,
+	FOREGROUND_LINK_MAX_URL_LENGTH,
+	ForegroundLinkPusher,
+} from './foreground-link';
+
+/**
+ * Una nota cuya url compuesta contra el vault `'v'` mide EXACTAMENTE `length`
+ * caracteres. Solo letras `a` en el nombre: `encodeURIComponent` no las toca,
+ * así que la longitud del resultado es predecible.
+ */
+function noteWithUrlLength(length: number): { notePath: string; basename: string } {
+	const prefixLength = buildObsidianDeepLink('v', '.md').length;
+	const basename = 'a'.repeat(length - prefixLength);
+	return { notePath: `${basename}.md`, basename };
+}
 
 /** Cliente falso: `foregroundLink` espiado, resuelto en éxito por defecto. */
 function fakeClient(result: LumbreResult<void> = { ok: true, value: undefined }) {
@@ -148,5 +164,60 @@ describe('ForegroundLinkPusher: el POST falla', () => {
 		// Como no se guardó como empujada, la MISMA nota vuelve a intentarlo.
 		await instance.noteChanged({ notePath: 'Cocina.md', basename: 'Cocina' });
 		expect(failing.foregroundLink).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe('ForegroundLinkPusher: tope de longitud de la url', () => {
+	it(`con la url justo en el tope (${FOREGROUND_LINK_MAX_URL_LENGTH}), se empuja`, async () => {
+		const { client, instance } = pusher({ vaultName: 'v' });
+		const note = noteWithUrlLength(FOREGROUND_LINK_MAX_URL_LENGTH);
+
+		await instance.noteChanged(note);
+
+		expect(client.foregroundLink).toHaveBeenCalledTimes(1);
+		const sent = client.foregroundLink.mock.calls[0]?.[0];
+		expect(sent?.url.length).toBe(FOREGROUND_LINK_MAX_URL_LENGTH);
+	});
+
+	it('con la url un carácter por encima del tope, no se empuja y no gasta petición', async () => {
+		const { client, instance } = pusher({ vaultName: 'v' });
+		const note = noteWithUrlLength(FOREGROUND_LINK_MAX_URL_LENGTH + 1);
+
+		await instance.noteChanged(note);
+
+		expect(client.foregroundLink).not.toHaveBeenCalled();
+	});
+});
+
+describe('ForegroundLinkPusher: composición del título', () => {
+	it('con el basename vacío, el campo title se omite', async () => {
+		const { client, instance } = pusher();
+
+		await instance.noteChanged({ notePath: '.md', basename: '' });
+
+		expect(client.foregroundLink).toHaveBeenCalledWith(
+			expect.objectContaining({ title: undefined }),
+		);
+	});
+
+	it('con el basename de solo espacios, el campo title se omite', async () => {
+		const { client, instance } = pusher();
+
+		await instance.noteChanged({ notePath: '   .md', basename: '   ' });
+
+		expect(client.foregroundLink).toHaveBeenCalledWith(
+			expect.objectContaining({ title: undefined }),
+		);
+	});
+
+	it(`con un basename de más de ${FOREGROUND_LINK_MAX_TITLE_LENGTH} caracteres, se recorta`, async () => {
+		const { client, instance } = pusher();
+		const basename = 'a'.repeat(FOREGROUND_LINK_MAX_TITLE_LENGTH + 50);
+
+		await instance.noteChanged({ notePath: `${basename}.md`, basename });
+
+		const sent = client.foregroundLink.mock.calls[0]?.[0];
+		expect(sent?.title).toHaveLength(FOREGROUND_LINK_MAX_TITLE_LENGTH);
+		expect(sent?.title).toBe('a'.repeat(FOREGROUND_LINK_MAX_TITLE_LENGTH));
 	});
 });

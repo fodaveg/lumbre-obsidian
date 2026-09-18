@@ -557,13 +557,10 @@ export const ATTACHMENT_READ_RATE_LIMIT = 120;
 export const ATTACHMENT_DELETE_RATE_LIMIT = 60;
 
 /**
- * Límite de `POST /api/foreground-link`: cupo PROPIO, 60/min. A diferencia de
- * `ATTACHMENT_READ_RATE_LIMIT` y compañía, esta cifra NO está medida contra el
- * código del servidor: es el contrato ACORDADO con la sesión que mantiene
- * Lumbre el 18 de septiembre de 2026 al cerrar el endpoint (tarea `c178a4e7`),
- * y queda PENDIENTE de confirmar contra el `main` de ese repo el día que se
- * pueda leer ahí, igual que hicieron `ATTACHMENT_READ_RATE_LIMIT` y
- * `ATTACHMENT_DELETE_RATE_LIMIT` antes de medirse.
+ * Límite de `POST /api/foreground-link`: cupo PROPIO, 60/min por credencial.
+ * Confirmado por la sesión que mantiene Lumbre el 18 de septiembre de 2026
+ * (tarea `c178a4e7`), con un test propio del repo de Lumbre que llena el cubo
+ * a 60 y comprueba que la petición 61 responde 429 sin tocar la fila.
  */
 export const FOREGROUND_LINK_RATE_LIMIT = 60;
 

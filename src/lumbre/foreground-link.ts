@@ -31,11 +31,41 @@
  */
 
 import type { Logger } from '../diagnostics/logger';
-import { buildObsidianDeepLink, noteLinkLabel } from '../links/deep-link';
+import { buildObsidianDeepLink } from '../links/deep-link';
 import type { LumbreClient } from './client';
 
 /** Ver el JSDoc de cabecera: por qué 800 ms y no menos ni más. */
 export const FOREGROUND_LINK_DEBOUNCE_MS = 800;
+
+/**
+ * Tope de `url` que acepta `POST /api/foreground-link` en el servidor (400
+ * «url de Obsidian inválida» por encima de esto). Contrato confirmado por la
+ * sesión que mantiene Lumbre el 18 sep 2026. Por encima de este tope no se
+ * gasta la petición: el 400 es seguro, así que se apunta en el registro y se
+ * descarta igual que un fallo del POST (ver el JSDoc de cabecera).
+ */
+export const FOREGROUND_LINK_MAX_URL_LENGTH = 2048;
+
+/**
+ * Tope de `title` que acepta `POST /api/foreground-link` (400 «title
+ * inválido» por encima de esto, o si viene presente vacío o de solo
+ * espacios). Contrato confirmado por la sesión que mantiene Lumbre el
+ * 18 sep 2026.
+ */
+export const FOREGROUND_LINK_MAX_TITLE_LENGTH = 300;
+
+/**
+ * El `title` que se manda al servidor, o `undefined` si no hay nombre válido
+ * que mandar. El campo AUSENTE es válido (se guarda como `null`), pero uno
+ * vacío o de solo espacios NO lo es, así que se omite en vez de mandar algo
+ * que el servidor va a rechazar seguro. Por encima del tope, se recorta.
+ */
+function composeTitle(basename: string): string | undefined {
+	if (basename.trim().length === 0) return undefined;
+	return basename.length > FOREGROUND_LINK_MAX_TITLE_LENGTH
+		? basename.slice(0, FOREGROUND_LINK_MAX_TITLE_LENGTH)
+		: basename;
+}
 
 /** La nota activa, tal y como la conoce `main.ts` a partir del `TFile`. */
 export interface ForegroundLinkNote {
@@ -121,11 +151,19 @@ export class ForegroundLinkPusher {
 		if (note === null) return;
 
 		const url = buildObsidianDeepLink(this.vaultName(), note.notePath);
+		if (url.length > FOREGROUND_LINK_MAX_URL_LENGTH) {
+			// El servidor la rechazaría seguro con un 400: no se gasta la
+			// petición, ver el JSDoc de `FOREGROUND_LINK_MAX_URL_LENGTH`.
+			this.log?.warn('Url de la nota activa demasiado larga, no se empuja', {
+				length: url.length,
+			});
+			return;
+		}
 		if (url === this.lastPushedUrl) return;
 
 		const result = await this.client.foregroundLink({
 			url,
-			title: noteLinkLabel(note.basename),
+			title: composeTitle(note.basename),
 		});
 		if (!result.ok) {
 			// Se descarta en silencio: reintentar el mismo valor no arregla nada
