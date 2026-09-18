@@ -21,10 +21,11 @@ import {
 	RATE_LIMIT_BACKOFF_MS,
 	type BatchQueuedOperation,
 	type LinkTarget,
+	type MutationCheck,
 	type QueuedOperation,
 	type QueueStorage,
 } from './queue';
-import type { LumbreTask, TaskDraft } from './types';
+import type { LumbreList, LumbreSubtask, LumbreTask, TaskDraft } from './types';
 
 /** Promesa que se resuelve desde fuera, para parar un flush a media corrida. */
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -131,6 +132,17 @@ function fakeClient() {
 			async (date: string): Promise<LumbreResult<BrlDay>> => ({
 				ok: true,
 				value: { date, entries: [] },
+			}),
+		),
+		listLists: vi.fn(
+			async (): Promise<LumbreResult<LumbreList[]>> => ({ ok: true, value: [] }),
+		),
+		listNotes: vi.fn(
+			async (
+				_listId: string,
+			): Promise<LumbreResult<{ found: boolean; notes: string | null }>> => ({
+				ok: true,
+				value: { found: false, notes: null },
 			}),
 		),
 		listLink: vi.fn(async (_target: ListLinkTarget): Promise<LumbreResult<void>> => OK),
@@ -367,6 +379,449 @@ describe('OperationQueue: outcome de las mutaciones (status y notes)', () => {
 
 		expect(client.brlJson).toHaveBeenCalled();
 		expect(storage.operations[0]?.state).toBe('sent');
+	});
+});
+
+describe('OperationQueue: una mutación genérica', () => {
+	/** El caso más corto: cambiar la fecha de una tarea y comprobarla por valor. */
+	const RESCHEDULE: MutationOp = { op: 'reschedule', taskId: 'task-1', date: '2026-09-20' };
+	const RESCHEDULE_CHECK: MutationCheck = {
+		check: 'taskField',
+		taskId: 'task-1',
+		field: 'date',
+		expected: '2026-09-20',
+	};
+
+	function subtask(overrides: Partial<LumbreSubtask> = {}): LumbreSubtask {
+		return { id: 'sub-1', content: 'Un paso', done: false, ...overrides };
+	}
+
+	function list(overrides: Partial<LumbreList> = {}): LumbreList {
+		return {
+			id: 'list-1',
+			name: 'Cocina',
+			icon: null,
+			color: null,
+			parentListId: null,
+			pinned: false,
+			taskCount: 0,
+			...overrides,
+		};
+	}
+
+	it('encola la op VERBATIM con su comprobación y la manda por mutate', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'applied' } });
+		const queue = queueWith(client, storage);
+
+		const operation = await queue.enqueueMutation(RESCHEDULE, RESCHEDULE_CHECK, TARGET);
+		expect(operation.state).toBe('pending_local');
+		expect(operation.op).toEqual(RESCHEDULE);
+		expect(operation.check).toEqual(RESCHEDULE_CHECK);
+
+		await queue.flush();
+
+		// Tal cual se encoló: la cola no reinterpreta el payload.
+		expect(client.mutate).toHaveBeenCalledWith(RESCHEDULE);
+	});
+
+	it.each<MutationOutcome>(['applied', 'noop'])(
+		'con outcome %s queda materialized SIN relectura',
+		async (outcome) => {
+			const storage = memoryStorage();
+			const client = fakeClient();
+			client.mutate.mockResolvedValue({ ok: true, value: { outcome } });
+			const materialized: QueuedOperation[] = [];
+			const queue = new OperationQueue({
+				client,
+				storage,
+				sleep: vi.fn(async (_ms: number): Promise<void> => undefined),
+				onMaterialized: (operation) => materialized.push(operation),
+			});
+			await queue.enqueueMutation(RESCHEDULE, RESCHEDULE_CHECK, TARGET);
+
+			await queue.flush();
+
+			expect(client.getTask).not.toHaveBeenCalled();
+			expect(storage.operations[0]?.state).toBe('materialized');
+			expect(storage.operations[0]?.materializedAt).not.toBeNull();
+			expect(materialized).toHaveLength(1);
+		},
+	);
+
+	it('con outcome not-found queda rejected, sin gastar un intento ni releer', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'not-found' } });
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(RESCHEDULE, RESCHEDULE_CHECK, TARGET);
+
+		await queue.flush();
+
+		expect(client.getTask).not.toHaveBeenCalled();
+		expect(storage.operations[0]?.state).toBe('rejected');
+		expect(storage.operations[0]?.attempts).toBe(0);
+		expect(storage.operations[0]?.error).toContain('ya no existe');
+	});
+
+	it('con outcome queued cae a la relectura de respaldo y confirma', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'queued' } });
+		client.getTask.mockResolvedValue({ ok: true, value: task({ date: '2026-09-20' }) });
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(RESCHEDULE, RESCHEDULE_CHECK, TARGET);
+
+		await queue.flush();
+
+		expect(client.getTask).toHaveBeenCalledWith('task-1');
+		expect(client.getTask).toHaveBeenCalledTimes(1);
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('sin outcome (un Lumbre anterior al contrato) también relee y confirma', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.getTask.mockResolvedValue({ ok: true, value: task({ date: '2026-09-20' }) });
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(RESCHEDULE, RESCHEDULE_CHECK, TARGET);
+
+		await queue.flush();
+
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('si la relectura nunca confirma, gasta los intentos y acaba en recoverable_error', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'queued' } });
+		// La fecha que llega NO es la que se pidió: la mutación no está aplicada.
+		client.getTask.mockResolvedValue({ ok: true, value: task({ date: '2026-09-01' }) });
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(RESCHEDULE, RESCHEDULE_CHECK, TARGET);
+
+		for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) await queue.flush();
+
+		// Un solo envío: los flushes siguientes solo releen.
+		expect(client.mutate).toHaveBeenCalledTimes(1);
+		expect(storage.operations[0]).toMatchObject({
+			state: 'recoverable_error',
+			attempts: MAX_ATTEMPTS,
+		});
+		expect(storage.operations[0]?.error).toContain('no la confirma');
+		// Agotada: el flush siguiente ya no la toca.
+		await queue.flush();
+		expect(storage.operations[0]?.attempts).toBe(MAX_ATTEMPTS);
+	});
+
+	it('un addSubtask ya enviado se RELEE y nunca se reenvía', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'queued' } });
+		client.getTask.mockResolvedValue({ ok: true, value: task({ subtasks: [] }) });
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(
+			{ op: 'addSubtask', taskId: 'task-1', subtasks: ['Un paso'] },
+			{ check: 'subtasksInclude', parentId: 'task-1', titles: ['Un paso'] },
+			TARGET,
+		);
+
+		await queue.flush();
+		expect(client.mutate).toHaveBeenCalledTimes(1);
+		expect(storage.operations[0]).toMatchObject({ state: 'sent', attempts: 1 });
+
+		client.getTask.mockResolvedValue({ ok: true, value: task({ subtasks: [subtask()] }) });
+		await queue.flush();
+
+		// `addSubtask` NO es idempotente: reenviarlo añadiría el paso dos veces.
+		expect(client.mutate).toHaveBeenCalledTimes(1);
+		expect(client.flush).toHaveBeenCalledTimes(1);
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('confirma una subtarea completada mirando el done de la del padre', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'queued' } });
+		client.getTask.mockResolvedValue({
+			ok: true,
+			value: task({ subtasks: [subtask({ done: true })] }),
+		});
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(
+			{ op: 'completeSubtask', subtaskId: 'sub-1', done: true },
+			{ check: 'subtaskDone', parentId: 'task-1', subtaskId: 'sub-1', done: true },
+			TARGET,
+		);
+
+		await queue.flush();
+
+		// Se relee el PADRE: una subtarea no aparece en un getTask por su id.
+		expect(client.getTask).toHaveBeenCalledWith('task-1');
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it.each<[string, boolean, string | null, boolean]>([
+		['cancel', true, '2026-09-18T10:00:00.000Z', true],
+		['cancel sin cancelar', true, null, false],
+		['restore', false, null, true],
+		['restore sin restaurar', false, '2026-09-18T10:00:00.000Z', false],
+	])(
+		'comprueba cancelledAt por PRESENCIA (%s)',
+		async (_name, set, cancelledAt, shouldConfirm) => {
+			const storage = memoryStorage();
+			const client = fakeClient();
+			client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'queued' } });
+			client.getTask.mockResolvedValue({ ok: true, value: task({ cancelledAt }) });
+			const queue = queueWith(client, storage);
+			await queue.enqueueMutation(
+				set ? { op: 'cancel', taskId: 'task-1' } : { op: 'restore', taskId: 'task-1' },
+				{ check: 'taskFieldSet', taskId: 'task-1', field: 'cancelledAt', set },
+				TARGET,
+			);
+
+			await queue.flush();
+
+			expect(storage.operations[0]?.state).toBe(shouldConfirm ? 'materialized' : 'sent');
+		},
+	);
+
+	it.each<['id' | 'name', string]>([
+		['id', 'list-1'],
+		['name', 'Cocina'],
+	])('comprueba la lista de la tarea por %s', async (by, expected) => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'queued' } });
+		client.getTask.mockResolvedValue({
+			ok: true,
+			value: task({ list: { id: 'list-1', name: 'Cocina' } }),
+		});
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(
+			{ op: 'moveToList', taskId: 'task-1', listId: 'list-1' },
+			{ check: 'taskRef', taskId: 'task-1', field: 'list', by, expected },
+			TARGET,
+		);
+
+		await queue.flush();
+
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('una sección que sigue vacía no se confirma', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'queued' } });
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(
+			{ op: 'setSection', taskId: 'task-1', section: 'Compras' },
+			{ check: 'taskRef', taskId: 'task-1', field: 'section', by: 'name', expected: 'Compras' },
+			TARGET,
+		);
+
+		await queue.flush();
+
+		expect(storage.operations[0]).toMatchObject({ state: 'sent', attempts: 1 });
+	});
+
+	it('createList se confirma con el catálogo de listas, no con getTask', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'queued' } });
+		client.listLists.mockResolvedValue({ ok: true, value: [list()] });
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(
+			{ op: 'createList', listId: 'list-1', name: 'Cocina' },
+			{ check: 'listExists', listId: 'list-1' },
+			TARGET,
+		);
+
+		await queue.flush();
+
+		expect(client.listLists).toHaveBeenCalled();
+		expect(client.getTask).not.toHaveBeenCalled();
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('setListNotes se confirma por la cabecera de la foto dentro de la nota de la lista', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'queued' } });
+		client.listNotes.mockResolvedValue({
+			ok: true,
+			value: { found: true, notes: '## Desde Obsidian (18 sep)\nlo que sea' },
+		});
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(
+			{ op: 'setListNotes', listId: 'list-1', notes: 'texto final' },
+			{ check: 'listNotes', listId: 'list-1', header: '## Desde Obsidian (18 sep)' },
+			TARGET,
+		);
+
+		await queue.flush();
+
+		expect(client.listNotes).toHaveBeenCalledWith('list-1');
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('borrar la nota de una lista se confirma cuando la lista está y su nota ya no', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'queued' } });
+		client.listNotes.mockResolvedValue({ ok: true, value: { found: true, notes: null } });
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(
+			{ op: 'setListNotes', listId: 'list-1', notes: null },
+			{ check: 'listNotes', listId: 'list-1', header: null },
+			TARGET,
+		);
+
+		await queue.flush();
+
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('una lista que no está en el catálogo no confirma su nota', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'queued' } });
+		// `found: false` (borrada o de otra cuenta) NO es "no tiene nota".
+		client.listNotes.mockResolvedValue({ ok: true, value: { found: false, notes: null } });
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(
+			{ op: 'setListNotes', listId: 'list-1', notes: null },
+			{ check: 'listNotes', listId: 'list-1', header: null },
+			TARGET,
+		);
+
+		await queue.flush();
+
+		expect(storage.operations[0]).toMatchObject({ state: 'sent', attempts: 1 });
+	});
+
+	it('el outcome applied de un updateBrlEntry NO confirma nada: manda la relectura', async () => {
+		// Medido en el repo de Lumbre (`inbound-materialize.ts`, `origin/main`): los
+		// tres kinds del BRL devuelven `applied` exista o no la entrada.
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'applied' } });
+		client.brlJson.mockResolvedValue({ ok: true, value: { date: '2026-09-18', entries: [] } });
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(
+			{ op: 'updateBrlEntry', entryId: 'entry-1', entry: '- Corregido' },
+			{ check: 'brlEntry', date: '2026-09-18', entryId: 'entry-1', entry: '- Corregido' },
+			TARGET,
+		);
+
+		await queue.flush();
+
+		// Dos relecturas (con su espera en medio) y NADA materializado.
+		expect(client.brlJson).toHaveBeenCalledTimes(2);
+		expect(storage.operations[0]).toMatchObject({ state: 'sent', attempts: 1 });
+	});
+
+	it('una entrada del BRL editada se confirma por su texto', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'applied' } });
+		client.brlJson.mockResolvedValue({
+			ok: true,
+			value: { date: '2026-09-18', entries: [{ id: 'entry-1', time: '10:00', entry: '- Corregido' }] },
+		});
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(
+			{ op: 'updateBrlEntry', entryId: 'entry-1', entry: '- Corregido' },
+			{ check: 'brlEntry', date: '2026-09-18', entryId: 'entry-1', entry: '- Corregido' },
+			TARGET,
+		);
+
+		await queue.flush();
+
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('borrar una entrada del BRL se confirma por su AUSENCIA', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'applied' } });
+		client.brlJson.mockResolvedValue({ ok: true, value: { date: '2026-09-18', entries: [] } });
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(
+			{ op: 'removeBrlEntry', entryId: 'entry-1' },
+			{ check: 'brlEntry', date: '2026-09-18', entryId: 'entry-1', entry: null },
+			TARGET,
+		);
+
+		await queue.flush();
+
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('registerHabit se cree el outcome applied, que es lo único que tiene', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'applied' } });
+		const queue = queueWith(client, storage);
+		await queue.enqueueMutation(
+			{ op: 'registerHabit', habitId: 'habit-1', date: '2026-09-18' },
+			{ check: 'none' },
+			TARGET,
+		);
+
+		await queue.flush();
+
+		expect(storage.operations[0]?.state).toBe('materialized');
+	});
+
+	it('registerHabit con outcome queued se aparca para reintento A MANO', async () => {
+		const storage = memoryStorage();
+		const client = fakeClient();
+		client.mutate.mockResolvedValue({ ok: true, value: { outcome: 'queued' } });
+		const sleep = vi.fn(async (_ms: number): Promise<void> => undefined);
+		const queue = queueWith(client, storage, sleep);
+		await queue.enqueueMutation(
+			{ op: 'registerHabit', habitId: 'habit-1', date: '2026-09-18' },
+			{ check: 'none' },
+			TARGET,
+		);
+
+		await queue.flush();
+
+		// Ni relee (no hay qué) ni espera para volver a intentarlo.
+		expect(client.getTask).not.toHaveBeenCalled();
+		expect(sleep).not.toHaveBeenCalled();
+		expect(storage.operations[0]).toMatchObject({
+			state: 'recoverable_error',
+			attempts: MAX_ATTEMPTS,
+		});
+		expect(storage.operations[0]?.error).toContain('no puede comprobar');
+
+		// Y no se reenvía sola en el flush siguiente.
+		await queue.flush();
+		expect(client.mutate).toHaveBeenCalledTimes(1);
+	});
+
+	it('el registro no lleva el payload de la op, solo sus discriminantes', async () => {
+		const storage = memoryStorage();
+		const logger = Logger.create({ console: null, level: 'info' });
+		const queue = new OperationQueue({
+			client: fakeClient(),
+			storage,
+			logger: logger.child('queue'),
+			sleep: vi.fn(async (_ms: number): Promise<void> => undefined),
+		});
+
+		await queue.enqueueMutation(
+			{ op: 'createList', listId: 'list-1', name: 'Una lista privada' },
+			{ check: 'listExists', listId: 'list-1' },
+			TARGET,
+		);
+
+		const entry = logger.recent().find((event) => event.message === 'Operación encolada');
+		expect(entry?.data).toMatchObject({ kind: 'mutation', op: 'createList', check: 'listExists' });
+		expect(JSON.stringify(logger.recent())).not.toContain('Una lista privada');
 	});
 });
 

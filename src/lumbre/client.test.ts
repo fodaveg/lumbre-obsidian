@@ -354,6 +354,38 @@ describe('LumbreClient.listLists', () => {
 	});
 });
 
+describe('LumbreClient.listNotes', () => {
+	it('lee la nota de UNA lista del mismo catálogo que listLists', async () => {
+		const { client, calls } = recordingClient({
+			lists: [
+				{ id: 'list-1', name: 'Casa', taskCount: 0, notes: 'Lo que hay que comprar' },
+				{ id: 'list-2', name: 'Trabajo', taskCount: 0, notes: null },
+			],
+		});
+
+		const result = await client.listNotes('list-1');
+
+		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/tasks?includeLists=1');
+		expect(result.ok && result.value).toEqual({ found: true, notes: 'Lo que hay que comprar' });
+	});
+
+	it('una lista SIN nota sale found con notes null, que no es lo mismo que no estar', async () => {
+		const { client } = recordingClient({ lists: [{ id: 'list-1', name: 'Casa', taskCount: 0 }] });
+
+		const result = await client.listNotes('list-1');
+
+		expect(result.ok && result.value).toEqual({ found: true, notes: null });
+	});
+
+	it('una lista que no está en el catálogo sale found false', async () => {
+		const { client } = recordingClient({ lists: [{ id: 'list-9', name: 'Otra', taskCount: 0 }] });
+
+		const result = await client.listNotes('list-1');
+
+		expect(result.ok && result.value).toEqual({ found: false, notes: null });
+	});
+});
+
 describe('LumbreClient.exportData', () => {
 	it('pide GET /api/export y devuelve el texto TAL CUAL, con sus bytes', async () => {
 		const calls: LumbreRequestInit[] = [];
@@ -674,6 +706,79 @@ describe('LumbreClient.mutate con createBrlEntry', () => {
 			taskId: 'entry-1',
 			kind: 'createBrlEntry',
 			payload: { date: '2026-09-03', entry: '= Un pensamiento' },
+		});
+	});
+});
+
+describe('LumbreClient.mutate: mutaciones cuyo objetivo NO es una tarea', () => {
+	// El id del objetivo (lista, entrada del BRL, hábito) viaja en `taskId`: esa
+	// columna es genérica en el servidor. Payloads contrastados contra
+	// `validateMutationPayload` y `validateCreateListPayload` del repo de Lumbre.
+	it.each<[MutationOp, string, string, Record<string, unknown>]>([
+		[
+			{ op: 'createList', listId: 'list-1', name: 'Cocina' },
+			'list-1',
+			'createList',
+			{ name: 'Cocina' },
+		],
+		[
+			{ op: 'setListNotes', listId: 'list-1', notes: 'Una nota' },
+			'list-1',
+			'setListNotes',
+			{ notes: 'Una nota' },
+		],
+		[
+			{ op: 'updateBrlEntry', entryId: 'entry-1', entry: '- Corregido' },
+			'entry-1',
+			'updateBrlEntry',
+			{ entry: '- Corregido' },
+		],
+		[{ op: 'removeBrlEntry', entryId: 'entry-1' }, 'entry-1', 'removeBrlEntry', {}],
+		[
+			{ op: 'registerHabit', habitId: 'habit-1', date: '2026-09-18' },
+			'habit-1',
+			'registerHabit',
+			{ date: '2026-09-18' },
+		],
+	])('traduce %o al kind del servidor con el id en taskId', async (op, taskId, kind, payload) => {
+		const { client, calls } = recordingClient({ ok: true });
+
+		await client.mutate(op);
+
+		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/mutations');
+		expect(jsonBody(calls[0])).toEqual({ taskId, kind, payload });
+	});
+
+	it('createList manda color, icon y listKind solo si el llamador los puso', async () => {
+		const { client, calls } = recordingClient({ ok: true });
+
+		await client.mutate({
+			op: 'createList',
+			listId: 'list-1',
+			name: 'Cocina',
+			color: null,
+			icon: 'tabler:flame',
+			listKind: 'area',
+		});
+
+		// `null` explícito SÍ viaja: es "sin color", y el servidor mira si la clave
+		// está presente, no su valor.
+		expect(jsonBody(calls[0])).toEqual({
+			taskId: 'list-1',
+			kind: 'createList',
+			payload: { name: 'Cocina', color: null, icon: 'tabler:flame', listKind: 'area' },
+		});
+	});
+
+	it('setListNotes manda notes null (borrar) y revive cuando se pide', async () => {
+		const { client, calls } = recordingClient({ ok: true });
+
+		await client.mutate({ op: 'setListNotes', listId: 'list-1', notes: null, revive: true });
+
+		expect(jsonBody(calls[0])).toEqual({
+			taskId: 'list-1',
+			kind: 'setListNotes',
+			payload: { notes: null, revive: true },
 		});
 	});
 });

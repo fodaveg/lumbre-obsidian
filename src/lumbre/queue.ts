@@ -26,9 +26,10 @@
  *
  * Excepción a "siempre se relee": `POST /api/mutations` puede devolver un
  * `outcome` (ver `MutationOutcome` en `client.ts`) que YA es la confirmación,
- * sin gastar una relectura. Solo lo interpretan `status` y `notes` (ver
+ * sin gastar una relectura. Lo interpretan `status`, `notes` y `mutation` (ver
  * `outcomeOf`); con `queued` o sin `outcome` (un Lumbre anterior al contrato)
- * se sigue relayendo como siempre.
+ * se sigue relayendo como siempre, y hay comprobaciones que relean SIEMPRE
+ * porque el `outcome` de su `kind` no distingue nada (ver `rereadRequired`).
  */
 
 import type { Logger } from '../diagnostics/logger';
@@ -39,6 +40,7 @@ import type {
 	ListLinkTarget,
 	LumbreFailure,
 	LumbreResult,
+	MutationOp,
 	MutationOutcome,
 	TaskLinkTarget,
 } from './client';
@@ -236,6 +238,133 @@ export type TaskLinkQueuedOperation = OperationBase & {
 	target: LinkTarget;
 };
 
+/**
+ * Qué hay que RELEER para confirmar una mutación genérica, y qué comparar en lo
+ * releído.
+ *
+ * Viaja PERSISTIDO dentro de la operación, junto a la op, y no se deduce de la
+ * op al vuelo a propósito: una cola ya escrita en `data.json` tiene que poder
+ * confirmarse con el criterio que tenía cuando se encoló, no con el que una
+ * versión posterior del plugin deduciría del mismo payload. Es también el
+ * contrato que usan las superficies que encolan: quien llama elige la
+ * comprobación, y la cola solo la ejecuta.
+ *
+ * Un caso por comprobación, nunca uno por `op`: varias ops comparten criterio
+ * (`cancel` y `restore` miran las dos `cancelledAt`) y una misma op puede
+ * confirmarse de dos formas según cómo se pidió (`moveToList` por id o por
+ * nombre de lista).
+ */
+export type MutationCheck =
+	/**
+	 * No hay nada que releer con un token personal: hoy solo `registerHabit`, que
+	 * escribe en el store de hábitos y la API no expone por ninguna lectura del
+	 * plugin. Se confirma SOLO por `outcome`: `applied` o `noop` la materializan,
+	 * y un `queued` (o un Lumbre que no manda `outcome`) la deja en
+	 * `recoverable_error` para reintento A MANO, porque volver a enviarla sola
+	 * podría apuntar la ocurrencia dos veces.
+	 */
+	| { check: 'none' }
+	/**
+	 * Un campo de la tarea que se compara por VALOR exacto contra lo que se pidió.
+	 * Hoy `date`, que es lo que mueve un `reschedule`. `expected: null` es "la
+	 * tarea tiene que quedarse sin fecha".
+	 */
+	| { check: 'taskField'; taskId: string; field: 'date'; expected: string | null }
+	/**
+	 * Un campo de la tarea que solo se compara por PRESENCIA, porque su valor lo
+	 * decide el servidor y el plugin no puede predecirlo: `cancelledAt` lleva la
+	 * marca de tiempo de la cancelación. `set: true` confirma un `cancel`,
+	 * `set: false` un `restore`.
+	 */
+	| { check: 'taskFieldSet'; taskId: string; field: 'cancelledAt'; set: boolean }
+	/**
+	 * La lista (`moveToList`) o la sección (`setSection`) de la tarea. `by` dice
+	 * si `expected` es un id o un NOMBRE, que es la misma distinción que acepta el
+	 * endpoint: `moveToList` va por `listId` o por `list`, y `setSection` siempre
+	 * por nombre. `expected: null` es "la tarea tiene que quedarse sin lista" (o
+	 * sin sección).
+	 */
+	| {
+			check: 'taskRef';
+			taskId: string;
+			field: 'list' | 'section';
+			by: 'id' | 'name';
+			expected: string | null;
+	  }
+	/**
+	 * Las subtareas que un `addSubtask` tenía que añadir al padre. Se relee el
+	 * PADRE (`getTask` solo sirve `subtasks` en el lookup por id) y se confirma
+	 * cuando todos los títulos están entre las suyas.
+	 *
+	 * Los títulos se comparan recortados por los dos lados, porque el servidor
+	 * recorta los que recibe. También los TRUNCA a su tope, así que un título más
+	 * largo que ese tope no se confirmaría nunca: hay que guardar aquí el texto
+	 * que se espera LEER, no necesariamente el que se mandó.
+	 */
+	| { check: 'subtasksInclude'; parentId: string; titles: string[] }
+	/**
+	 * Una subtarea completada o reabierta (`completeSubtask`). Se relee el PADRE,
+	 * porque una subtarea no aparece en un `getTask` por su propio id, y se
+	 * compara el `done` de la que lleva `subtaskId`.
+	 */
+	| { check: 'subtaskDone'; parentId: string; subtaskId: string; done: boolean }
+	/**
+	 * Una lista que tenía que quedar creada (`createList`). Se relee el catálogo
+	 * (`GET /api/tasks?includeLists=1`, que trae también las vacías) y se confirma
+	 * si el id aparece.
+	 */
+	| { check: 'listExists'; listId: string }
+	/**
+	 * La nota de una lista (`setListNotes`). Se confirma buscando la cabecera de
+	 * la foto dentro de la nota releída, igual que hace el `kind` `notes` con una
+	 * tarea. `header: null` es el caso de BORRAR la nota: se confirma cuando la
+	 * lista está y su nota ya no.
+	 */
+	| { check: 'listNotes'; listId: string; header: string | null }
+	/**
+	 * Una entrada del BRL editada (`updateBrlEntry`) o borrada
+	 * (`removeBrlEntry`). Se relee `GET /api/brl/<date>?format=json` y se busca el
+	 * id: `entry` con texto pide que la entrada ESTÉ y lo lleve; `entry: null`
+	 * pide que no esté.
+	 *
+	 * Aquí la relectura NO es un respaldo, es OBLIGATORIA: el materializador de
+	 * Lumbre devuelve `outcome: 'applied'` para los tres `kind`s del BRL exista o
+	 * no la entrada (medido en `src/lib/sync/inbound-materialize.ts` de su
+	 * `origin/main`: `applyInboundBrlMutation` y `return 'applied'`, sin
+	 * comprobar nada). O sea que el `outcome` no distingue "editada" de "no
+	 * estaba", y creerlo daría por materializado un cambio que no ocurrió.
+	 */
+	| { check: 'brlEntry'; date: string; entryId: string; entry: string | null };
+
+/**
+ * Una mutación cualquiera de `POST /api/mutations`, con su comprobación.
+ *
+ * Es UN `kind` para TODAS las mutaciones, apunten a una tarea o no
+ * (`createList`, `setListNotes`, `updateBrlEntry`, `removeBrlEntry`,
+ * `registerHabit`): lo que cambia entre ellas es el payload, que ya discrimina
+ * `MutationOp`, y la relectura, que discrimina `check`. Un `kind` por op
+ * multiplicaría el mismo camino sin añadir nada.
+ *
+ * `op` viaja VERBATIM, igual que las mutaciones del plan de Soplo en un
+ * `mutateRaw`: quien encola compone el payload y la cola no lo reinterpreta.
+ * Y `check` viaja al lado porque la relectura tampoco se deduce de la op (ver
+ * el JSDoc de `MutationCheck`).
+ *
+ * Idempotencia: la mayoría de las mutaciones se pueden reenviar sin daño
+ * (reescribir el mismo `notes`, mover a la lista en la que ya está), pero
+ * `addSubtask` NO, y `registerHabit` tampoco. Como en el `kind` `batch`, una
+ * operación con `sentAt` se RELEE y nunca se reenvía, así que no hay que
+ * distinguirlas.
+ */
+export type MutationQueuedOperation = OperationBase & {
+	kind: 'mutation';
+	/** La mutación tal cual se manda a `POST /api/mutations`. */
+	op: MutationOp;
+	/** Qué releer y qué comparar cuando el `outcome` no basta. */
+	check: MutationCheck;
+	target: LinkTarget;
+};
+
 export type QueuedOperation =
 	| CreateOperation
 	| StatusOperation
@@ -243,7 +372,8 @@ export type QueuedOperation =
 	| BatchQueuedOperation
 	| ListLinkQueuedOperation
 	| NotesQueuedOperation
-	| TaskLinkQueuedOperation;
+	| TaskLinkQueuedOperation
+	| MutationQueuedOperation;
 
 /** Lo que la cola necesita del almacén del plugin. Lo cumple `PluginStore`. */
 export interface QueueStorage {
@@ -263,6 +393,8 @@ export interface OperationQueueOptions {
 		| 'getTasksByIds'
 		| 'batch'
 		| 'brlJson'
+		| 'listLists'
+		| 'listNotes'
 		| 'listLink'
 		| 'listUnlink'
 		| 'listLinks'
@@ -507,6 +639,40 @@ export class OperationQueue {
 	}
 
 	/**
+	 * Encola una mutación cualquiera de `POST /api/mutations` con la comprobación
+	 * que la confirma.
+	 *
+	 * `op` se guarda VERBATIM y `check` dice qué releer si el `outcome` no basta:
+	 * las dos cosas viajan persistidas en la operación, así que el criterio de
+	 * confirmación es el que eligió quien encoló (ver los JSDoc de
+	 * `MutationQueuedOperation` y `MutationCheck`).
+	 *
+	 * Ojo con las ops que NO son idempotentes (`addSubtask`, `registerHabit`): la
+	 * cola no las reenvía nunca una vez aceptadas, pero encolar DOS veces la misma
+	 * sí las aplica dos veces. Eso es cosa de quien llama, como en cualquier otro
+	 * `kind`.
+	 */
+	async enqueueMutation(
+		op: MutationOp,
+		check: MutationCheck,
+		target: LinkTarget,
+	): Promise<MutationQueuedOperation> {
+		const operation: MutationQueuedOperation = {
+			...this.newBase(),
+			kind: 'mutation',
+			op,
+			check,
+			target,
+		};
+		await this.append(operation);
+		// Solo los DISCRIMINANTES: el payload de la op y lo que se compara en la
+		// relectura llevan texto del usuario (nombres de lista, notas, entradas del
+		// BRL, títulos de subtarea) y eso no entra en el registro.
+		this.logEnqueued(operation, { op: op.op, check: check.check });
+		return operation;
+	}
+
+	/**
 	 * Operaciones de ESTE dispositivo que todavía no están materializadas.
 	 * Incluye las rechazadas y las agotadas a propósito: son justo las que una
 	 * interfaz tiene que enseñar para que el usuario decida.
@@ -688,6 +854,13 @@ export class OperationQueue {
 		}
 
 		const confirmed = await this.confirm(operation);
+		if (confirmed === 'unverifiable') {
+			// Nada que releer y el `outcome` no la confirmó: se aparca para que el
+			// usuario decida (ver `parkUnverifiable` y el caso `none` de
+			// `MutationCheck`).
+			await this.parkUnverifiable(operation);
+			return null;
+		}
 		if (confirmed !== 'missing' && confirmed !== 'materialized') {
 			return this.recordFailure(operation, confirmed);
 		}
@@ -732,9 +905,10 @@ export class OperationQueue {
 
 	/**
 	 * Envía la operación. El resultado lleva SIEMPRE la forma `{ outcome? }`,
-	 * aunque solo la rellenen `status` y `notes` (las dos que mandan por
-	 * `mutate`): así `process` puede mirar `sent.value.outcome` sin un `switch`
-	 * previo por `kind`, y el resto de operaciones simplemente no lo traen.
+	 * aunque solo la rellenen las que mandan por `mutate` (`status`, `notes`,
+	 * `brl` y `mutation`): así `process` puede mirar `sent.value.outcome` sin un
+	 * `switch` previo por `kind`, y el resto de operaciones simplemente no lo
+	 * traen.
 	 */
 	private async send(
 		operation: QueuedOperation,
@@ -790,6 +964,9 @@ export class OperationQueue {
 					taskId: operation.taskId,
 					notes: operation.notes,
 				});
+			case 'mutation':
+				// VERBATIM: lo que compuso quien encoló es lo que se manda.
+				return this.options.client.mutate(operation.op);
 			case 'taskLink': {
 				const target: TaskLinkTarget = {
 					taskId: operation.taskId,
@@ -809,17 +986,20 @@ export class OperationQueue {
 	/**
 	 * Relee la tarea para confirmar que la operación se materializó. Reintenta la
 	 * relectura UNA vez tras `REREAD_DELAY_MS`, que es lo que suele tardar el
-	 * drenaje. Tres desenlaces: `materialized` (confirmada y guardada), `missing`
-	 * (la lectura fue bien pero la tarea aún no está como debería) o el fallo de
-	 * la lectura en sí.
+	 * drenaje. Cuatro desenlaces: `materialized` (confirmada y guardada),
+	 * `missing` (la lectura fue bien pero la tarea aún no está como debería),
+	 * `unverifiable` (no hay nada que leer, ver `MutationCheck`) o el fallo de la
+	 * lectura en sí.
 	 */
 	private async confirm(
 		operation: QueuedOperation,
-	): Promise<'materialized' | 'missing' | LumbreFailure> {
+	): Promise<'materialized' | 'missing' | 'unverifiable' | LumbreFailure> {
 		for (let attempt = 0; attempt < 2; attempt += 1) {
 			if (attempt > 0) await this.sleep(REREAD_DELAY_MS);
 
 			const read = await this.reread(operation);
+			// Sin relectura posible, esperar y repetir no cambia nada: se sale ya.
+			if (read === 'unverifiable') return read;
 			if (read !== 'missing' && read !== 'confirmed') return read;
 			if (read === 'confirmed') {
 				const from = operation.state;
@@ -856,6 +1036,27 @@ export class OperationQueue {
 	}
 
 	/**
+	 * Aparca una operación que el servidor aceptó y que NADIE puede confirmar: el
+	 * `outcome` no la resolvió y su `check` dice que no hay relectura posible (hoy
+	 * solo `registerHabit`).
+	 *
+	 * Queda `recoverable_error` con los intentos AGOTADOS, así que ni el drenaje
+	 * periódico ni el siguiente flush la vuelven a tocar: reintentarla sola no
+	 * podría aprender nada nuevo, y reenviarla podría apuntar la ocurrencia dos
+	 * veces. `retry(id)` sigue estando para que el usuario la mande a comprobar a
+	 * mano, que es lo único que puede resolverla.
+	 */
+	private async parkUnverifiable(operation: QueuedOperation): Promise<void> {
+		const from = operation.state;
+		operation.state = 'recoverable_error';
+		operation.attempts = MAX_ATTEMPTS;
+		operation.error = 'Lumbre aceptó la operación y el plugin no puede comprobar si se aplicó.';
+		operation.updatedAt = this.stamp();
+		await this.persist(operation);
+		this.logTransition(operation, from, operation.error, { unverifiable: true }, 'warn');
+	}
+
+	/**
 	 * Marca `rejected` SIN gastar un reintento: lo pide un `outcome` de
 	 * `'not-found'`, que ya dice que la tarea no está en el store del dueño del
 	 * token (inexistente, borrada o archivada). Reintentar no la haría
@@ -881,7 +1082,9 @@ export class OperationQueue {
 	 */
 	private async reread(
 		operation: QueuedOperation,
-	): Promise<'confirmed' | 'missing' | LumbreFailure> {
+	): Promise<'confirmed' | 'missing' | 'unverifiable' | LumbreFailure> {
+		if (operation.kind === 'mutation') return this.rereadMutation(operation.check);
+
 		if (operation.kind === 'brl') {
 			const read = await this.options.client.brlJson(operation.date);
 			if (!read.ok) return read;
@@ -938,6 +1141,97 @@ export class OperationQueue {
 		const task = read.value;
 		if (task === null || !matchesOperation(operation, task)) return 'missing';
 		return 'confirmed';
+	}
+
+	/**
+	 * La relectura de una mutación genérica, elegida por su `check` y no por su
+	 * `op`: cada caso dice qué se lee y qué se compara, y está documentado en
+	 * `MutationCheck`.
+	 *
+	 * Igual que el resto de relecturas, de lo leído no se guarda NADA: solo
+	 * interesa si lo que se pidió ya está.
+	 */
+	private async rereadMutation(
+		check: MutationCheck,
+	): Promise<'confirmed' | 'missing' | 'unverifiable' | LumbreFailure> {
+		switch (check.check) {
+			case 'none':
+				return 'unverifiable';
+			case 'taskField': {
+				const read = await this.options.client.getTask(check.taskId);
+				if (!read.ok) return read;
+				const task = read.value;
+				if (task === null) return 'missing';
+				return task[check.field] === check.expected ? 'confirmed' : 'missing';
+			}
+			case 'taskFieldSet': {
+				const read = await this.options.client.getTask(check.taskId);
+				if (!read.ok) return read;
+				const task = read.value;
+				if (task === null) return 'missing';
+				// Por PRESENCIA: el valor lo pone el servidor (ver `MutationCheck`).
+				return (task[check.field] !== null) === check.set ? 'confirmed' : 'missing';
+			}
+			case 'taskRef': {
+				const read = await this.options.client.getTask(check.taskId);
+				if (!read.ok) return read;
+				const task = read.value;
+				if (task === null) return 'missing';
+				const ref = task[check.field];
+				if (check.expected === null) return ref === null ? 'confirmed' : 'missing';
+				if (ref === null) return 'missing';
+				return (check.by === 'id' ? ref.id : ref.name) === check.expected
+					? 'confirmed'
+					: 'missing';
+			}
+			case 'subtasksInclude': {
+				const read = await this.options.client.getTask(check.parentId);
+				if (!read.ok) return read;
+				// `subtasks` AUSENTE no es "no tiene ninguna": es que esta lectura no
+				// las sirve (el padre ya es una subtarea, o la tarea no está), y sin
+				// ellas no hay nada que confirmar.
+				const subtasks = read.value?.subtasks;
+				if (subtasks === undefined) return 'missing';
+				const present = new Set(subtasks.map((subtask) => subtask.content.trim()));
+				return check.titles.every((title) => present.has(title.trim()))
+					? 'confirmed'
+					: 'missing';
+			}
+			case 'subtaskDone': {
+				const read = await this.options.client.getTask(check.parentId);
+				if (!read.ok) return read;
+				const subtask = read.value?.subtasks?.find(
+					(candidate) => candidate.id === check.subtaskId,
+				);
+				if (subtask === undefined) return 'missing';
+				return subtask.done === check.done ? 'confirmed' : 'missing';
+			}
+			case 'listExists': {
+				const read = await this.options.client.listLists();
+				if (!read.ok) return read;
+				return read.value.some((list) => list.id === check.listId) ? 'confirmed' : 'missing';
+			}
+			case 'listNotes': {
+				const read = await this.options.client.listNotes(check.listId);
+				if (!read.ok) return read;
+				const { found, notes } = read.value;
+				// La lista tiene que ESTAR: sin ella, ni la nota puesta ni la borrada
+				// significan nada.
+				if (!found) return 'missing';
+				if (check.header === null) return notes === null ? 'confirmed' : 'missing';
+				return (notes ?? '').includes(check.header) ? 'confirmed' : 'missing';
+			}
+			case 'brlEntry': {
+				const read = await this.options.client.brlJson(check.date);
+				if (!read.ok) return read;
+				const entry = read.value.entries.find((row) => row.id === check.entryId);
+				if (check.entry === null) return entry === undefined ? 'confirmed' : 'missing';
+				if (entry === undefined) return 'missing';
+				// Recortado por los dos lados: el servidor canonicaliza el texto de una
+				// entrada al encolarla.
+				return entry.entry.trim() === check.entry.trim() ? 'confirmed' : 'missing';
+			}
+		}
 	}
 
 	/**
@@ -1145,18 +1439,37 @@ export function describeFailedItems(items: readonly BatchFailedItem[]): string {
 }
 
 /**
- * El `outcome` que trae un envío, pero SOLO para `status` y `notes`: son las
- * dos únicas cuyo objetivo es una tarea existente y cuyo `not-found` significa
- * de verdad "esa tarea ya no está". El resto de `kind`s (incluido `brl`, que
- * también manda por `mutate`) lo ignora a propósito: un `create` apunta a una
- * tarea que el propio plugin acaba de inventar, y su `not-found` no cabe.
+ * El `outcome` que trae un envío, para los `kind`s que pueden creérselo:
+ * `status`, `notes` y `mutation`.
+ *
+ * `status` y `notes` apuntan a una tarea existente, así que su `not-found`
+ * significa de verdad "esa tarea ya no está". `mutation` se lo cree salvo que su
+ * comprobación EXIJA releer (ver `rereadRequired`). Los demás `kind`s lo ignoran
+ * a propósito: un `create` apunta a una tarea que el propio plugin acaba de
+ * inventar, y `brl` (que también manda por `mutate`) tiene su propia relectura.
  */
 function outcomeOf(
 	operation: QueuedOperation,
 	value: { outcome?: MutationOutcome },
 ): MutationOutcome | undefined {
+	if (operation.kind === 'mutation') {
+		return rereadRequired(operation.check) ? undefined : value.outcome;
+	}
 	if (operation.kind !== 'status' && operation.kind !== 'notes') return undefined;
 	return value.outcome;
+}
+
+/**
+ * `true` si la comprobación no acepta el `outcome` como evidencia y hay que
+ * releer de todas formas.
+ *
+ * Hoy solo el BRL: el materializador de Lumbre responde `applied` a
+ * `updateBrlEntry` y `removeBrlEntry` exista o no la entrada, así que su
+ * `outcome` no distingue el cambio de la nada (ver el JSDoc del caso
+ * `brlEntry`).
+ */
+function rereadRequired(check: MutationCheck): boolean {
+	return check.check === 'brlEntry';
 }
 
 /**
