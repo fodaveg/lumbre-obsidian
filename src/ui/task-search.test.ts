@@ -25,6 +25,7 @@ function task(id: string, content: string): LumbreTask {
 		section: null,
 		rolloverCount: 0,
 		parentId: null,
+		parentContent: null,
 	};
 }
 

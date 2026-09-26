@@ -337,7 +337,7 @@ export function sampleTasks(tasks: LumbreTask[], seed: string, size: number): Lu
  */
 function taskLine(task: LumbreTask, rolloverThreshold: number): string {
 	const parts = [
-		plainTitle(task.content),
+		taskLineTitle(task),
 		task.list === null ? 'sin lista' : oneLine(task.list.name),
 		task.someday ? 'Algún día' : (task.date ?? 'sin fecha'),
 	];
@@ -368,6 +368,18 @@ function isPending(task: LumbreTask): boolean {
 export function plainTitle(raw: string): string {
 	const line = oneLine(raw).replace(/^(?:[-*+]\s*)?\[[ xX]\]\s*/, '');
 	return line.length === 0 ? 'Sin título' : line;
+}
+
+/**
+ * El título de una línea de la foto, con el prefijo `madre › ` cuando la
+ * tarea es una subtarea con fecha propia (ver el JSDoc de
+ * `LumbreTask.parentContent`): sin él, una vencida arrastrada de otra tarea
+ * se leería suelta, sin contexto de quién es. Sigue siendo texto plano: nunca
+ * una casilla de Markdown.
+ */
+function taskLineTitle(task: Pick<LumbreTask, 'content' | 'parentContent'>): string {
+	const title = plainTitle(task.content);
+	return task.parentContent !== null ? `${oneLine(task.parentContent)} › ${title}` : title;
 }
 
 /** Todo el espacio en blanco colapsado: una línea de la foto es UNA línea. */

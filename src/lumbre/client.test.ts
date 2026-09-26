@@ -71,6 +71,7 @@ function apiTask(overrides: Record<string, unknown> = {}): Record<string, unknow
 		section: 'Compras',
 		sectionId: 'section-1',
 		parentId: null,
+		parentContent: null,
 		recurrence: null,
 		seriesId: null,
 		createdAt: '2026-09-01T10:00:00.000Z',

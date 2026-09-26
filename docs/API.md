@@ -40,8 +40,14 @@ Dos reglas que explican por qué la API hace lo que hace:
 | `diagnostics.events(n?): LogEvent[]` | Los últimos `n` eventos del registro (300 por defecto), del más viejo al más nuevo. |
 
 `LumbreTask` lleva `id`, `content`, `notes`, `date`, `someday`, `time`, `deadline`, `priority`
-(`p1`…`p4`), `done`, `cancelledAt`, `archivedAt`, `list`, `section`, `rolloverCount`, `parentId` y,
-cuando el servidor los cuenta, `attachmentCount`.
+(`p1`…`p4`), `done`, `cancelledAt`, `archivedAt`, `list`, `section`, `rolloverCount`, `parentId`,
+`parentContent` y, cuando el servidor los cuenta, `attachmentCount`.
+
+Desde el 26 sep 2026, `listTasks` con `scope` `today`, `week`, `upcoming` u `overdue` puede devolver
+también subtareas con fecha propia, mezcladas SIN distinguir con las tareas de primer nivel: llevan
+`parentId` (el id de la madre) y `parentContent` (su título, o `null` si el servidor no lo manda).
+`listTasks` sigue devolviendo la lista plana tal cual, sin agrupar ni ocultar nada: quien consuma la
+API decide qué hacer con esas filas. Con `scope` `all`, `inbox` o `someday` no sale ninguna subtarea.
 
 `someday`, `time` y `rolloverCount` los **sirve** Lumbre desde su SHA `861cfb4d`. Contra un servidor
 anterior, los dos primeros salen en su valor por defecto (`false` y `null`), y ahí no los leas como

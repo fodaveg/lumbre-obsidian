@@ -27,6 +27,7 @@ function task(overrides: Partial<LumbreTask> = {}): LumbreTask {
 		list: { id: 'list-1', name: 'Casa' },
 		section: null,
 		parentId: null,
+		parentContent: null,
 		...overrides,
 	};
 }
@@ -148,6 +149,26 @@ describe('buildWeeklySnapshot: vencidas y arrastradas', () => {
 		const body = section(await buildWeeklySnapshot(deps, { now: NOW }), 'Vencidas y arrastradas');
 
 		expect(body).toEqual(['Nada']);
+	});
+
+	it('una subtarea vencida lleva el título de su madre delante', async () => {
+		const { deps } = harness({
+			overdue: [
+				task({
+					id: 'sub-1',
+					content: 'Comprar sobres',
+					date: '2026-08-30',
+					parentId: 'mother-1',
+					parentContent: 'Enviar cartas',
+				}),
+			],
+		});
+
+		const body = section(await buildWeeklySnapshot(deps, { now: NOW }), 'Vencidas y arrastradas');
+
+		expect(body).toEqual([
+			'- Enviar cartas › Comprar sobres · Casa · 2026-08-30 · [Abrir](lumbre://tarea/sub-1)',
+		]);
 	});
 
 	it('el apartado que no se puede leer lo dice y cuenta como fallo', async () => {

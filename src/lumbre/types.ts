@@ -78,6 +78,16 @@ export interface LumbreTask {
 	/** Id de la tarea padre si esta ES una subtarea; `null` si es de primer nivel. */
 	parentId: string | null;
 	/**
+	 * Título de la tarea padre si esta ES una subtarea, `null` si es de primer
+	 * nivel o si el servidor no lo manda. Lo sirve Lumbre desde el 26 sep 2026 en
+	 * las subtareas con fecha propia que devuelven `GET /api/tasks` con `scope`
+	 * `today`, `week`, `upcoming` u `overdue` (y `/api/today`, `/api/upcoming`):
+	 * esos scopes ya no ocultan las subtareas, las sirven como filas de primer
+	 * nivel junto con este campo para no perder de quién son. Con `scope` `all`,
+	 * `inbox` o `someday` no sale ninguna subtarea, así que este campo no aplica.
+	 */
+	parentContent: string | null;
+	/**
 	 * ISO 8601 de la última vez que la tarea cambió DE VERDAD. AUSENTE si la fila
 	 * cruda no lo trae, igual que `rolloverCount`. Sale del HLC del CRDT y solo se
 	 * mueve cuando la celda cambia de valor; reenviar la misma mutación (un
@@ -342,6 +352,7 @@ export function taskFromApi(raw: unknown): LumbreTask | null {
 		...(attachments !== undefined ? { attachments } : {}),
 		...(subtasks !== undefined ? { subtasks } : {}),
 		parentId: asString(row['parentId']),
+		parentContent: asString(row['parentContent']),
 		...(typeof row['updatedAt'] === 'string' ? { updatedAt: row['updatedAt'] } : {}),
 		...(recurrence !== undefined ? { recurrence } : {}),
 		...('seriesId' in row ? { seriesId: asString(row['seriesId']) } : {}),
@@ -433,6 +444,7 @@ export function taskFromDraft(
 		// nadie ha contado todavía cuántas veces ha rodado. Un `0` aquí se leería
 		// como un dato de Lumbre y no lo es.
 		parentId: null,
+		parentContent: null,
 	};
 }
 

@@ -3,9 +3,11 @@ import { describe, expect, it } from 'vitest';
 import {
 	CONTEXT_SUBTASK_TASK_CAP,
 	contextStateLabel,
+	isSubtaskShownStandalone,
 	noteExcerpt,
 	subtaskGlyph,
 	subtaskItems,
+	subtaskStandaloneTitle,
 	TASK_CONTEXT_NOTE_MAX_CHARS,
 	TASK_CONTEXT_NOTE_MAX_LINES,
 } from './task-context';
@@ -118,5 +120,52 @@ describe('CONTEXT_SUBTASK_TASK_CAP', () => {
 	it('es un tope pequeño y positivo, no un valor accidental de 0 o negativo', () => {
 		expect(CONTEXT_SUBTASK_TASK_CAP).toBeGreaterThan(0);
 		expect(CONTEXT_SUBTASK_TASK_CAP).toBeLessThanOrEqual(50);
+	});
+});
+
+describe('isSubtaskShownStandalone', () => {
+	const subtask = { id: 'sub-1', parentId: 'mother-1' };
+
+	it('una tarea de primer nivel siempre se pinta, sea cual sea el context', () => {
+		expect(isSubtaskShownStandalone({ id: 't1', parentId: null }, 'none', [])).toBe(true);
+		expect(isSubtaskShownStandalone({ id: 't1', parentId: null }, 'full', [])).toBe(true);
+	});
+
+	it('sin context: full, la subtarea se pinta suelta aunque la madre esté en el listado', () => {
+		const mother = { id: 'mother-1', subtasks: [{ id: 'sub-1', content: 'x', done: false }] };
+		expect(isSubtaskShownStandalone(subtask, 'none', [mother])).toBe(true);
+	});
+
+	it('full con la madre presente y la subtarea en sus subtasks: no se pinta suelta', () => {
+		const mother = { id: 'mother-1', subtasks: [{ id: 'sub-1', content: 'x', done: false }] };
+		expect(isSubtaskShownStandalone(subtask, 'full', [mother])).toBe(false);
+	});
+
+	it('full con la madre presente pero sin la subtarea en subtasks (recortada por el tope): suelta', () => {
+		const mother = { id: 'mother-1', subtasks: [{ id: 'otra-subtarea', content: 'x', done: false }] };
+		expect(isSubtaskShownStandalone(subtask, 'full', [mother])).toBe(true);
+	});
+
+	it('full con la madre sin subtasks pedidas (undefined): suelta, para no perderla', () => {
+		const mother = { id: 'mother-1', subtasks: undefined };
+		expect(isSubtaskShownStandalone(subtask, 'full', [mother])).toBe(true);
+	});
+
+	it('full con la madre ausente del listado: suelta', () => {
+		expect(isSubtaskShownStandalone(subtask, 'full', [])).toBe(true);
+	});
+});
+
+describe('subtaskStandaloneTitle', () => {
+	it('con parentContent, antepone "madre › " al título', () => {
+		expect(subtaskStandaloneTitle({ content: 'Comprar sobres', parentContent: 'Enviar cartas' })).toBe(
+			'Enviar cartas › Comprar sobres',
+		);
+	});
+
+	it('con parentContent null, el título sale sin prefijo', () => {
+		expect(subtaskStandaloneTitle({ content: 'Comprar sobres', parentContent: null })).toBe(
+			'Comprar sobres',
+		);
 	});
 });

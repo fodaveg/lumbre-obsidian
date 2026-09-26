@@ -24,6 +24,7 @@ function task(overrides: Partial<LumbreTask> = {}): LumbreTask {
 		list: null,
 		section: null,
 		parentId: null,
+		parentContent: null,
 		...overrides,
 	};
 }

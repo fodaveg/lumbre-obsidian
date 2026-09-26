@@ -28,6 +28,7 @@ function task(id: string, updatedAt: string): LumbreTask {
 		list: null,
 		section: null,
 		parentId: null,
+		parentContent: null,
 		updatedAt,
 	};
 }

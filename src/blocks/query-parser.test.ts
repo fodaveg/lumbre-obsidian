@@ -44,6 +44,7 @@ function task(overrides: Partial<LumbreTask> = {}): LumbreTask {
 		section: null,
 		rolloverCount: 0,
 		parentId: null,
+		parentContent: null,
 		...overrides,
 	};
 }

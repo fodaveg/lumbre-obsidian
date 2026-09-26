@@ -25,6 +25,7 @@ function task(id: string, content = 'Comprar pan', effectiveTags?: string[]): Lu
 		section: null,
 		rolloverCount: 0,
 		parentId: null,
+		parentContent: null,
 		...(effectiveTags !== undefined ? { effectiveTags } : {}),
 	};
 }

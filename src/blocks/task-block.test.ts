@@ -36,6 +36,7 @@ function task(overrides: Partial<LumbreTask> = {}): LumbreTask {
 		section: null,
 		rolloverCount: 0,
 		parentId: null,
+		parentContent: null,
 		...overrides,
 	};
 }
@@ -144,5 +145,66 @@ describe('LumbreTaskBlock, context: full', () => {
 		// no algo que dependa de la tarea concreta que se pinte aquí.
 		const checkboxes = root.findAll((el) => el.tagName === 'INPUT' && el.type === 'checkbox');
 		expect(checkboxes).toHaveLength(1);
+	});
+});
+
+/**
+ * Desde el 26 sep 2026, `GET /api/tasks` con scope `today`/`week`/`upcoming`/
+ * `overdue` devuelve también las subtareas con fecha propia, como filas de
+ * primer nivel con `parentId` y `parentContent` (ver el HECHO MEDIDO de
+ * `task-context.ts`). Este bloque comprueba que no salen duplicadas y que,
+ * sueltas, llevan el título de la madre delante.
+ */
+describe('LumbreTaskBlock y subtareas con fecha propia', () => {
+	it('con context: full, si la madre trae la subtarea entre sus subtasks, no se pinta suelta', async () => {
+		const mother = task({
+			id: 'mother-1',
+			content: 'Enviar cartas',
+			subtasks: [{ id: 'sub-1', content: 'Comprar sobres', done: false }],
+		});
+		const subtask = task({
+			id: 'sub-1',
+			content: 'Comprar sobres',
+			parentId: 'mother-1',
+			parentContent: 'Enviar cartas',
+		});
+
+		const root = await mountBlock('context: full', [mother, subtask]);
+
+		const titles = root.findAll((el) => el.hasClass('lumbre-task__title'));
+		expect(titles.map((el) => el.textContent)).toEqual(['Enviar cartas']);
+	});
+
+	it('con context: full pero la madre fuera del listado, se pinta suelta con el prefijo', async () => {
+		const subtask = task({
+			id: 'sub-1',
+			content: 'Comprar sobres',
+			parentId: 'mother-1',
+			parentContent: 'Enviar cartas',
+		});
+
+		const root = await mountBlock('context: full', [subtask]);
+
+		const titles = root.findAll((el) => el.hasClass('lumbre-task__title'));
+		expect(titles.map((el) => el.textContent)).toEqual(['Enviar cartas › Comprar sobres']);
+	});
+
+	it('sin context: full, la subtarea se pinta suelta con el prefijo aunque la madre esté', async () => {
+		const mother = task({
+			id: 'mother-1',
+			content: 'Enviar cartas',
+			subtasks: [{ id: 'sub-1', content: 'Comprar sobres', done: false }],
+		});
+		const subtask = task({
+			id: 'sub-1',
+			content: 'Comprar sobres',
+			parentId: 'mother-1',
+			parentContent: 'Enviar cartas',
+		});
+
+		const root = await mountBlock('', [mother, subtask]);
+
+		const titles = root.findAll((el) => el.hasClass('lumbre-task__title'));
+		expect(titles.map((el) => el.textContent)).toEqual(['Enviar cartas', 'Enviar cartas › Comprar sobres']);
 	});
 });

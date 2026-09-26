@@ -29,6 +29,7 @@ function task(id: string, content = 'Comprar pan'): LumbreTask {
 		section: null,
 		rolloverCount: 0,
 		parentId: null,
+		parentContent: null,
 	};
 }
 

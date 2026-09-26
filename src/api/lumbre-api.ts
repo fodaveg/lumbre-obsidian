@@ -191,6 +191,11 @@ export class LumbreApi {
 	 * Si la lectura falla pero hay una anterior confirmada, devuelve ESA (es lo
 	 * mismo que enseña el bloque). Solo lanza si no hay ninguna lectura y además
 	 * la petición falló, o si la consulta no se entiende.
+	 *
+	 * Con `scope` `today`, `week`, `upcoming` u `overdue`, la lista plana puede
+	 * traer subtareas con fecha propia mezcladas con las de primer nivel
+	 * (`task.parentId` y `task.parentContent`, ver `docs/API.md`): esta función
+	 * no las agrupa ni las oculta, igual que el resto de la lista.
 	 */
 	async listTasks(query: string | LumbreQueryInput = ''): Promise<LumbreTask[]> {
 		this.called('listTasks', { query });

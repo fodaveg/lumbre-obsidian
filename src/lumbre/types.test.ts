@@ -103,6 +103,27 @@ describe('taskFromApi y updatedAt', () => {
 	});
 });
 
+describe('taskFromApi y parentContent', () => {
+	it('lee el título de la madre cuando la fila lo trae', () => {
+		const task = taskFromApi({
+			id: 'sub-1',
+			content: 'Comprar sobres',
+			parentId: 'mother-1',
+			parentContent: 'Enviar cartas',
+		});
+
+		expect(task?.parentId).toBe('mother-1');
+		expect(task?.parentContent).toBe('Enviar cartas');
+	});
+
+	it('sin la clave, null: de primer nivel o un servidor que no lo manda', () => {
+		const task = taskFromApi({ id: 'task-1', content: 'x' });
+
+		expect(task?.parentId).toBeNull();
+		expect(task?.parentContent).toBeNull();
+	});
+});
+
 describe('taskFromApi y recurrence/seriesId', () => {
 	it('lee la regla parseada y el id de la serie cuando la fila los trae', () => {
 		const task = taskFromApi({

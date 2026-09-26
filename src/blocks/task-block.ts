@@ -37,7 +37,14 @@ import {
 	type ResolvedQuery,
 	type TaskContextMode,
 } from './query-parser';
-import { contextStateLabel, noteExcerpt, subtaskGlyph, subtaskItems } from './task-context';
+import {
+	contextStateLabel,
+	isSubtaskShownStandalone,
+	noteExcerpt,
+	subtaskGlyph,
+	subtaskItems,
+	subtaskStandaloneTitle,
+} from './task-context';
 
 /** El lenguaje del bloque: ```lumbre```. */
 export const LUMBRE_BLOCK_LANGUAGE = 'lumbre';
@@ -241,7 +248,15 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 			return 0;
 		}
 
-		const tasks = applyClientFilters(snapshot.tasks, query);
+		// Una subtarea con fecha propia (`parentId !== null`, ver el HECHO MEDIDO
+		// en `task-context.ts`) que va a salir anidada bajo su madre con
+		// `context: full` se descarta aquí: pintarla también suelta sería un
+		// duplicado. `isSubtaskShownStandalone` mira `filteredTasks` (las tareas
+		// de ESTE bloque, ya filtradas) para decidirlo.
+		const filteredTasks = applyClientFilters(snapshot.tasks, query);
+		const tasks = filteredTasks.filter((task) =>
+			isSubtaskShownStandalone(task, query.context, filteredTasks),
+		);
 		if (tasks.length === 0) {
 			root.createDiv({ cls: 'lumbre-empty', text: 'Nada aquí' });
 			return 0;
@@ -310,6 +325,10 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 		const cancelled = task.cancelledAt !== null;
 		const row = parent.createDiv({ cls: 'lumbre-task lumbre-block__task' });
 		const main = row.createDiv({ cls: 'lumbre-task__main' });
+		// El nombre legible lleva el prefijo de la madre si esta fila es una
+		// subtarea suelta (ver `subtaskStandaloneTitle`): título y `aria-label`
+		// deben identificar la tarea igual de bien.
+		const readableTitle = subtaskStandaloneTitle(task);
 
 		if (cancelled) {
 			// Una cancelada no se completa ni se reabre desde aquí: eso se hace en
@@ -321,7 +340,7 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 			box.disabled = chip.tone === 'pending';
 			box.setAttribute(
 				'aria-label',
-				task.done ? `Reabrir ${task.content}` : `Completar ${task.content}`,
+				task.done ? `Reabrir ${readableTitle}` : `Completar ${readableTitle}`,
 			);
 			this.registerDomEvent(box, 'change', () => {
 				void this.toggleDone(task, box.checked);
@@ -337,7 +356,7 @@ export class LumbreTaskBlock extends MarkdownRenderChild {
 			dot.setAttribute('aria-label', `Prioridad ${task.priority}`);
 		}
 
-		const title = main.createSpan({ cls: 'lumbre-task__title', text: task.content });
+		const title = main.createSpan({ cls: 'lumbre-task__title', text: readableTitle });
 		title.toggleClass('lumbre-task__title--cancelled', cancelled);
 
 		if (chip.label !== null) {

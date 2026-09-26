@@ -16,9 +16,18 @@
  * `QueryCache` limita el lookup de subtareas a las primeras
  * `CONTEXT_SUBTASK_TASK_CAP` tareas de primer nivel de la lectura, y el bloque
  * lo dice en el pie cuando recorta (ver `contextSubtasksLimitedNote`).
+ *
+ * HECHO MEDIDO (26 sep 2026, cambio ya en producción en el servidor de
+ * Lumbre): `GET /api/tasks` con `scope` `today`, `week`, `upcoming` u
+ * `overdue` (y `/api/today`, `/api/upcoming`) devuelve también las subtareas
+ * con fecha propia, como filas de PRIMER NIVEL con `parentId` y
+ * `parentContent`. Con `context: full`, si la madre también está en el
+ * listado, esa subtarea saldría dos veces (suelta y anidada bajo la madre) si
+ * nadie la filtrara: eso es lo que resuelve `isSubtaskShownStandalone`.
  */
 
 import type { LumbreSubtask, LumbreTask } from '../lumbre/types';
+import type { TaskContextMode } from './query-parser';
 
 /** Tope de caracteres del extracto de notas que se pinta bajo el título. */
 export const TASK_CONTEXT_NOTE_MAX_CHARS = 200;
@@ -97,4 +106,43 @@ export function subtaskGlyph(subtask: Pick<LumbreSubtask, 'done'>): string {
 export function subtaskItems(task: Pick<LumbreTask, 'subtasks'>): LumbreSubtask[] | null {
 	if (task.subtasks === undefined || task.subtasks.length === 0) return null;
 	return task.subtasks;
+}
+
+/**
+ * Si una tarea con `parentId` (una subtarea con fecha propia, ver el HECHO
+ * MEDIDO en el JSDoc de la cabecera y el de `LumbreTask.parentContent`) debe
+ * pintarse SUELTA en el listado de primer nivel, o si se omite porque también
+ * va a salir anidada bajo su madre (`renderTaskContext` + `subtaskItems`) y
+ * pintarla dos veces sería un duplicado.
+ *
+ * Solo se omite si las TRES condiciones se cumplen a la vez: `context` es
+ * `full`, la madre está entre `paintedTasks` (las tareas ya filtradas de este
+ * bloque) y el `subtasks` de esa madre trae el id de esta subtarea. Si
+ * cualquiera falla (sin `context: full`, la madre filtrada o fuera del
+ * listado, o sus subtareas no traídas por el tope `CONTEXT_SUBTASK_TASK_CAP`),
+ * se prefiere pintarla suelta a perderla.
+ *
+ * Una tarea de primer nivel (`parentId === null`) siempre se pinta: la regla
+ * solo existe para subtareas.
+ */
+export function isSubtaskShownStandalone(
+	task: Pick<LumbreTask, 'id' | 'parentId'>,
+	context: TaskContextMode,
+	paintedTasks: readonly Pick<LumbreTask, 'id' | 'subtasks'>[],
+): boolean {
+	if (task.parentId === null) return true;
+	if (context !== 'full') return true;
+	const parent = paintedTasks.find((candidate) => candidate.id === task.parentId);
+	if (parent === undefined) return true;
+	const subtasks = subtaskItems(parent);
+	return subtasks === null || !subtasks.some((subtask) => subtask.id === task.id);
+}
+
+/**
+ * El título tal y como se pinta cuando la tarea sale SUELTA: si es una
+ * subtarea con `parentContent`, antepone `madre › ` para no perder de quién
+ * es. Solo texto de presentación, nunca muta `task.content`.
+ */
+export function subtaskStandaloneTitle(task: Pick<LumbreTask, 'content' | 'parentContent'>): string {
+	return task.parentContent !== null ? `${task.parentContent} › ${task.content}` : task.content;
 }

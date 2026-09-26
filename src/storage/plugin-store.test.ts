@@ -357,6 +357,7 @@ describe('PluginStore: fusión con lo que hay en disco', () => {
 				list: null,
 				section: null,
 				parentId: null,
+				parentContent: null,
 			},
 			syncState: 'materialized',
 			error: null,
