@@ -109,6 +109,17 @@ describe('NoteListLinkStore: move', () => {
 		});
 	});
 
+	it('guarda el label nuevo si se da y conserva el viejo si no', async () => {
+		const store = new NoteListLinkStore(memoryStorage());
+		await store.set('A.md', 'list-1', 'url-a', 'A');
+
+		await store.move('A.md', 'B.md', 'url-b', 'B');
+		expect(store.get('B.md')?.label).toBe('B');
+
+		await store.move('B.md', 'C.md', 'url-c');
+		expect(store.get('C.md')?.label).toBe('B');
+	});
+
 	it('sin efecto si la ruta vieja no tenía entrada', async () => {
 		const storage = memoryStorage();
 		const store = new NoteListLinkStore(storage);
@@ -168,6 +179,30 @@ describe('renameListLinkChanges', () => {
 		expect(changes[1]).toMatchObject({ notePath: 'Trabajo/Cocina.md' });
 		expect(changes[2]).toMatchObject({ notePath: 'Proyectos/Menú.md', url: 'url-menu' });
 		expect(changes[3]).toMatchObject({ notePath: 'Trabajo/Menú.md' });
+	});
+
+	it('renombrar A a B: el link lleva el label de B y el unlink conserva url y label viejos', () => {
+		const entries: NoteListLinkEntry[] = [
+			{ id: 'QA A.md', listId: 'list-1', url: 'url-a', label: 'QA A', updatedAt: 't', orphanedAt: null },
+		];
+
+		const changes = renameListLinkChanges(entries, 'QA A.md', 'QA B.md', buildUrl);
+
+		expect(changes[0]).toMatchObject({ type: 'unlink', url: 'url-a', label: 'QA A' });
+		expect(changes[1]).toMatchObject({ type: 'link', label: 'QA B', notePath: 'QA B.md' });
+	});
+
+	it('renombrar una carpeta: cada nota toma su propio basename, recortado al tope', () => {
+		const long = 'x'.repeat(400);
+		const entries: NoteListLinkEntry[] = [
+			{ id: 'P/Cocina.md', listId: 'list-1', url: 'u1', label: 'viejo', updatedAt: 't', orphanedAt: null },
+			{ id: `P/Sub/${long}.md`, listId: 'list-1', url: 'u2', label: 'viejo', updatedAt: 't', orphanedAt: null },
+		];
+
+		const changes = renameListLinkChanges(entries, 'P', 'Q', buildUrl);
+
+		expect(changes[1]?.label).toBe('Cocina');
+		expect(changes[3]?.label).toBe('x'.repeat(300));
 	});
 
 	it('ignora las entradas que no caen bajo el renombrado', () => {
@@ -307,6 +342,30 @@ describe('applyRenameListLinks', () => {
 		expect(calls.map((change) => change.type)).toEqual(['unlink', 'link']);
 		expect(store.get('Recetas/Cocina.md')).not.toBeNull();
 		expect(store.get('Cocina.md')).toBeNull();
+	});
+
+	it('renombrar A a B deja la caché con el label de B y encola el link con ese label', async () => {
+		const store = new NoteListLinkStore(memoryStorage());
+		await store.set('QA A.md', 'list-1', 'obsidian://open?vault=v&file=QA A', 'QA A');
+		const { enqueue, calls } = fakeEnqueue();
+
+		await applyRenameListLinks(store, 'QA A.md', 'QA B.md', buildUrl, enqueue);
+
+		expect(store.get('QA B.md')?.label).toBe('QA B');
+		expect(calls[0]).toMatchObject({ type: 'unlink', url: 'obsidian://open?vault=v&file=QA A', label: 'QA A' });
+		expect(calls[1]).toMatchObject({ type: 'link', label: 'QA B' });
+	});
+
+	it('renombrar una carpeta: la caché de cada nota toma su propio basename', async () => {
+		const store = new NoteListLinkStore(memoryStorage());
+		await store.set('Dir/Uno.md', 'list-1', 'u1', 'Uno');
+		await store.set('Dir/Dos.md', 'list-1', 'u2', 'Dos');
+		const { enqueue } = fakeEnqueue();
+
+		await applyRenameListLinks(store, 'Dir', 'Nuevo', buildUrl, enqueue);
+
+		expect(store.get('Nuevo/Uno.md')?.label).toBe('Uno');
+		expect(store.get('Nuevo/Dos.md')?.label).toBe('Dos');
 	});
 
 	describe('confirmación contra el servidor', () => {

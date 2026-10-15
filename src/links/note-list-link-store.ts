@@ -16,6 +16,8 @@
  * cumple `PluginStore`.
  */
 
+import { noteBasename, noteLinkLabel } from './deep-link';
+
 /** Una entrada del registro. `id` es la ruta de la nota, con extensión. */
 export interface NoteListLinkEntry {
 	id: string;
@@ -86,9 +88,10 @@ export class NoteListLinkStore {
 	/**
 	 * Mueve UNA entrada de `oldNotePath` a `newNotePath`, con su `url` ya
 	 * recalculada por el llamante (la url vieja apuntaba a la ruta anterior).
-	 * Sin efecto si `oldNotePath` no tenía entrada.
+	 * `newLabel` es el nombre visible ya calculado desde la ruta nueva; si se
+	 * omite se conserva el anterior. Sin efecto si `oldNotePath` no tenía entrada.
 	 */
-	async move(oldNotePath: string, newNotePath: string, newUrl: string): Promise<void> {
+	async move(oldNotePath: string, newNotePath: string, newUrl: string, newLabel?: string): Promise<void> {
 		const entries = this.all();
 		const existing = entries.find((entry) => entry.id === oldNotePath);
 		if (existing === undefined) return;
@@ -96,6 +99,7 @@ export class NoteListLinkStore {
 			...existing,
 			id: newNotePath,
 			url: newUrl,
+			label: newLabel ?? existing.label,
 			updatedAt: this.stamp(),
 		};
 		const rest = entries.filter((entry) => entry.id !== oldNotePath);
@@ -173,7 +177,8 @@ export interface ListLinkChange {
 /**
  * Calcula el reemplazo de vínculos para las entradas que caen bajo un
  * renombrado (nota o carpeta entera): un `unlink` de la url VIEJA seguido de un
- * `link` con la NUEVA, en ese orden por entrada. El orden importa: un servidor
+ * `link` con la NUEVA (su `label` sale del basename de la ruta nueva, como al
+ * vincular; el `unlink` conserva el viejo), en ese orden por entrada. El orden importa: un servidor
  * que procese la cola en el orden en que llega no debe ver nunca las dos url
  * activas para la misma nota a la vez.
  *
@@ -192,7 +197,7 @@ export function renameListLinkChanges(
 		const to = movedNotePath(entry.id, oldPath, newPath);
 		if (to === null) continue;
 		changes.push({ type: 'unlink', listId: entry.listId, url: entry.url, label: entry.label, notePath: entry.id });
-		changes.push({ type: 'link', listId: entry.listId, url: buildUrl(to), label: entry.label, notePath: to });
+		changes.push({ type: 'link', listId: entry.listId, url: buildUrl(to), label: noteLinkLabel(noteBasename(to)), notePath: to });
 	}
 	return changes;
 }
@@ -316,7 +321,7 @@ export async function applyRenameListLinks(
 	for (const entry of entries) {
 		const to = movedNotePath(entry.id, oldPath, newPath);
 		if (to === null) continue;
-		await store.move(entry.id, to, buildUrl(to));
+		await store.move(entry.id, to, buildUrl(to), noteLinkLabel(noteBasename(to)));
 	}
 
 	// Cede el turno: si un renombrado ENCADENADO ha corrido mientras tanto, ya

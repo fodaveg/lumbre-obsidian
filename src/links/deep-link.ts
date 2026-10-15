@@ -21,6 +21,12 @@ export function notePathWithoutExtension(path: string): string {
 	return path.endsWith('.md') ? path.slice(0, -'.md'.length) : path;
 }
 
+/** El nombre de una nota (basename sin `.md`) a partir de su ruta; es lo que `noteLinkLabel` recorta. */
+export function noteBasename(path: string): string {
+	const withoutExtension = notePathWithoutExtension(path);
+	return withoutExtension.slice(withoutExtension.lastIndexOf('/') + 1);
+}
+
 /**
  * Compone `obsidian://open?vault=<vault>&file=<ruta sin .md>`. `vaultName` es
  * `app.vault.getName()` y `notePath` la ruta de la nota CON extensión, tal y

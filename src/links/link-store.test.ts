@@ -319,6 +319,15 @@ describe('renameTaskLinkChanges', () => {
 		expect(changes[3]).toMatchObject({ notePath: 'Trabajo/Menú.md', taskId: 'task-2' });
 	});
 
+	it('renombrar A a B: el link lleva el label de B y el unlink conserva el viejo', () => {
+		const entries = [{ taskId: 'task-1', notePath: 'A.md', deepLink: { url: 'url-a', label: 'A' } }];
+
+		const changes = renameTaskLinkChanges(entries, 'A.md', 'Dir/B.md', buildUrl);
+
+		expect(changes[0]).toMatchObject({ type: 'unlink', url: 'url-a', label: 'A' });
+		expect(changes[1]).toMatchObject({ type: 'link', label: 'B' });
+	});
+
 	it('ignora las entradas que no caen bajo el renombrado', () => {
 		const entries = [
 			{ taskId: 'task-1', notePath: 'Otro/Nota.md', deepLink: { url: 'url-1', label: 'Nota' } },

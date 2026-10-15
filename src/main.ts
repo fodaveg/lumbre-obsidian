@@ -61,7 +61,7 @@ import { exportFilePath } from './export/export-path';
 import { fileMenuItems } from './file-menu/file-menu-items';
 import { registerHabit, todayDate } from './habits/register-habit-flow';
 import { RegisterHabitModal } from './habits/register-habit-modal';
-import { buildObsidianDeepLink, noteLinkLabel } from './links/deep-link';
+import { buildObsidianDeepLink, noteBasename, noteLinkLabel } from './links/deep-link';
 import {
 	LinkStore,
 	movedPath,
@@ -2266,7 +2266,7 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 			if (to === null) continue;
 			await this.links.setDeepLink(to, entry.taskId, {
 				url: buildObsidianDeepLink(vaultName, to),
-				label: deepLink.label,
+				label: noteLinkLabel(noteBasename(to)),
 			});
 		}
 

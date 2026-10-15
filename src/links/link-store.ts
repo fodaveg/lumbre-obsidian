@@ -18,6 +18,7 @@ import { shortTitle, type Logger } from '../diagnostics/logger';
 import type { LumbreClient } from '../lumbre/client';
 import type { OperationState } from '../lumbre/queue';
 import type { LumbreTask } from '../lumbre/types';
+import { noteBasename, noteLinkLabel } from './deep-link';
 import { ORPHAN_GRACE_MS } from './note-list-link-store';
 
 /** Lo que se guarda de la nota además de la ruta. */
@@ -433,7 +434,7 @@ export function renameTaskLinkChanges(
 		const to = movedPath(entry.notePath, oldPath, newPath);
 		if (to === null) continue;
 		changes.push({ type: 'unlink', taskId: entry.taskId, url: deepLink.url, label: deepLink.label, notePath: entry.notePath });
-		changes.push({ type: 'link', taskId: entry.taskId, url: buildUrl(to), label: deepLink.label, notePath: to });
+		changes.push({ type: 'link', taskId: entry.taskId, url: buildUrl(to), label: noteLinkLabel(noteBasename(to)), notePath: to });
 	}
 	return changes;
 }
