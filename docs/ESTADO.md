@@ -1,6 +1,6 @@
 # Estado
 
-- **Versión**: 0.1.14 (publicada para BRAT).
+- **Versión**: 0.1.15 (publicada para BRAT).
 - **Qué hay**: esqueleto del plugin, ajustes (origen + token), botón de prueba de conexión, gate
   `npm run check`, CI y workflow de release para BRAT con los tres assets sueltos.
 - **Qué hay (lote A)**: cliente HTTP completo (`listTasks`, `getTask`, `getTasksByIds`, `listLists`,
@@ -653,3 +653,14 @@ MAX_NOTES_LEN)`), así que el plugin decide el recorte ANTES de mandar nada. Si 
       `GET /api/foreground-link` YA están desplegados en producción, pero falta el comando nativo
       `frontmost_app_bundle_id_hint` en la build de macOS instalada (la 84); hasta que David instale
       una build nueva que lo lleve, la captura no enlaza la nota aunque el plugin empuje bien.
+- **0.1.15: `Content-Type` en toda petición mutativa** (subtarea `f70e929d` de la tarea `e6868245`,
+  DEUDA-18b de Lumbre): Lumbre con SvelteKit 3 (rama `lote/sveltekit-3`, aún no en prod) responde 403
+  a una petición que no sea GET ni HEAD si no lleva `Content-Type`. Caían dos: `deleteAttachment`
+  (`DELETE /api/attachments/<id>`) y `flush` (`POST /api/sync/flush`), las dos sin cuerpo. Ahora
+  `LumbreClient.send` (`src/lumbre/client.ts`) pone `Content-Type: application/json` en todo método
+  mutativo y `'{}'` como cuerpo si no hay; la subida de adjuntos conserva `application/octet-stream`
+  porque sus cabeceras se aplican después, y GET y HEAD quedan como estaban. Es lo mismo que hizo
+  lumbre-mcp (`5e5dc39`), que funciona con el servidor actual, así que sale antes de SvelteKit 3. Tests
+  en `client.test.ts`. La versión incluye también `7da5273` (el bloque ya no duplica ni pierde de
+  vista las subtareas con fecha propia). Hebra no necesita el mismo cambio: `hebra-39` buscó el 15 oct
+  en `~/code/hebra` y no hay copia del plugin ni mutaciones sin `Content-Type`.
