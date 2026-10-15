@@ -1,6 +1,7 @@
 # Estado
 
-- **Versión**: 0.1.15 (publicada para BRAT).
+- **Versión**: 0.1.16 (publicada para BRAT). Mismo código que la 0.1.15: el script de publicación se
+  lanzó dos veces el 15 oct y la segunda solo subió el número.
 - **Qué hay**: esqueleto del plugin, ajustes (origen + token), botón de prueba de conexión, gate
   `npm run check`, CI y workflow de release para BRAT con los tres assets sueltos.
 - **Qué hay (lote A)**: cliente HTTP completo (`listTasks`, `getTask`, `getTasksByIds`, `listLists`,
