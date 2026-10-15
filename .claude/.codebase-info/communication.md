@@ -1,11 +1,12 @@
 # Comunicación
 
-*Última actualización: 2026-09-18*
+*Última actualización: 2026-10-15*
 
 ## API de Lumbre (`src/lumbre/client.ts`)
 
 Todo pasa por `LumbreClient.request`: `Authorization: Bearer <token>` (única lectura del token),
-`Content-Type: application/json` si hay cuerpo, `throw: false`, error de red tragado como
+`Content-Type: application/json` si hay cuerpo o el método no es GET ni HEAD (sin cuerpo viaja `'{}'`:
+SvelteKit 3 da 403 a lo mutativo sin `Content-Type`; `raw.headers` de los adjuntos lo sustituye), `throw: false`, error de red tragado como
 `{ ok: false, reason: 'network' }`. Resultado uniforme `LumbreResult<T>`.
 
 | Método del cliente | Endpoint | Cupo/min (cubo local) | Notas |
