@@ -1,7 +1,6 @@
 # Estado
 
-- **Versión**: 0.1.16 (publicada para BRAT). Mismo código que la 0.1.15: el script de publicación se
-  lanzó dos veces el 15 oct y la segunda solo subió el número.
+- **Versión**: 0.1.17 (publicada para BRAT).
 - **Qué hay**: esqueleto del plugin, ajustes (origen + token), botón de prueba de conexión, gate
   `npm run check`, CI y workflow de release para BRAT con los tres assets sueltos.
 - **Qué hay (lote A)**: cliente HTTP completo (`listTasks`, `getTask`, `getTasksByIds`, `listLists`,
@@ -665,3 +664,16 @@ MAX_NOTES_LEN)`), así que el plugin decide el recorte ANTES de mandar nada. Si 
   en `client.test.ts`. La versión incluye también `7da5273` (el bloque ya no duplica ni pierde de
   vista las subtareas con fecha propia). Hebra no necesita el mismo cambio: `hebra-39` buscó el 15 oct
   en `~/code/hebra` y no hay copia del plugin ni mutaciones sin `Content-Type`.
+- **0.1.16**: mismo código que la 0.1.15; el script de publicación se lanzó dos veces el 15 oct y la
+  segunda solo subió el número.
+- **0.1.17: un renombrado ya no revincula una nota desvinculada desde Lumbre** (tarea `a498dd7f`):
+  al renombrar o mover una nota (o una carpeta), `applyRenameListLinks`
+  (`src/links/note-list-link-store.ts`) reemitía `link` para todo lo que tuviera la caché local
+  `noteListLinks`, que nunca se entera de un desvinculado hecho desde Lumbre. Ahora, antes de encolar,
+  pide las urls vivas de cada lista implicada (`LumbreClient.listLinks`, una lectura por lista) y les
+  suma los `link` de esa lista aún en cola (`liveListUrls`, para que A→B→C seguidos no pierdan el
+  vínculo de B). Si la url VIEJA no está, no se encola nada y la entrada sale de la caché, con un `info`
+  en el registro; si la lectura falla, se reemite como antes, con un `warn`. Límite: un `link` rechazado
+  que siga en la cola cuenta como vivo, y eso solo lleva a reemitir de más. Sin QA en Obsidian.
+- **`b59dc2f7`** (subtareas con fecha sueltas o duplicadas en el bloque) ya estaba resuelta por
+  `7da5273` y salió en la 0.1.15.

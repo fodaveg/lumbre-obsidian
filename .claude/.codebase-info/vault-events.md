@@ -1,6 +1,6 @@
 # Eventos del vault
 
-*Última actualización: 2026-09-14*
+*Última actualización: 2026-10-15*
 
 La nota se identifica por RUTA en los dos mapas (`LinkStore` nota ↔ tarea, `NoteListLinkStore`
 nota ↔ lista). Por eso el plugin sigue los renombrados y trata los borrados con una gracia: sin
@@ -25,6 +25,10 @@ Orden dentro del listener:
 3. `renameListLinks(oldPath, newPath)` → `applyRenameListLinks` (`note-list-link-store.ts`):
    mueve el registro local ANTES de encolar, cede el turno, relee y encola `unlink` viejo y `link`
    nuevo por entrada. El `unlink` se manda siempre (de más no rompe: 200 con `removed: false`).
+   Antes de encolar confirma el vínculo contra Lumbre: una lectura de `listLinks` por lista
+   implicada, unida a los `link` de esa lista aún en cola (`liveListUrls`, para no perder el de un
+   renombrado anterior sin flush). Si la url VIEJA ya no está, se desvinculó desde Lumbre: no se
+   encola nada y la entrada sale de la caché. Si la lectura falla, se reemite como antes.
 
 Motivo del orden `unlink` → `link`: un servidor que procese en orden no ve dos urls activas a la
 vez. Motivo de guardar la url exacta: el servidor compara byte a byte y un `unlink` con una url
