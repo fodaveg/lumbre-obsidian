@@ -1,6 +1,6 @@
 # Estado
 
-- **Versión**: 0.1.18 (publicada para BRAT).
+- **Versión**: 0.1.19 (publicada para BRAT).
 - **Qué hay**: esqueleto del plugin, ajustes (origen + token), botón de prueba de conexión, gate
   `npm run check`, CI y workflow de release para BRAT con los tres assets sueltos.
 - **Qué hay (lote A)**: cliente HTTP completo (`listTasks`, `getTask`, `getTasksByIds`, `listLists`,
@@ -678,3 +678,11 @@ MAX_NOTES_LEN)`), así que el plugin decide el recorte ANTES de mandar nada. Si 
 - **`b59dc2f7`** (subtareas con fecha sueltas o duplicadas en el bloque) ya estaba resuelta por
   `7da5273` y salió en la 0.1.15.
 - **0.1.18**: mismo código que la 0.1.17; se relanzó el script de publicación y solo subió el número.
+- **0.1.19: un renombrado actualiza el nombre visible del vínculo** (tarea `3d0540cc`): al renombrar o
+  mover una nota, el `link` nuevo llevaba el label VIEJO (visto en la QA en vivo de la 0.1.17: URL de B
+  con nombre de A). Ahora sale de `noteLinkLabel(noteBasename(<ruta nueva>))`, el mismo cálculo y tope
+  que al vincular, y la caché local lo guarda: en los vínculos nota↔lista
+  (`renameListLinkChanges` y `applyRenameListLinks` con `NoteListLinkStore.move(…, newLabel)`, en
+  `src/links/note-list-link-store.ts`) y en los nota↔tarea (`renameTaskLinkChanges` en
+  `src/links/link-store.ts` y `renameTaskLinks` en `src/main.ts`), que tenían el mismo fallo. El
+  `unlink` sigue con la url y el label viejos. `noteBasename` es nuevo en `src/links/deep-link.ts`.
