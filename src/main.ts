@@ -72,6 +72,7 @@ import {
 import { NOTE_LIST_PROPERTY, readNoteListId, writeNoteListId } from './links/note-list';
 import {
 	applyRenameListLinks,
+	liveListUrls,
 	NoteListLinkStore,
 	orphansPastGrace,
 } from './links/note-list-link-store';
@@ -2078,7 +2079,11 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 						);
 						return null;
 					}
-					return new Set(read.value.map((link) => link.url));
+					return liveListUrls(
+						read.value.map((link) => link.url),
+						this.queue.pending(),
+						listId,
+					);
 				},
 				onDropped: (entry) => {
 					this.logger.child('vault').info(

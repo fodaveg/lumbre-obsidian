@@ -230,6 +230,26 @@ export function orphansPastGrace(
 	});
 }
 
+/**
+ * Las urls que cuentan como VIVAS de una lista: las del servidor más las de los
+ * `link` de esa lista aún en cola. Un `link` pendiente (p. ej. el de un
+ * renombrado anterior sin flush) todavía no está en el servidor pero NO es un
+ * vínculo quitado. Un `unlink` o un `link` de otra lista no cuentan.
+ */
+export function liveListUrls(
+	serverUrls: readonly string[],
+	pending: readonly { kind: string; type?: string; listId?: string; url?: string }[],
+	listId: string,
+): Set<string> {
+	const live = new Set(serverUrls);
+	for (const operation of pending) {
+		if (operation.kind === 'listLink' && operation.type === 'link' && operation.listId === listId && operation.url) {
+			live.add(operation.url);
+		}
+	}
+	return live;
+}
+
 /** Confirmación opcional contra el servidor de `applyRenameListLinks`. */
 export interface RenameConfirmOptions {
 	/**

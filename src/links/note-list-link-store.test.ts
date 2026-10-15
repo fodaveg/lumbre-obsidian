@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	applyRenameListLinks,
+	liveListUrls,
 	movedNotePath,
 	NoteListLinkStore,
 	orphansPastGrace,
@@ -306,6 +307,125 @@ describe('applyRenameListLinks', () => {
 		expect(calls.map((change) => change.type)).toEqual(['unlink', 'link']);
 		expect(store.get('Recetas/Cocina.md')).not.toBeNull();
 		expect(store.get('Cocina.md')).toBeNull();
+	});
+
+	describe('confirmación contra el servidor', () => {
+		const oldUrl = 'obsidian://open?vault=v&file=Cocina';
+
+		async function seeded(): Promise<NoteListLinkStore> {
+			const store = new NoteListLinkStore(memoryStorage());
+			await store.set('Cocina.md', 'list-1', oldUrl, 'Cocina');
+			await store.set('Otra.md', 'list-1', 'obsidian://open?vault=v&file=Otra', 'Otra');
+			return store;
+		}
+
+		it('vínculo vivo en el servidor: se reemite unlink→link', async () => {
+			const store = await seeded();
+			const { enqueue, calls } = fakeEnqueue();
+
+			const ids = await applyRenameListLinks(store, 'Cocina.md', 'Recetas/Cocina.md', buildUrl, enqueue, {
+				liveUrls: async () => new Set([oldUrl]),
+			});
+
+			expect(ids).toHaveLength(2);
+			expect(calls.map((change) => change.type)).toEqual(['unlink', 'link']);
+			expect(store.get('Recetas/Cocina.md')).not.toBeNull();
+		});
+
+		it('quitado desde Lumbre: no se reemite y la entrada sale de la caché', async () => {
+			const store = await seeded();
+			const { enqueue, calls } = fakeEnqueue();
+			const dropped: string[] = [];
+
+			const ids = await applyRenameListLinks(store, 'Cocina.md', 'Recetas/Cocina.md', buildUrl, enqueue, {
+				liveUrls: async () => new Set<string>(),
+				onDropped: (entry) => dropped.push(entry.id),
+			});
+
+			expect(ids).toEqual([]);
+			expect(calls).toEqual([]);
+			expect(store.get('Cocina.md')).toBeNull();
+			expect(store.get('Recetas/Cocina.md')).toBeNull();
+			expect(store.get('Otra.md')).not.toBeNull();
+			expect(dropped).toEqual(['Cocina.md']);
+		});
+
+		it('falla la comprobación: se reemite igualmente', async () => {
+			const store = await seeded();
+			const { enqueue, calls } = fakeEnqueue();
+
+			const ids = await applyRenameListLinks(store, 'Cocina.md', 'Recetas/Cocina.md', buildUrl, enqueue, {
+				liveUrls: async () => null,
+			});
+
+			expect(ids).toHaveLength(2);
+			expect(calls.map((change) => change.type)).toEqual(['unlink', 'link']);
+			expect(store.get('Recetas/Cocina.md')).not.toBeNull();
+		});
+
+		it('un rename de carpeta lee UNA vez por lista y descarta solo las quitadas', async () => {
+			const store = new NoteListLinkStore(memoryStorage());
+			await store.set('Dir/A.md', 'list-1', 'u-A', 'A');
+			await store.set('Dir/B.md', 'list-1', 'u-B', 'B');
+			const { enqueue, calls } = fakeEnqueue();
+			let reads = 0;
+
+			await applyRenameListLinks(store, 'Dir', 'Nuevo', buildUrl, enqueue, {
+				liveUrls: async () => {
+					reads += 1;
+					return new Set(['u-B']);
+				},
+			});
+
+			expect(reads).toBe(1);
+			expect(calls.map((change) => `${change.type}:${change.notePath}`)).toEqual([
+				'unlink:Dir/B.md',
+				'link:Nuevo/B.md',
+			]);
+			expect(store.get('Nuevo/A.md')).toBeNull();
+			expect(store.get('Nuevo/B.md')).not.toBeNull();
+		});
+
+		it('A→B→C con el link de B solo en la cola: se reemite y no se descarta', async () => {
+			const store = new NoteListLinkStore(memoryStorage());
+			await store.set('A.md', 'list-1', buildUrl('A.md'), 'A');
+			const { enqueue, calls } = fakeEnqueue();
+			const urlB = buildUrl('B.md');
+			const pending = [{ kind: 'listLink', type: 'link', listId: 'list-1', url: urlB }];
+
+			// Primer renombrado A→B: el servidor tiene A.
+			await applyRenameListLinks(store, 'A.md', 'B.md', buildUrl, enqueue, {
+				liveUrls: async (listId) => liveListUrls([buildUrl('A.md')], [], listId),
+			});
+			calls.length = 0;
+			// Segundo B→C: el servidor aún no tiene B, solo la cola.
+			const ids = await applyRenameListLinks(store, 'B.md', 'C.md', buildUrl, enqueue, {
+				liveUrls: async (listId) => liveListUrls([buildUrl('A.md')], pending, listId),
+			});
+
+			expect(ids).toHaveLength(2);
+			expect(calls.map((change) => `${change.type}:${change.url}`)).toEqual([
+				`unlink:${urlB}`,
+				`link:${buildUrl('C.md')}`,
+			]);
+			expect(store.get('C.md')).not.toBeNull();
+		});
+	});
+
+	describe('liveListUrls', () => {
+		it('un link pendiente de la lista cuenta; otra lista o un unlink no', () => {
+			const live = liveListUrls(
+				['srv'],
+				[
+					{ kind: 'listLink', type: 'link', listId: 'l1', url: 'pend' },
+					{ kind: 'listLink', type: 'link', listId: 'l2', url: 'otra' },
+					{ kind: 'listLink', type: 'unlink', listId: 'l1', url: 'baja' },
+					{ kind: 'create' },
+				],
+				'l1',
+			);
+			expect([...live].sort()).toEqual(['pend', 'srv']);
+		});
 	});
 
 	it('sin entradas bajo la ruta vieja, no encola nada', async () => {
