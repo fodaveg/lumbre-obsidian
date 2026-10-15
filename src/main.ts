@@ -2068,7 +2068,27 @@ export default class LumbrePlugin extends Plugin implements LumbreSettingsHost {
 					label: change.label,
 					excerpt: null,
 				}),
+			{
+				liveUrls: async (listId) => {
+					const read = await this.client.listLinks(listId);
+					if (!read.ok) {
+						this.logger.child('vault').warn(
+							'No se pudo confirmar el vínculo nota↔lista en Lumbre, se reemite igualmente',
+							{ listId, oldPath, newPath },
+						);
+						return null;
+					}
+					return new Set(read.value.map((link) => link.url));
+				},
+				onDropped: (entry) => {
+					this.logger.child('vault').info(
+						'Vínculo nota↔lista desvinculado desde Lumbre, no se reemite en el renombrado',
+						{ listId: entry.listId, oldPath, newPath },
+					);
+				},
+			},
 		);
+		this.notifyDataChange();
 		if (queuedIds.length === 0) return;
 
 		this.logger.child('vault').info('Vínculos nota↔lista reemitidos por un renombrado', {

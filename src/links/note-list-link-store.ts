@@ -230,6 +230,17 @@ export function orphansPastGrace(
 	});
 }
 
+/** Confirmación opcional contra el servidor de `applyRenameListLinks`. */
+export interface RenameConfirmOptions {
+	/**
+	 * Las urls vivas de una lista en el servidor, o `null` si no se pudo leer
+	 * (red, 401, 429, sin token). Quien lo inyecta registra el fallo.
+	 */
+	liveUrls?: (listId: string) => Promise<ReadonlySet<string> | null>;
+	/** Se llama por cada entrada descartada por haberse desvinculado desde Lumbre. */
+	onDropped?: (entry: NoteListLinkEntry) => void;
+}
+
 /**
  * Orquesta el reemitido de un renombrado: actualiza el registro local
  * PRIMERO y solo DESPUÉS encola los cambios en Lumbre. El orden importa: los
@@ -259,13 +270,23 @@ export function orphansPastGrace(
  * `enqueue` es quien encola de verdad (normalmente
  * `queue.enqueueListLink`); se inyecta para poder probar el solape sin la
  * cola real ni `obsidian`. Devuelve los ids de las operaciones encoladas.
+ *
+ * Confirmación contra el servidor (`options.liveUrls`): la caché local nunca se
+ * entera de un desvinculado hecho desde Lumbre, así que reemitir a ciegas lo
+ * resucitaría. Antes de encolar, por CADA lista implicada (una lectura por
+ * lista, no por nota) se pide el conjunto de urls vivas. Si la url VIEJA de una
+ * entrada ya no está, se desvinculó desde Lumbre: no se encola ni `unlink` ni
+ * `link`, la entrada sale de la caché y se avisa por `onDropped`. Si la lectura
+ * falla (`liveUrls` devuelve `null`) se reemite como siempre: perder un vínculo
+ * real es peor que resucitar uno quitado.
  */
 export async function applyRenameListLinks(
-	store: Pick<NoteListLinkStore, 'entriesUnder' | 'move' | 'get'>,
+	store: Pick<NoteListLinkStore, 'entriesUnder' | 'move' | 'get' | 'remove'>,
 	oldPath: string,
 	newPath: string,
 	buildUrl: (notePath: string) => string,
 	enqueue: (change: ListLinkChange) => Promise<{ id: string }>,
+	options: RenameConfirmOptions = {},
 ): Promise<string[]> {
 	const entries = store.entriesUnder(oldPath);
 	if (entries.length === 0) return [];
@@ -282,8 +303,28 @@ export async function applyRenameListLinks(
 	// habrá movido la nota otra vez y lo verá el chequeo de abajo.
 	await Promise.resolve();
 
+	// Notas cuyo vínculo ya no existe en Lumbre (por su ruta VIEJA y la nueva).
+	const dropped = new Set<string>();
+	if (options.liveUrls) {
+		const liveByList = new Map<string, ReadonlySet<string> | null>();
+		for (const entry of entries) {
+			if (!liveByList.has(entry.listId)) liveByList.set(entry.listId, await options.liveUrls(entry.listId));
+		}
+		for (const entry of entries) {
+			const to = movedNotePath(entry.id, oldPath, newPath);
+			if (to === null) continue;
+			const live = liveByList.get(entry.listId);
+			if (live === null || live === undefined || live.has(entry.url)) continue;
+			dropped.add(entry.id);
+			dropped.add(to);
+			if (store.get(to) !== null) await store.remove(to);
+			options.onDropped?.(entry);
+		}
+	}
+
 	const ids: string[] = [];
 	for (const change of changes) {
+		if (dropped.has(change.notePath)) continue;
 		if (change.type === 'link' && store.get(change.notePath) === null) {
 			// Superado por un renombrado posterior: la nota ya no está en la ruta
 			// que este `link` registraría, así que mandarlo sería darle a Lumbre un
