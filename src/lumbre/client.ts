@@ -1157,6 +1157,10 @@ export class LumbreClient {
 	 *
 	 * `raw` es para el único cuerpo que no es JSON: los bytes de un adjunto, con
 	 * sus propias cabeceras.
+	 *
+	 * Todo método que no sea GET ni HEAD viaja con `Content-Type: application/json`
+	 * y, sin cuerpo, con `'{}'`: SvelteKit 3 responde 403 a una petición mutativa
+	 * sin `Content-Type` (p. ej. `DELETE` de un adjunto o `POST /api/sync/flush`).
 	 */
 	private async send(
 		method: string,
@@ -1183,11 +1187,20 @@ export class LumbreClient {
 		}
 
 		const headers: Record<string, string> = { Authorization: `Bearer ${token}` };
-		if (body !== undefined) headers['Content-Type'] = 'application/json';
+		// SvelteKit 3 responde 403 a lo mutativo sin `Content-Type`: se fija siempre
+		// salvo en GET/HEAD, y `raw.headers` (adjuntos) puede sustituirlo.
+		const mutating = method !== 'GET' && method !== 'HEAD';
+		if (mutating || body !== undefined) headers['Content-Type'] = 'application/json';
 		Object.assign(headers, raw?.headers);
 
 		const payload =
-			raw !== undefined ? raw.body : body !== undefined ? JSON.stringify(body) : undefined;
+			raw !== undefined
+				? raw.body
+				: body !== undefined
+					? JSON.stringify(body)
+					: mutating
+						? '{}'
+						: undefined;
 
 		const startedAt = this.clock();
 		this.countRequest(method, path);

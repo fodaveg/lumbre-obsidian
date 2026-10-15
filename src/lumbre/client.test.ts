@@ -597,15 +597,28 @@ describe('LumbreClient.batch', () => {
 	});
 });
 
+describe('LumbreClient: Content-Type según el método', () => {
+	it('un GET sigue sin Content-Type ni cuerpo', async () => {
+		const { client, calls } = recordingClient([]);
+
+		await client.listTasks();
+
+		expect(calls[0]?.method).toBe('GET');
+		expect(calls[0]?.headers).toEqual({ Authorization: 'Bearer tok-123' });
+		expect(calls[0]?.body).toBeUndefined();
+	});
+});
+
 describe('LumbreClient.flush', () => {
-	it('pide POST a /api/sync/flush sin cuerpo', async () => {
+	it('pide POST a /api/sync/flush con Content-Type json y cuerpo vacío (SvelteKit 3 da 403 sin él)', async () => {
 		const { client, calls } = recordingClient({ ok: true });
 
 		await client.flush();
 
 		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/sync/flush');
 		expect(calls[0]?.method).toBe('POST');
-		expect(calls[0]?.body).toBeUndefined();
+		expect(calls[0]?.headers['Content-Type']).toBe('application/json');
+		expect(calls[0]?.body).toBe('{}');
 	});
 
 	it('comparte el flush en vuelo: dos llamadas a la vez son UNA petición', async () => {
@@ -1277,7 +1290,12 @@ describe('LumbreClient.deleteAttachment', () => {
 
 		expect(calls[0]?.url).toBe('https://app.lumbre.pro/api/attachments/att-1');
 		expect(calls[0]?.method).toBe('DELETE');
-		expect(calls[0]?.headers).toEqual({ Authorization: 'Bearer tok-123' });
+		// SvelteKit 3 responde 403 a una petición mutativa sin Content-Type.
+		expect(calls[0]?.headers).toEqual({
+			Authorization: 'Bearer tok-123',
+			'Content-Type': 'application/json',
+		});
+		expect(calls[0]?.body).toBe('{}');
 		expect(result).toEqual({ ok: true, value: undefined });
 	});
 
