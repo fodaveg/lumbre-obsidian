@@ -1,6 +1,6 @@
 # Estado
 
-- **Versión**: 0.1.17 (publicada para BRAT).
+- **Versión**: 0.1.18 (publicada para BRAT).
 - **Qué hay**: esqueleto del plugin, ajustes (origen + token), botón de prueba de conexión, gate
   `npm run check`, CI y workflow de release para BRAT con los tres assets sueltos.
 - **Qué hay (lote A)**: cliente HTTP completo (`listTasks`, `getTask`, `getTasksByIds`, `listLists`,
@@ -677,3 +677,4 @@ MAX_NOTES_LEN)`), así que el plugin decide el recorte ANTES de mandar nada. Si 
   que siga en la cola cuenta como vivo, y eso solo lleva a reemitir de más. Sin QA en Obsidian.
 - **`b59dc2f7`** (subtareas con fecha sueltas o duplicadas en el bloque) ya estaba resuelta por
   `7da5273` y salió en la 0.1.15.
+- **0.1.18**: mismo código que la 0.1.17; se relanzó el script de publicación y solo subió el número.
