@@ -25,9 +25,28 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      checks: read
     env:
       TAG: ${{ github.ref_name }}
     steps:
+      # Si el job `check` de ci.yml ya terminó en success sobre este mismo SHA, no se repite `npm run check`.
+      # Ante cualquier duda (sin run, fallido, error de consulta) ok=false y el gate corre como siempre.
+      - name: Buscar el check verde de CI para este commit
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          conclusion=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?check_name=check&filter=latest" \
+            --jq '[.check_runs[] | select(.app.slug == "github-actions")] | sort_by(.started_at) | last | .conclusion // ""' 2>/dev/null) || conclusion=""
+          if [ "$conclusion" = "success" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "ci.yml job 'check' already passed on $GITHUB_SHA: the repeated step is skipped"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "no green 'check' check-run for $GITHUB_SHA (got '${conclusion:-none}'): the gate runs here"
+          fi
+
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
         with:
@@ -35,11 +54,17 @@ jobs:
           cache: npm
       - run: npm ci
 
-      # El gate corre DENTRO del job de publicación a propósito: una corrida
-      # verde de ci.yml sobre el mismo commit es otro workflow con otro
-      # resultado, y nada de aquí puede depender de ella.
+      # El gate corre DENTRO del job de publicación a propósito, salvo que el paso
+      # anterior haya visto el job `check` de ci.yml en success sobre este mismo
+      # SHA: entonces no se repite. Si no lo ve, corre como siempre.
       - name: Gate
+        if: steps.ci.outputs.ok != 'true'
         run: npm run check
+
+      # `npm run check` termina con el build que deja main.js; sin gate, el build sigue.
+      - name: Build (gate omitido, CI en verde)
+        if: steps.ci.outputs.ok == 'true'
+        run: npm run build
 
       - name: Rechazar un tag que no sea la versión del manifest
         run: node scripts/verify-release.mjs --tag "$GITHUB_REF_NAME"

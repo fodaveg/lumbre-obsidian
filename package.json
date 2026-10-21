@@ -9,7 +9,7 @@
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc --noEmit --skipLibCheck && node esbuild.config.mjs production",
 		"lint": "eslint .",
-		"test": "vitest run",
+		"test": "vitest run --maxWorkers=1",
 		"verify:release": "node scripts/verify-release.mjs",
 		"install:dev": "node scripts/install-dev.mjs",
 		"check": "npm run lint && npm run test && npm run verify:release && npm run build",
